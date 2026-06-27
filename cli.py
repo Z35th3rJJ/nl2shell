@@ -1,4 +1,5 @@
 import os
+import shlex
 import subprocess
 
 from dotenv import load_dotenv
@@ -16,7 +17,30 @@ BOLD   = "\033[1m"
 RESET  = "\033[0m"
 
 
+def _try_cd(cmd: str) -> bool:
+    """若命令是 cd，直接在当前进程切换目录（子进程 cd 不影响父进程）。
+    返回 True 表示已处理，不需要再走 subprocess。"""
+    try:
+        parts = shlex.split(cmd)
+    except ValueError:
+        return False
+    if not parts or parts[0] != "cd":
+        return False
+    target = parts[1] if len(parts) > 1 else os.path.expanduser("~")
+    target = os.path.expanduser(target)
+    try:
+        os.chdir(target)
+        print(f"已切换到：{os.getcwd()}")
+    except FileNotFoundError:
+        print(f"{RED}cd: 目录不存在：{target}{RESET}")
+    except PermissionError:
+        print(f"{RED}cd: 权限不足：{target}{RESET}")
+    return True
+
+
 def run(cmd: str) -> None:
+    if _try_cd(cmd):
+        return
     subprocess.run(cmd, shell=True)
 
 
@@ -27,7 +51,8 @@ def main():
 
     while True:
         try:
-            user_input = input("\n你想做什么？> ").strip()
+            cwd = os.getcwd()
+            user_input = input(f"\n[{cwd}]\n你想做什么？> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n再见！")
             break
@@ -38,10 +63,13 @@ def main():
             print("再见！")
             break
 
-        cwd = os.getcwd()
         print("生成中...", end="\r")
 
-        cmd, explanation = engine.generate(user_input, cwd)
+        try:
+            cmd, explanation = engine.generate(user_input, cwd)
+        except Exception as e:
+            print(f"{RED}⚠  API 调用失败：{e}{RESET}")
+            continue
 
         if cmd.startswith("CANNOT_GENERATE:"):
             print(f"{YELLOW}⚠  {cmd}{RESET}")
