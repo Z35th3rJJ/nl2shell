@@ -1,4 +1,12 @@
+import re
 from .llm import chat
+
+
+def _strip_fences(text: str) -> str:
+    """剥除模型偶尔输出的代码围栏和反引号，只保留命令本身。"""
+    text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+    text = re.sub(r"\n?```$", "", text)
+    return text.strip("`").strip()
 
 _SYSTEM = """你是一个 Linux Shell 命令专家助手。用户用中文描述想要执行的操作，你输出两行内容：
 
@@ -27,8 +35,10 @@ class Engine:
 
         raw = chat(messages)
         lines = raw.strip().split("\n", 1)
-        cmd = lines[0].strip()
+        cmd = _strip_fences(lines[0].strip())
         explanation = lines[1].strip() if len(lines) > 1 else ""
 
-        self._history.append((user_input, cmd))
+        # 只有成功生成命令时才写入历史，失败信息不污染上下文
+        if not cmd.startswith("CANNOT_GENERATE:"):
+            self._history.append((user_input, cmd))
         return cmd, explanation
