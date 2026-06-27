@@ -41,7 +41,7 @@ def main():
         cwd = os.getcwd()
         print("生成中...", end="\r")
 
-        cmd = engine.generate(user_input, cwd)
+        cmd, explanation = engine.generate(user_input, cwd)
 
         if cmd.startswith("CANNOT_GENERATE:"):
             print(f"{YELLOW}⚠  {cmd}{RESET}")
@@ -53,6 +53,8 @@ def main():
         if risk == HIGH:
             print(f"\n{RED}{BOLD}【高危命令】{RESET}")
             print(f"  命令：{RED}{cmd}{RESET}")
+            if explanation:
+                print(f"  说明：{explanation}")
             print(f"  风险：{RED}{reason}{RESET}")
             confirm = input(f"\n{RED}确认执行请输入 yes（其他任意键取消）> {RESET}").strip()
             if confirm != "yes":
@@ -62,6 +64,8 @@ def main():
         elif risk == WARN:
             print(f"\n{YELLOW}【注意】{reason}{RESET}")
             print(f"  命令：{YELLOW}{cmd}{RESET}")
+            if explanation:
+                print(f"  说明：{explanation}")
             confirm = input("执行？(y/n) > ").strip().lower()
             if confirm != "y":
                 print("已取消。")
@@ -69,6 +73,8 @@ def main():
 
         else:
             print(f"  命令：{GREEN}{cmd}{RESET}")
+            if explanation:
+                print(f"  说明：{explanation}")
             confirm = input("执行？(y/n) > ").strip().lower()
             if confirm != "y":
                 print("已跳过。")
