@@ -17,11 +17,7 @@ RESET  = "\033[0m"
 
 
 def run(cmd: str) -> None:
-    result = subprocess.run(cmd, shell=True, text=True, capture_output=True)
-    if result.stdout:
-        print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="")
+    subprocess.run(cmd, shell=True)
 
 
 def main():
