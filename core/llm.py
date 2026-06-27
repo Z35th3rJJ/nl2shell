@@ -1,4 +1,5 @@
 import os
+import httpx
 from openai import OpenAI
 
 
@@ -6,6 +7,7 @@ def chat(messages: list[dict]) -> str:
     client = OpenAI(
         api_key=os.environ["DEEPSEEK_API_KEY"],
         base_url="https://api.deepseek.com",
+        http_client=httpx.Client(trust_env=False),
     )
     resp = client.chat.completions.create(
         model="deepseek-chat",
