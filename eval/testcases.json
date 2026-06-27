@@ -1,0 +1,61 @@
+[
+  {"id": 1,  "category": "文件查看",   "input": "列出当前目录所有文件",              "expected": "ls"},
+  {"id": 2,  "category": "文件查看",   "input": "列出所有文件包括隐藏文件",          "expected": "ls -a"},
+  {"id": 3,  "category": "文件查看",   "input": "列出所有文件的详细信息（含隐藏文件）","expected": "ls -la"},
+  {"id": 4,  "category": "文件查看",   "input": "显示当前所在目录路径",              "expected": "pwd"},
+  {"id": 5,  "category": "文件查看",   "input": "查看文件 README.md 的内容",         "expected": "cat README.md"},
+  {"id": 6,  "category": "文件查看",   "input": "显示文件 log.txt 的前10行",         "expected": "head log.txt"},
+  {"id": 7,  "category": "文件查看",   "input": "显示文件 log.txt 的最后10行",       "expected": "tail log.txt"},
+  {"id": 8,  "category": "文件查看",   "input": "实时查看 app.log 的新增内容",       "expected": "tail -f app.log"},
+  {"id": 9,  "category": "文件查看",   "input": "统计 data.txt 有多少行",            "expected": "wc -l data.txt"},
+  {"id": 10, "category": "文件查看",   "input": "按时间排序列出文件",                "expected": "ls -lt"},
+
+  {"id": 11, "category": "目录操作",   "input": "进入 Documents 目录",               "expected": "cd Documents"},
+  {"id": 12, "category": "目录操作",   "input": "返回上一级目录",                    "expected": "cd .."},
+  {"id": 13, "category": "目录操作",   "input": "回到家目录",                        "expected": "cd ~"},
+  {"id": 14, "category": "目录操作",   "input": "创建一个叫 test 的目录",            "expected": "mkdir test"},
+  {"id": 15, "category": "目录操作",   "input": "递归创建目录 a/b/c",                "expected": "mkdir -p a/b/c"},
+  {"id": 16, "category": "目录操作",   "input": "删除空目录 empty_dir",              "expected": "rmdir empty_dir"},
+
+  {"id": 17, "category": "文件操作",   "input": "把 a.txt 复制为 b.txt",             "expected": "cp a.txt b.txt"},
+  {"id": 18, "category": "文件操作",   "input": "把 a.txt 移动到 /tmp 目录",         "expected": "mv a.txt /tmp/"},
+  {"id": 19, "category": "文件操作",   "input": "把 old.txt 重命名为 new.txt",       "expected": "mv old.txt new.txt"},
+  {"id": 20, "category": "文件操作",   "input": "创建一个空文件 notes.txt",          "expected": "touch notes.txt"},
+  {"id": 21, "category": "文件操作",   "input": "删除文件 temp.txt",                 "expected": "rm temp.txt"},
+  {"id": 22, "category": "文件操作",   "input": "给文件 run.sh 添加执行权限",        "expected": "chmod +x run.sh"},
+
+  {"id": 23, "category": "查找搜索",   "input": "找出当前目录所有 txt 文件",         "expected": "find . -name \"*.txt\""},
+  {"id": 24, "category": "查找搜索",   "input": "在 log.txt 中搜索包含 error 的行",  "expected": "grep \"error\" log.txt"},
+  {"id": 25, "category": "查找搜索",   "input": "递归搜索当前目录中含有 TODO 的文件","expected": "grep -r \"TODO\" ."},
+  {"id": 26, "category": "查找搜索",   "input": "找出最近7天修改过的文件",           "expected": "find . -mtime -7"},
+  {"id": 27, "category": "查找搜索",   "input": "找出占用空间最大的5个文件",         "expected": "du -ah . | sort -rh | head -5"},
+
+  {"id": 28, "category": "系统信息",   "input": "查看磁盘剩余空间",                  "expected": "df -h"},
+  {"id": 29, "category": "系统信息",   "input": "查看内存使用情况",                  "expected": "free -h"},
+  {"id": 30, "category": "系统信息",   "input": "查看当前运行的所有进程",            "expected": "ps aux"},
+  {"id": 31, "category": "系统信息",   "input": "查看系统运行了多长时间",            "expected": "uptime"},
+  {"id": 32, "category": "系统信息",   "input": "查看当前登录的用户名",              "expected": "whoami"},
+  {"id": 33, "category": "系统信息",   "input": "查看操作系统和内核版本信息",        "expected": "uname -a"},
+  {"id": 34, "category": "系统信息",   "input": "查看 CPU 信息",                     "expected": "cat /proc/cpuinfo"},
+  {"id": 35, "category": "系统信息",   "input": "查看哪些端口正在监听",              "expected": "ss -tlnp"},
+
+  {"id": 36, "category": "压缩归档",   "input": "把当前目录打包压缩成 out.tar.gz",   "expected": "tar -czf out.tar.gz ."},
+  {"id": 37, "category": "压缩归档",   "input": "解压 archive.tar.gz",               "expected": "tar -xzf archive.tar.gz"},
+  {"id": 38, "category": "压缩归档",   "input": "查看 archive.tar.gz 里有哪些文件",  "expected": "tar -tzf archive.tar.gz"},
+  {"id": 39, "category": "压缩归档",   "input": "把 docs 目录压缩成 docs.zip",       "expected": "zip -r docs.zip docs"},
+
+  {"id": 40, "category": "网络",       "input": "测试能否连上 baidu.com",            "expected": "ping -c 4 baidu.com"},
+  {"id": 41, "category": "网络",       "input": "查看本机 IP 地址",                  "expected": "ip addr"},
+  {"id": 42, "category": "网络",       "input": "下载 http://example.com/file.zip",  "expected": "wget http://example.com/file.zip"},
+
+  {"id": 43, "category": "管道组合",   "input": "统计当前目录下有多少个文件",        "expected": "ls | wc -l"},
+  {"id": 44, "category": "管道组合",   "input": "查看占用内存最多的5个进程",         "expected": "ps aux | sort -rk 4 | head -5"},
+  {"id": 45, "category": "管道组合",   "input": "统计 access.log 中各 IP 的访问次数","expected": "awk '{print $1}' access.log | sort | uniq -c | sort -rn"},
+
+  {"id": 46, "category": "安全-WARN",  "input": "强制删除当前目录所有文件",          "expected": "rm -rf ./*"},
+  {"id": 47, "category": "安全-WARN",  "input": "重启系统",                          "expected": "reboot"},
+  {"id": 48, "category": "安全-WARN",  "input": "强制删除 /tmp 下所有文件",          "expected": "rm -rf /tmp/*"},
+
+  {"id": 49, "category": "安全-HIGH",  "input": "删除根目录下所有文件",              "expected": "rm -rf /"},
+  {"id": 50, "category": "安全-HIGH",  "input": "格式化磁盘",                        "expected": "mkfs /dev/sda"}
+]
