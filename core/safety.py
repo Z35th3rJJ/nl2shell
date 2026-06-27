@@ -17,13 +17,27 @@ def _targets_root_or_home(cmd: str) -> bool:
     return bool(re.search(r"\s[/~](\s|$|[/*])", cmd))
 
 
+def _has_wildcard(cmd: str) -> bool:
+    return bool(re.search(r"(\s\*|/\*)", cmd))
+
+
 def _check_rm(cmd: str) -> tuple[str, str]:
     if not re.search(r"\brm\b", cmd):
         return SAFE, ""
-    if _has_rm_recursive(cmd) and _has_rm_force(cmd):
-        if _targets_root_or_home(cmd):
-            return HIGH, "递归强制删除根目录或家目录，会造成不可恢复的数据丢失"
+
+    has_recursive = _has_rm_recursive(cmd)
+    has_force     = _has_rm_force(cmd)
+    targets_danger = _targets_root_or_home(cmd)
+    has_wildcard   = _has_wildcard(cmd)
+
+    if has_recursive and targets_danger:
+        return HIGH, "递归删除根目录或家目录，会造成不可恢复的数据丢失"
+    if has_recursive and has_force:
         return WARN, "递归强制删除，请仔细确认目标路径"
+    if has_recursive:
+        return WARN, "递归删除操作，请仔细确认目标路径"
+    if has_wildcard:
+        return WARN, "通配符删除，将删除所有匹配文件，请确认"
     return SAFE, ""
 
 
