@@ -10,7 +10,7 @@ def chat(messages: list[dict]) -> str:
         http_client=httpx.Client(trust_env=False),
     )
     resp = client.chat.completions.create(
-        model="deepseek-chat",
+        model="deepseek-v4-flash",
         messages=messages,
         temperature=0,
     )
