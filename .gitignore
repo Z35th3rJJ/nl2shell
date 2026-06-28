@@ -23,4 +23,4 @@ __pycache__/
 .claude/
 
 # 评测结果（本地生成，不入库）
-eval/eval_result.json
+eval/eval_result*.json

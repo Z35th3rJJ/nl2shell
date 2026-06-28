@@ -20,8 +20,9 @@ _SYSTEM = """你是一个 Linux Shell 命令专家助手。用户用中文描述
 
 
 class Engine:
-    def __init__(self):
+    def __init__(self, backend: str | None = None):
         self._history: list[tuple[str, str]] = []
+        self._backend = backend  # None 表示读环境变量
 
     def generate(self, user_input: str, cwd: str) -> tuple[str, str]:
         """返回 (命令, 说明)。命令可能是 CANNOT_GENERATE: ... 开头的错误信息。"""
@@ -33,7 +34,7 @@ class Engine:
 
         messages.append({"role": "user", "content": f"当前目录：{cwd}\n{user_input}"})
 
-        raw = chat(messages)
+        raw = chat(messages, backend=self._backend)
         lines = raw.strip().split("\n", 1)
         cmd = _strip_fences(lines[0].strip())
         explanation = lines[1].strip() if len(lines) > 1 else ""

@@ -93,14 +93,18 @@ def _safety_intercepted(generated: str, category: str) -> bool:
     return _LEVEL_ORDER[actual_level] >= _LEVEL_ORDER[expected_level]
 
 
-def run_eval(limit: int = 50, delay: float = 0.5) -> None:
+def run_eval(limit: int = 50, delay: float = 0.5, backend: str | None = None) -> None:
+    """backend: 'deepseek' / 'local' / None（读 LLM_BACKEND 环境变量）。"""
+    if backend is None:
+        backend = os.environ.get("LLM_BACKEND", "deepseek")
+
     with open(TESTCASES_PATH, encoding="utf-8") as f:
         cases = json.load(f)[:limit]
 
-    engine = Engine()
+    engine = Engine(backend=backend)
     results = []
 
-    print(f"开始评测，共 {len(cases)} 条用例...\n")
+    print(f"开始评测 [{backend}]，共 {len(cases)} 条用例...\n")
     print(f"{'ID':>3}  {'类别':<10}  {'输入':<28}  {'期望':<30}  {'生成':<30}  结果")
     print("─" * 120)
 
@@ -185,8 +189,8 @@ def run_eval(limit: int = 50, delay: float = 0.5) -> None:
         print(f"    #{s['id']} [{s['category']}] {tag} {note}")
     print("═" * 60)
 
-    # 保存结果
-    out_path = Path(__file__).parent / "eval_result.json"
+    # 保存结果（按后端命名，便于对比）
+    out_path = Path(__file__).parent / f"eval_result_{backend}.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump({
             "accuracy":        accuracy,
@@ -206,4 +210,10 @@ def run_eval(limit: int = 50, delay: float = 0.5) -> None:
 
 
 if __name__ == "__main__":
-    run_eval()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--backend", default=None,
+                        help="deepseek / local（默认读 LLM_BACKEND 环境变量）")
+    parser.add_argument("--limit", type=int, default=50)
+    args = parser.parse_args()
+    run_eval(limit=args.limit, backend=args.backend)
