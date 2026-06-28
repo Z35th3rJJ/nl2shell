@@ -21,3 +21,6 @@ __pycache__/
 
 # Claude 配置
 .claude/
+
+# 评测结果（本地生成，不入库）
+eval/eval_result.json
