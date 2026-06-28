@@ -72,6 +72,19 @@ def test_high(cmd):
     assert level == HIGH, f"期望 HIGH，实际 {level}：{cmd}"
 
 
+# ── find -delete / find -exec rm：破坏力等同 rm -rf，应拦截 ──
+@pytest.mark.parametrize("cmd", [
+    "find . -mindepth 1 -delete",
+    "find /tmp -mindepth 1 -delete",
+    "find . -name '*.log' -delete",
+    "find . -type f -exec rm {} \\;",
+    "find . -exec rm -f {} +",
+])
+def test_find_delete_warn(cmd):
+    level, _ = check(cmd)
+    assert level == WARN, f"期望 WARN，实际 {level}：{cmd}"
+
+
 # ── 确保说明文字不为空 ────────────────────────────────────────
 @pytest.mark.parametrize("cmd", [
     "rm -rf /",

@@ -51,6 +51,9 @@ _RULES = [
     (r"kill\s+-9\s+-1",                  HIGH, "强制终止所有进程，系统将立即崩溃"),
     (r"\|\s*(bash|sh|zsh|fish)\b",       HIGH, "将内容直接交给 Shell 执行，存在代码注入风险"),
     (r"truncate\s+.*-s\s+0\s+/",         HIGH, "清空系统关键文件，可能导致系统损坏"),
+    # find -delete / find -exec rm：破坏力等同 rm -rf，需拦截
+    (r"\bfind\b.*-delete\b",             WARN, "find -delete 将递归删除匹配文件，请确认目标路径"),
+    (r"\bfind\b.*-exec\s+rm\b",          WARN, "find -exec rm 将批量删除文件，请确认目标路径"),
     (r"(shutdown|reboot|halt|poweroff)",  WARN, "系统电源操作，将影响所有正在运行的程序"),
     (r"sudo\s+rm",                        WARN, "以管理员权限删除文件，请确认目标路径"),
 ]
