@@ -4,7 +4,7 @@ import subprocess
 
 from dotenv import load_dotenv
 
-from core.engine import Engine
+from core.engine import Engine, classify_output, CLARIFY_PREFIX
 from core.safety import check, HIGH, WARN
 
 load_dotenv()
@@ -65,13 +65,45 @@ def main():
 
         print("生成中...", end="\r")
 
-        try:
-            cmd, explanation = engine.generate(user_input, cwd)
-        except Exception as e:
-            print(f"{RED}⚠  API 调用失败：{e}{RESET}")
+        # ── 澄清循环（最多 2 轮） ──────────────────────────────────
+        followups: list[tuple[str, str]] = []
+        MAX_CLARIFY = 2
+        cmd = explanation = ""
+        for _ in range(MAX_CLARIFY + 1):
+            try:
+                cmd, explanation = engine.generate(user_input, cwd, followups=followups)
+            except Exception as e:
+                print(f"{RED}⚠  API 调用失败：{e}{RESET}")
+                cmd = ""
+                break
+
+            kind = classify_output(cmd)
+
+            if kind == "clarify":
+                question = cmd[len(CLARIFY_PREFIX):].strip()
+                print(f"\n{YELLOW}❓ {question}{RESET}")
+                try:
+                    ans = input("你的回答（直接回车取消）> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    ans = ""
+                if not ans or ans.lower() in ("exit", "退出"):
+                    print("已取消。")
+                    cmd = ""
+                    break
+                followups.append((cmd, ans))
+                print("生成中...", end="\r")
+                continue  # 带上回答再生成
+
+            break  # command 或 cannot，退出澄清循环
+        else:
+            # 超出澄清轮数仍未明确
+            print(f"{YELLOW}⚠  无法明确你的意图，请换种说法重新描述。{RESET}")
             continue
 
-        if cmd.startswith("CANNOT_GENERATE:"):
+        if not cmd:
+            continue
+
+        if classify_output(cmd) == "cannot":
             print(f"{YELLOW}⚠  {cmd}{RESET}")
             continue
 
