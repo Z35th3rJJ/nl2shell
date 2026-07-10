@@ -31,3 +31,12 @@ def test_classify_output(text: str, expected: str):
 def test_prefix_constants():
     assert CLARIFY_PREFIX          == "CLARIFY:"
     assert CANNOT_GENERATE_PREFIX  == "CANNOT_GENERATE:"
+
+
+def test_remember_adds_short_term_context():
+    from core.engine import Engine
+
+    engine = Engine(ssh_hosts=[])
+    engine.remember("列文件", "ls")
+
+    assert engine._history == [("列文件", "ls")]

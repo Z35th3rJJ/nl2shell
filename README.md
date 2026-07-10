@@ -14,12 +14,16 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 3. 配置 API Key
+# 3. 配置模型与 Bash
 cp .env.example .env
-# 编辑 .env，填入你的 DeepSeek API Key
+# 云端模式：填入 DEEPSEEK_API_KEY
+# 本地模式：安装 Ollama，并在 .env 设置 LLM_BACKEND=local
 
-# 4. 运行
+# 4. 运行（默认每条命令确认）
 python3 cli.py
+
+# 自动模式：仅自动执行 SAFE 命令，WARN/HIGH 一律跳过并记入 history
+python3 cli.py --auto
 ```
 
 ## 使用示例
@@ -95,6 +99,9 @@ python3 eval/run_eval.py --backend local
 
 # 云端 vs 本地对比报告
 python3 eval/compare.py
+
+# 实际执行评测中的 SAFE 命令（WARN/HIGH 始终不执行）
+python3 eval/run_eval.py --backend local --execute-safe
 ```
 
 ## 切换到本地模型（可选）
@@ -102,7 +109,25 @@ python3 eval/compare.py
 在 `.env` 中配置：
 
 ```
+ollama pull qwen2.5-coder:1.5b
+
 LLM_BACKEND=local
-LOCAL_BASE_URL=http://192.168.x.x:11434/v1   # Windows 局域网 IP（跑 Ollama）
-LOCAL_MODEL=qwen2.5-coder:7b-instruct
+LOCAL_BASE_URL=http://localhost:11434/v1
+LOCAL_MODEL=qwen2.5-coder:1.5b
+```
+
+`qwen2.5-coder:1.5b` 是适合笔记本优先验证的小模型；也可把 `LOCAL_MODEL` 改为已安装的其他 Ollama 模型。Windows 上项目执行的是 Linux/Bash 命令，请确保 Git Bash 或 WSL 的 Bash 可用；若不在 PATH 中，可在 `.env` 配置：
+
+```
+BASH_PATH=C:\Program Files\Git\bin\bash.exe
+```
+
+## 历史与 SSH
+
+每次生成后的最终状态都会写入用户目录的 `~/.nl2shell/history.jsonl`，包含输入、命令、风险等级、执行结果和错误摘要。CLI 内输入 `history` 可查看最近 20 条，输入 `history 50` 可查看最近 50 条。
+
+程序只读取标准 `~/.ssh/config` 中的 `Host` 别名，帮助模型生成 `ssh <别名>`；私钥仍由 OpenSSH/ssh-agent 使用，程序不会读取或保存私钥。SSH 配置文件不在默认位置时，可设置：
+
+```
+SSH_CONFIG_PATH=~/.ssh/config
 ```

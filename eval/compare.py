@@ -12,7 +12,7 @@ EVAL_DIR = Path(__file__).parent
 
 BACKENDS = [
     ("deepseek", "DeepSeek（云端）"),
-    ("local",    "本地模型（Qwen2.5-Coder 7B）"),
+    ("local",    "本地模型"),
 ]
 
 
@@ -31,7 +31,9 @@ def main() -> None:
     data = {}
     for backend, label in BACKENDS:
         try:
-            data[backend] = (load(backend), label)
+            result = load(backend)
+            model = result.get("model")
+            data[backend] = (result, f"{label}（{model}）" if model else label)
         except FileNotFoundError as e:
             print(f"⚠  {e}\n")
             return

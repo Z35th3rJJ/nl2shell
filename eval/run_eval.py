@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from core.engine import Engine
+from core.execution import BashExecutor, bash_unavailable_message
 from core.safety import check, HIGH, WARN, SAFE
 
 TESTCASES_PATH = Path(__file__).parent / "testcases.json"
@@ -93,7 +94,12 @@ def _safety_intercepted(generated: str, category: str) -> bool:
     return _LEVEL_ORDER[actual_level] >= _LEVEL_ORDER[expected_level]
 
 
-def run_eval(limit: int = 50, delay: float = 0.5, backend: str | None = None) -> None:
+def run_eval(
+    limit: int = 50,
+    delay: float = 0.5,
+    backend: str | None = None,
+    execute_safe: bool = False,
+) -> None:
     """backend: 'deepseek' / 'local' / None（读 LLM_BACKEND 环境变量）。"""
     if backend is None:
         backend = os.environ.get("LLM_BACKEND", "deepseek")
@@ -102,6 +108,9 @@ def run_eval(limit: int = 50, delay: float = 0.5, backend: str | None = None) ->
         cases = json.load(f)[:limit]
 
     engine = Engine(backend=backend)
+    executor = BashExecutor() if execute_safe else None
+    if executor and not executor.is_available():
+        raise RuntimeError(bash_unavailable_message())
     results = []
 
     print(f"开始评测 [{backend}]，共 {len(cases)} 条用例...\n")
@@ -123,6 +132,23 @@ def run_eval(limit: int = 50, delay: float = 0.5, backend: str | None = None) ->
         strict_correct = _is_strict(cmd, expected)
         risk, _        = check(cmd)
 
+        execution = {"executed": False, "status": "not_requested"}
+        if execute_safe and risk == SAFE:
+            try:
+                # 批量评测不能被 tail -f 等持续命令卡住。
+                result = executor.execute(cmd, timeout_seconds=5)
+                execution = {
+                    "executed": True,
+                    "status": "executed",
+                    "exit_code": result.exit_code,
+                    "duration_seconds": result.duration_seconds,
+                    "stderr": result.stderr.strip()[:500],
+                }
+            except Exception as e:
+                execution = {"executed": True, "status": "execution_error", "error": str(e)}
+        elif execute_safe:
+            execution = {"executed": False, "status": "blocked_by_safety"}
+
         results.append({
             "id":             cid,
             "category":       category,
@@ -132,6 +158,7 @@ def run_eval(limit: int = 50, delay: float = 0.5, backend: str | None = None) ->
             "correct":        correct,        # 语义等价口径
             "strict_correct": strict_correct, # 严格匹配口径
             "risk":           risk,
+            "execution":      execution,
         })
 
         mark = "✅" if correct else "❌"
@@ -193,6 +220,12 @@ def run_eval(limit: int = 50, delay: float = 0.5, backend: str | None = None) ->
     out_path = Path(__file__).parent / f"eval_result_{backend}.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump({
+            "backend":         backend,
+            "model":           os.environ.get(
+                "LOCAL_MODEL" if backend == "local" else "DEEPSEEK_MODEL",
+                "qwen2.5-coder:1.5b" if backend == "local" else "deepseek-v4-flash",
+            ),
+            "execute_safe":    execute_safe,
             "accuracy":        accuracy,
             "strict_accuracy": strict_accuracy,
             "total":           total,
@@ -215,5 +248,7 @@ if __name__ == "__main__":
     parser.add_argument("--backend", default=None,
                         help="deepseek / local（默认读 LLM_BACKEND 环境变量）")
     parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--execute-safe", action="store_true",
+                        help="实际执行评测中的 SAFE 命令；WARN/HIGH 始终跳过")
     args = parser.parse_args()
-    run_eval(limit=args.limit, backend=args.backend)
+    run_eval(limit=args.limit, backend=args.backend, execute_safe=args.execute_safe)

@@ -1,5 +1,6 @@
 import re
 from .llm import chat
+from .ssh_config import load_ssh_hosts
 
 # 模型输出前缀常量（供 cli 和测试复用）
 CANNOT_GENERATE_PREFIX = "CANNOT_GENERATE:"
@@ -43,9 +44,14 @@ CANNOT_GENERATE: <简短原因>
 
 
 class Engine:
-    def __init__(self, backend: str | None = None):
+    def __init__(self, backend: str | None = None, ssh_hosts: list[str] | None = None):
         self._history: list[tuple[str, str]] = []
         self._backend = backend  # None 表示读环境变量
+        self._ssh_hosts = load_ssh_hosts() if ssh_hosts is None else ssh_hosts
+
+    def remember(self, user_input: str, command: str) -> None:
+        """把已完成生成的命令加入短期模型上下文。"""
+        self._history.append((user_input, command))
 
     def generate(
         self,
@@ -58,7 +64,10 @@ class Engine:
         followups: 本轮澄清对话的 [(assistant的CLARIFY串, 用户回答), ...]，
                    不为空时追加在当前 user 消息之后，让模型带上下文再生成。
         """
-        messages = [{"role": "system", "content": _SYSTEM}]
+        system = _SYSTEM
+        if self._ssh_hosts:
+            system += "\n可用 SSH Host 别名：" + ", ".join(self._ssh_hosts)
+        messages = [{"role": "system", "content": system}]
 
         for past_input, past_cmd in self._history[-3:]:
             messages.append({"role": "user", "content": past_input})
@@ -76,9 +85,5 @@ class Engine:
         lines = raw.strip().split("\n", 1)
         first = _strip_fences(lines[0].strip())
         rest  = lines[1].strip() if len(lines) > 1 else ""
-
-        # CLARIFY / CANNOT 不写入长期历史，只有成功命令才写入
-        if classify_output(first) == "command":
-            self._history.append((user_input, first))
 
         return first, rest
