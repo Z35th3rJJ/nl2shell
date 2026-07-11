@@ -8,11 +8,12 @@ from core.engine import Engine, classify_output, CLARIFY_PREFIX
 from core.execution import BashExecutor, bash_unavailable_message, try_change_directory
 from core.history import HistoryStore
 from core.impact import analyze
-from core.policy import MANUAL, POLICIES, evaluate
+from core.policy import evaluate
 from core.safety import check, HIGH, WARN, SAFE
+from core.settings import ENV_PATH, choose_runtime_settings, load_settings
 from core.verification import verify
 
-load_dotenv()
+load_dotenv(ENV_PATH)
 
 RED, YELLOW, GREEN, BOLD, RESET = "\033[91m", "\033[93m", "\033[92m", "\033[1m", "\033[0m"
 
@@ -131,7 +132,20 @@ def execute_agent(engine: Engine, executor: BashExecutor | None, history: Histor
     engine.remember(user_input, joined)
 
 
-def main(auto: bool = False, policy: str = MANUAL, dry_run: bool = False, agent: bool = False):
+def main():
+    try:
+        settings = load_settings()
+    except ValueError as error:
+        print(f"{RED}配置错误：{error}{RESET}")
+        return
+    selected = choose_runtime_settings(settings)
+    if selected is None:
+        print("已退出。")
+        return
+    auto = selected.auto_execute
+    policy = selected.policy
+    dry_run = selected.dry_run
+    agent = selected.agent_mode
     executor = BashExecutor()
     if not dry_run and not executor.is_available():
         print(f"{RED}错误：{bash_unavailable_message()}{RESET}")
@@ -221,10 +235,6 @@ def main(auto: bool = False, policy: str = MANUAL, dry_run: bool = False, agent:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--auto", action="store_true", help="仅执行策略允许且 SAFE 的命令")
-    parser.add_argument("--policy", choices=POLICIES, default=MANUAL)
-    parser.add_argument("--dry-run", action="store_true", help="只分析，不调用 Bash")
-    parser.add_argument("--agent", action="store_true", help="启用最多三步的结构化任务计划")
-    args = parser.parse_args()
-    main(auto=args.auto, policy=args.policy, dry_run=args.dry_run, agent=args.agent)
+    parser = argparse.ArgumentParser(description="智能 Shell 助手：运行模式在启动菜单中配置")
+    parser.parse_args()
+    main()

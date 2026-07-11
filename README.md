@@ -19,17 +19,11 @@ cp .env.example .env
 # 云端模式：填入 DEEPSEEK_API_KEY
 # 本地模式：安装 Ollama，并在 .env 设置 LLM_BACKEND=local
 
-# 4. 运行（默认每条命令确认）
+# 4. 运行（模式由 .env 中的 AGENT_MODE / EXECUTION_POLICY / DRY_RUN 配置）
 python3 cli.py
 
-# 自动模式：仅自动执行 SAFE 命令，WARN/HIGH 一律跳过并记入 history
-python3 cli.py --auto
-
-# 安全可控 Agent：生成最多三步计划，按工作目录策略预演，不执行 Bash
-python3 cli.py --agent --policy workspace --dry-run
-
-# 在工作目录内执行已识别的非删除操作；删除、网络、提权和未知命令仍不会自动执行
-python3 cli.py --agent --policy workspace --auto
+# 启动后选择沿用配置或在菜单中一次性调整运行模式
+python3 cli.py
 ```
 
 ## 使用示例
@@ -139,6 +133,17 @@ SSH_CONFIG_PATH=~/.ssh/config
 ```
 
 ## 安全可控 Agent
+
+推荐直接在 `.env` 中设置运行模式，之后只运行 `python cli.py`：
+
+```env
+AGENT_MODE=true
+EXECUTION_POLICY=workspace
+DRY_RUN=true
+AUTO_EXECUTE=false
+```
+
+启动后会显示当前配置，可选择“直接启动”或“本次调整”。本次调整默认不保存，只有明确确认后才会更新 `.env` 的四个运行模式字段。答辩时需要真实执行时，可在菜单中关闭 Dry-run；自动执行则在菜单中开启。
 
 `--agent` 模式将一个任务拆为最多三步。每一步包含命令、预期结果和只读验证命令，并在执行后验证结果；验证失败时只生成一次修复建议，绝不自动执行修复。
 
