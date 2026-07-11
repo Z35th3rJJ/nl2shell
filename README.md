@@ -24,6 +24,12 @@ python3 cli.py
 
 # 自动模式：仅自动执行 SAFE 命令，WARN/HIGH 一律跳过并记入 history
 python3 cli.py --auto
+
+# 安全可控 Agent：生成最多三步计划，按工作目录策略预演，不执行 Bash
+python3 cli.py --agent --policy workspace --dry-run
+
+# 在工作目录内执行已识别的非删除操作；删除、网络、提权和未知命令仍不会自动执行
+python3 cli.py --agent --policy workspace --auto
 ```
 
 ## 使用示例
@@ -131,3 +137,19 @@ BASH_PATH=C:\Program Files\Git\bin\bash.exe
 ```
 SSH_CONFIG_PATH=~/.ssh/config
 ```
+
+## 安全可控 Agent
+
+`--agent` 模式将一个任务拆为最多三步。每一步包含命令、预期结果和只读验证命令，并在执行后验证结果；验证失败时只生成一次修复建议，绝不自动执行修复。
+
+执行策略如下：
+
+| 策略 | 行为 |
+| --- | --- |
+| `read-only` | 只允许已识别的查询命令 |
+| `workspace` | 只允许当前工作目录内的已识别操作；删除仍需人工确认 |
+| `manual` | 保留人工确认；高危命令仍须输入 `yes` |
+
+`--dry-run` 会展示命令影响、策略结论和验证方案，但不会调用 Bash。包含管道、重定向、Shell 展开或未知程序的命令会按保守规则标为未知，在受控策略下被阻止。
+
+评测结果除命令准确率和危险命令拦截率外，还会在 `--execute-safe` 时输出 SAFE 命令执行成功率；Agent 模式的 history 同时保存策略、影响标签、步骤验证结果和修复建议摘要，供答辩审计分析。

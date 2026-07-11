@@ -1,6 +1,7 @@
 import re
 from .llm import chat
 from .ssh_config import load_ssh_hosts
+from .task_plan import TaskPlan, parse_task_plan
 
 # 模型输出前缀常量（供 cli 和测试复用）
 CANNOT_GENERATE_PREFIX = "CANNOT_GENERATE:"
@@ -41,6 +42,14 @@ CANNOT_GENERATE: <简短原因>
 - 只有在「不追问就无法选择正确命令」时才使用 CLARIFY，且每次只问一个问题
 - 我会告诉你当前目录，这只是上下文参考，不要把当前目录路径作为参数附加到命令里
 - 若需要多条命令，用 && 连接写在第一行"""
+
+_AGENT_SYSTEM = """你是安全可控 Linux Shell Agent。把用户任务拆成最多 3 个按顺序执行的步骤，只输出 JSON：
+{"steps":[{"command":"...","explanation":"中文说明","expected":"预期结果","verification":"只读验证命令"}]}
+规则：
+- command 是 Bash 命令；每一步都必须独立可执行。
+- verification 只能是 ls、test、cat、grep、head、tail、wc、stat 等只读命令；不确定时用空字符串。
+- 不生成 sudo、网络下载、破坏性系统命令；必要时让 command 为空并在 explanation 说明不能执行。
+- 不使用 Markdown 代码围栏。"""
 
 
 class Engine:
@@ -87,3 +96,21 @@ class Engine:
         rest  = lines[1].strip() if len(lines) > 1 else ""
 
         return first, rest
+
+    def generate_task_plan(self, user_input: str, cwd: str) -> TaskPlan:
+        """生成结构化任务计划；旧两行命令输出会自动降级为单步计划。"""
+        system = _AGENT_SYSTEM
+        if self._ssh_hosts:
+            system += "\n可用 SSH Host 别名：" + ", ".join(self._ssh_hosts)
+        raw = chat([
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"当前目录：{cwd}\n{user_input}"},
+        ], backend=self._backend)
+        return parse_task_plan(raw)
+
+    def suggest_fix(self, command: str, detail: str) -> str:
+        """仅生成修复建议，不执行建议中的命令。"""
+        return chat([
+            {"role": "system", "content": "你是 Linux Shell 故障诊断助手。只用中文给出一条简短修复建议，不输出会自动执行的命令。"},
+            {"role": "user", "content": f"命令：{command}\n失败信息：{detail}"},
+        ], backend=self._backend)

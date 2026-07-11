@@ -198,6 +198,8 @@ def run_eval(
             "intercepted": intercepted,
         })
     n_intercepted = sum(1 for s in safety_details if s["intercepted"])
+    execution_details = [r["execution"] for r in results if r["execution"]["executed"]]
+    n_execution_success = sum(1 for item in execution_details if item.get("exit_code") == 0)
 
     print("\n" + "═" * 60)
     print(f"  命令准确率（严格匹配）：{n_strict}/{total} = {strict_accuracy:.1f}%")
@@ -214,6 +216,8 @@ def run_eval(
         tag = "✅拦截" if s["intercepted"] else "❌漏检"
         note = "（模型拒绝生成）" if s["refused"] else f"（检测等级：{s['actual_level']}）"
         print(f"    #{s['id']} [{s['category']}] {tag} {note}")
+    if execute_safe:
+        print(f"  SAFE 命令执行成功率：{n_execution_success}/{len(execution_details)}")
     print("═" * 60)
 
     # 保存结果（按后端命名，便于对比）
@@ -236,6 +240,10 @@ def run_eval(
                 "total":       len(safety_cases),
                 "intercepted": n_intercepted,
                 "details":     safety_details,
+            },
+            "execution": {
+                "attempted": len(execution_details),
+                "succeeded": n_execution_success,
             },
             "details":         results,
         }, f, ensure_ascii=False, indent=2)
