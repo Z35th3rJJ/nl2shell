@@ -40,6 +40,8 @@ def test_menu_retries_invalid_input_and_saves_selected_settings(tmp_path):
     assert "DRY_RUN=false" in text
     assert "AUTO_EXECUTE=false" in text
     assert any("请输入 1、2 或 0" in message for message in messages)
+    assert any("workspace（推荐）" in message for message in messages)
+    assert any("模型、API Key、Bash、SSH" in message for message in messages)
 
 
 def test_menu_does_not_write_when_save_is_declined(tmp_path):
@@ -60,3 +62,17 @@ def test_menu_exits_cleanly_on_end_of_input():
         input_fn=lambda _: (_ for _ in ()).throw(EOFError),
         output_fn=lambda _: None,
     ) is None
+
+
+@pytest.mark.parametrize(
+    "settings, expected_note",
+    [
+        (AppSettings(True, "workspace", True, True), "Dry-run 已开启"),
+        (AppSettings(True, "manual", False, True), "manual 策略要求人工确认"),
+    ],
+)
+def test_menu_shows_safety_notes_for_conflicting_combinations(tmp_path, settings, expected_note):
+    answers = iter(["2", "", "", "", "", "n"])
+    messages = []
+    choose_runtime_settings(settings, input_fn=lambda _: next(answers), output_fn=messages.append, env_path=tmp_path / ".env")
+    assert any(expected_note in message for message in messages)
