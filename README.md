@@ -88,6 +88,24 @@ python3 eval/compare.py
 python3 eval/run_eval.py --backend local --execute-safe
 ```
 
+## 批量自动化
+
+适合 CI 或大规模测试的任务文件使用 JSONL 格式，每行一个任务：
+
+```json
+{"input": "列出当前目录文件"}
+{"input": "统计 Python 文件数量", "cwd": "/path/to/project"}
+```
+
+使用 `--batch` 串行执行。任务失败、超时或验证失败后会继续下一项；高危（HIGH）命令始终阻止。主命令默认超时 60 秒，可按批次调整：
+
+```bash
+python3 cli.py --batch tasks.jsonl
+python3 cli.py --batch tasks.jsonl --timeout 120
+```
+
+结束后会打印汇总，并将批次结果写入 `~/.nl2shell/batch_<批次ID>.json`。批处理不进入首次交互设置，也不逐条确认；请只在受信任的测试环境和任务文件中使用。
+
 ## 切换到本地模型（可选）
 
 在 `.env` 中配置：
@@ -108,9 +126,18 @@ BASH_PATH=C:\Program Files\Git\bin\bash.exe
 
 ## 历史与 SSH
 
-每次任务的最终状态都会写入用户目录的 `~/.nl2shell/history.jsonl`，包含输入、计划、风险、执行决策、验证结果和错误摘要。CLI 内输入 `/history` 可查看最近 20 条，输入 `/history 50` 可查看更多。
+每次任务的最终状态都会写入用户目录的 `~/.nl2shell/history.jsonl`，包含稳定记录 ID、输入、计划、风险、执行决策、验证结果和错误摘要。CLI 内输入 `/history` 可查看最近 20 条，输入 `/history 50 --status verified` 可筛选；也支持按批次或时间筛选、导出和重放：
 
-程序只读取标准 `~/.ssh/config` 中的 `Host` 别名，帮助模型生成 `ssh <别名>`；私钥仍由 OpenSSH/ssh-agent 使用，程序不会读取或保存私钥。SSH 配置文件不在默认位置时，可设置：
+```text
+/history --batch <批次ID>
+/history export csv history.csv --status command_failed
+/history replay <记录ID>
+/history replay-batch <批次ID>
+```
+
+主输入框另外使用 `~/.nl2shell/input_history` 保存输入历史：上下键可以浏览以前输入的任务，`Ctrl+R` 可以搜索，左右键和 Home/End 可编辑当前内容。执行确认中的 `y/yes`、文件候选确认和目标文件名不会进入这份历史。它与 `/history` 的执行审计互不影响。
+
+程序读取标准 `~/.ssh/config` 中的 `Host`、`HostName`、`User`、`Port` 和 `IdentityFile` 元数据，帮助模型生成 `ssh <别名>`；私钥仍由 OpenSSH/ssh-agent 使用，程序不会读取、复制或保存私钥。运行中可用 `/ssh` 查看别名及配置状态，`/ssh test <别名>` 使用非交互认证检查连接。SSH 配置文件不在默认位置时，可设置：
 
 ```
 SSH_CONFIG_PATH=~/.ssh/config

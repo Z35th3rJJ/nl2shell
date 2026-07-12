@@ -11,7 +11,10 @@ class VerificationResult:
     result: ExecutionResult | None = None
 
 
-def verify(executor: BashExecutor, command_result: ExecutionResult, verification_command: str) -> VerificationResult:
+def verify(executor: BashExecutor, command_result: ExecutionResult, verification_command: str,
+           cwd: str | None = None) -> VerificationResult:
+    if command_result.timed_out:
+        return VerificationResult("command_failed", "主命令执行超时")
     if command_result.exit_code != 0:
         return VerificationResult("command_failed", "主命令退出码非 0")
     if not verification_command:
@@ -19,7 +22,9 @@ def verify(executor: BashExecutor, command_result: ExecutionResult, verification
     impact = analyze(verification_command)
     if not impact.known or set(impact.tags) != {"read"}:
         return VerificationResult("invalid_verifier", "验证命令不是已识别的只读命令")
-    result = executor.execute(verification_command, timeout_seconds=10)
+    result = executor.execute(verification_command, timeout_seconds=10, cwd=cwd)
+    if result.timed_out:
+        return VerificationResult("verification_failed", "验证命令执行超时", result)
     if result.exit_code == 0:
         return VerificationResult("verified", "验证命令执行成功", result)
     return VerificationResult("verification_failed", "验证命令退出码非 0", result)

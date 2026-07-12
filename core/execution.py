@@ -14,6 +14,7 @@ class ExecutionResult:
     stdout: str
     stderr: str
     duration_seconds: float
+    timed_out: bool = False
 
 
 def resolve_bash_path() -> str | None:
@@ -47,18 +48,29 @@ class BashExecutor:
         except (OSError, subprocess.TimeoutExpired):
             return False
 
-    def execute(self, command: str, timeout_seconds: float | None = None) -> ExecutionResult:
+    def execute(self, command: str, timeout_seconds: float | None = 60,
+                cwd: str | None = None) -> ExecutionResult:
         if not self.bash_path:
             raise RuntimeError(bash_unavailable_message())
 
         start = time.monotonic()
-        completed = subprocess.run(
-            [self.bash_path, "-lc", command],
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=timeout_seconds,
-        )
+        try:
+            completed = subprocess.run(
+                [self.bash_path, "-lc", command],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=timeout_seconds,
+                cwd=cwd,
+            )
+        except subprocess.TimeoutExpired as error:
+            stdout = error.stdout or ""
+            stderr = error.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode(errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            return ExecutionResult(None, stdout, stderr, time.monotonic() - start, True)
         return ExecutionResult(
             exit_code=completed.returncode,
             stdout=completed.stdout,

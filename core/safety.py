@@ -14,7 +14,11 @@ def _has_rm_force(cmd: str) -> bool:
 
 
 def _targets_root_or_home(cmd: str) -> bool:
-    return bool(re.search(r"\s[/~](\s|$|[/*])", cmd))
+    literal = bool(re.search(r"\s[/~](\s|$|[/*])", cmd))
+    expanded_home = bool(re.search(
+        r"\s(?:['\"]?\$(?:\{HOME\}|HOME)['\"]?|~(?:root)?)(?:/|\s|$)", cmd,
+    ))
+    return literal or expanded_home
 
 
 def _has_wildcard(cmd: str) -> bool:
