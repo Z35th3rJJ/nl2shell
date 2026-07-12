@@ -1,4 +1,6 @@
-from core.preflight import inspect_plan
+import shlex
+
+from core.preflight import CommandEdit, apply_edits, default_copy_target, inspect_plan
 from core.task_plan import TaskPlan, TaskStep
 
 
@@ -33,3 +35,38 @@ def test_valid_copy_has_no_preflight_issues(tmp_path):
 
 def test_shell_glob_is_left_to_bash_and_safety_checks(tmp_path):
     assert inspect_plan(_plan("rm *.log"), str(tmp_path)).ok
+
+
+def test_apply_edits_quotes_spaces_and_protects_leading_dash():
+    plan = _plan("cp draft .")
+    edited = apply_edits(plan, [
+        CommandEdit(1, 1, "-my draft.md"),
+        CommandEdit(1, 2, "backup copy.md"),
+    ])
+    assert shlex.split(edited.steps[0].command) == ["cp", "--", "-my draft.md", "backup copy.md"]
+
+
+def test_default_copy_target_preserves_all_suffixes_and_avoids_overwrite(tmp_path):
+    (tmp_path / "archive.tar.gz").write_text("", encoding="utf-8")
+    assert default_copy_target("archive.tar.gz", str(tmp_path)) == "archive_copy.tar.gz"
+    (tmp_path / "archive_copy.tar.gz").write_text("", encoding="utf-8")
+    assert default_copy_target("archive.tar.gz", str(tmp_path)) == "archive_copy_2.tar.gz"
+
+
+def test_directory_has_no_default_copy_target(tmp_path):
+    (tmp_path / "docs").mkdir()
+    assert default_copy_target("docs", str(tmp_path)) is None
+
+
+def test_default_target_checks_collisions_in_current_directory(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "README.md").write_text("", encoding="utf-8")
+    (tmp_path / "README_copy.md").write_text("", encoding="utf-8")
+    assert default_copy_target("source/README.md", str(tmp_path)) == "README_copy_2.md"
+
+
+def test_apply_edits_preserves_existing_options():
+    plan = _plan("cp -p readme .")
+    edited = apply_edits(plan, [CommandEdit(1, 2, "README.md"), CommandEdit(1, 3, "README_copy.md")])
+    assert shlex.split(edited.steps[0].command) == ["cp", "-p", "README.md", "README_copy.md"]

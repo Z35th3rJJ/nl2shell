@@ -54,21 +54,19 @@ def test_verification_failure_generates_only_one_fix_suggestion():
     assert history.records[0]["status"] == "verification_failed"
 
 
-def test_candidate_and_target_are_confirmed_then_plan_is_regenerated_once(tmp_path):
+def test_candidate_and_target_are_corrected_without_regenerating_plan(tmp_path):
     (tmp_path / "README.md").write_text("docs", encoding="utf-8")
-    engine = Mock()
-    engine.generate_task_plan.side_effect = [
-        TaskPlan((TaskStep("cp readme .", "复制文件", "", ""),)),
-        TaskPlan((TaskStep("cp README.md README.backup.md", "备份文件", "", ""),)),
-    ]
+    engine = _engine(TaskStep("cp readme .", "复制文件", "", ""))
     executor, history = Mock(), History()
-    answers = iter(["y", "README.backup.md"])
+    answers = iter(["", ""])
     execute_request(engine, executor, history, "复制readme", str(tmp_path), PREVIEW,
                     input_fn=lambda _: next(answers))
-    assert engine.generate_task_plan.call_count == 2
-    assert engine.generate_task_plan.call_args.kwargs["clarifications"]
+    assert engine.generate_task_plan.call_count == 1
     executor.execute.assert_not_called()
-    assert history.records[0]["preflight"]["confirmed_candidates"][0]["selected"] == "README.md"
+    preflight = history.records[0]["preflight"]
+    assert preflight["confirmed_candidates"][0]["selected"] == "README.md"
+    assert preflight["corrected_commands"] == ["cp README.md README_copy.md"]
+    assert preflight["used_default_target"] is True
 
 
 def test_missing_source_without_candidate_blocks_bash(tmp_path):
@@ -79,19 +77,77 @@ def test_missing_source_without_candidate_blocks_bash(tmp_path):
     assert history.records[0]["status"] == "preflight_failed"
 
 
-def test_user_can_select_from_multiple_file_candidates(tmp_path):
+def test_rejected_candidate_blocks_without_second_model_call(tmp_path):
+    (tmp_path / "README.md").write_text("", encoding="utf-8")
+    engine = _engine(TaskStep("cp readme .", "复制", "", ""))
+    executor, history = Mock(), History()
+    execute_request(engine, executor, history, "复制readme", str(tmp_path), AUTO_SAFE,
+                    input_fn=lambda _: "n")
+    assert engine.generate_task_plan.call_count == 1
+    executor.execute.assert_not_called()
+    assert history.records[0]["status"] == "preflight_failed"
+
+
+def test_cat_candidate_is_reported_but_not_automatically_rewritten(tmp_path):
     (tmp_path / "README.md").write_text("", encoding="utf-8")
     (tmp_path / "README.txt").write_text("", encoding="utf-8")
-    engine = Mock()
-    engine.generate_task_plan.side_effect = [
-        TaskPlan((TaskStep("cat readme", "查看", "", ""),)),
-        TaskPlan((TaskStep("cat README.txt", "查看", "", ""),)),
-    ]
+    engine = _engine(TaskStep("cat readme", "查看", "", ""))
     executor, history = Mock(), History()
-    execute_request(engine, executor, history, "查看readme", str(tmp_path), PREVIEW,
-                    input_fn=lambda _: "2")
-    selected = history.records[0]["preflight"]["confirmed_candidates"][0]["selected"]
-    assert selected == "README.txt"
+    execute_request(engine, executor, history, "查看readme", str(tmp_path), PREVIEW)
+    assert engine.generate_task_plan.call_count == 1
+    assert history.records[0]["status"] == "preflight_failed"
+
+
+def test_existing_default_copy_name_uses_incremented_suffix(tmp_path):
+    (tmp_path / "archive.tar.gz").write_text("", encoding="utf-8")
+    (tmp_path / "archive_copy.tar.gz").write_text("", encoding="utf-8")
+    engine = _engine(TaskStep("cp archive.tar.gz .", "复制", "", ""))
+    executor, history = Mock(), History()
+    execute_request(engine, executor, history, "复制压缩包", str(tmp_path), PREVIEW,
+                    input_fn=lambda _: "")
+    assert history.records[0]["preflight"]["corrected_commands"] == [
+        "cp archive.tar.gz archive_copy_2.tar.gz"
+    ]
+
+
+def test_custom_outside_target_reaches_risk_decision(tmp_path):
+    (tmp_path / "README.md").write_text("", encoding="utf-8")
+    engine = _engine(TaskStep("cp README.md .", "复制", "", ""))
+    executor, history = Mock(), History()
+    execute_request(engine, executor, history, "复制README", str(tmp_path), PREVIEW,
+                    input_fn=lambda _: "/home")
+    record = history.records[0]
+    assert record["preflight"]["selected_target"] == "/home"
+    assert record["decisions"] == ["confirm"]
+
+
+def test_move_does_not_offer_default_target(tmp_path):
+    (tmp_path / "README.md").write_text("", encoding="utf-8")
+    engine = _engine(TaskStep("mv README.md .", "移动", "", ""))
+    executor, history, prompts = Mock(), History(), []
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return "moved.md"
+
+    execute_request(engine, executor, history, "移动README", str(tmp_path), PREVIEW, input_fn=answer)
+    assert all("回车使用" not in prompt for prompt in prompts)
+    assert history.records[0]["preflight"]["corrected_commands"] == ["mv README.md moved.md"]
+
+
+def test_multi_source_copy_requires_explicit_target(tmp_path):
+    (tmp_path / "one.txt").write_text("", encoding="utf-8")
+    (tmp_path / "two.txt").write_text("", encoding="utf-8")
+    engine = _engine(TaskStep("cp one.txt two.txt .", "复制", "", ""))
+    executor, history, prompts = Mock(), History(), []
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return "copies"
+
+    execute_request(engine, executor, history, "复制两个文件", str(tmp_path), PREVIEW, input_fn=answer)
+    assert all("回车使用" not in prompt for prompt in prompts)
+    assert history.records[0]["preflight"]["corrected_commands"] == ["cp one.txt two.txt copies"]
 
 
 def test_clarification_regenerates_only_once(tmp_path):

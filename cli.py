@@ -8,7 +8,7 @@ from core.engine import Engine
 from core.execution import BashExecutor, bash_unavailable_message, try_change_directory
 from core.history import HistoryStore
 from core.impact import analyze
-from core.preflight import inspect_plan
+from core.preflight import CommandEdit, apply_edits, default_target_for_step, inspect_plan
 from core.safety import HIGH, SAFE, WARN, check
 from core.settings import (
     AUTO_SAFE, ENV_PATH, PREVIEW, AppSettings,
@@ -80,61 +80,97 @@ def _confirm_plan(mode: str, decisions) -> bool:
     return input("执行整个计划？(y/n) > ").strip().lower() == "y"
 
 
-def _collect_preflight_clarifications(plan, cwd: str, input_fn=input):
-    """收集一次本地事实澄清；返回 (补充信息, 已确认候选, 失败原因)。"""
-    clarifications, confirmed = [], []
-    if plan.clarification:
-        answer = input_fn(f"需要确认：{plan.clarification}\n你的回答> ").strip()
-        if not answer:
-            return [], [], "未提供计划所需的补充信息"
-        return [f"{plan.clarification} 用户回答：{answer}"], [], ""
+def _preflight_details(original, corrected, status, confirmed=None, target="", used_default=False):
+    return {
+        "status": status,
+        "original_commands": [step.command for step in original.steps],
+        "corrected_commands": [step.command for step in corrected.steps],
+        "confirmed_candidates": confirmed or [],
+        "selected_target": target,
+        "used_default_target": used_default,
+    }
 
-    for issue in inspect_plan(plan, cwd).issues:
-        if issue.kind == "missing_source":
-            if not issue.candidates:
-                return [], confirmed, issue.message
-            if len(issue.candidates) == 1:
-                candidate = issue.candidates[0]
-                answer = input_fn(f"未找到“{issue.path}”，是否指“{candidate}”？(y/n) > ").strip().lower()
-                if answer != "y":
-                    return [], confirmed, "用户未确认候选文件"
-            else:
-                print(f"未找到“{issue.path}”，可能是：")
-                for index, item in enumerate(issue.candidates, 1):
-                    print(f"  {index}. {item}")
-                answer = input_fn("请选择候选编号（其他输入取消）> ").strip()
-                if not answer.isdigit() or not 1 <= int(answer) <= len(issue.candidates):
-                    return [], confirmed, "用户未选择候选文件"
-                candidate = issue.candidates[int(answer) - 1]
-            confirmed.append({"requested": issue.path, "selected": candidate})
-            clarifications.append(f"命令中的源路径 {issue.path} 应改为 {candidate}")
-        elif issue.kind in {"missing_target", "same_source_target"}:
-            target = input_fn("请提供复制或移动后的目标路径/新文件名> ").strip()
+
+def _choose_candidate(issue, input_fn):
+    if not issue.candidates:
+        return "", issue.message
+    if len(issue.candidates) == 1:
+        candidate = issue.candidates[0]
+        answer = input_fn(f"未找到“{issue.path}”，是否指“{candidate}”？(Y/n) > ").strip().lower()
+        return (candidate, "") if answer in {"", "y", "yes"} else ("", "用户未确认候选文件")
+    print(f"未找到“{issue.path}”，可能是：")
+    for index, item in enumerate(issue.candidates, 1):
+        print(f"  {index}. {item}")
+    answer = input_fn("请选择候选编号（其他输入取消）> ").strip()
+    if not answer.isdigit() or not 1 <= int(answer) <= len(issue.candidates):
+        return "", "用户未选择候选文件"
+    return issue.candidates[int(answer) - 1], ""
+
+
+def _correct_file_plan(plan, cwd: str, input_fn=input):
+    original = plan
+    confirmed, selected_target, used_default = [], "", False
+    report = inspect_plan(plan, cwd)
+    source_edits = []
+    for issue in report.issues:
+        if issue.kind != "missing_source":
+            continue
+        if issue.program not in {"cp", "mv"}:
+            return plan, _preflight_details(original, plan, "failed"), issue.message
+        candidate, failure = _choose_candidate(issue, input_fn)
+        if failure:
+            return plan, _preflight_details(original, plan, "failed", confirmed), failure
+        confirmed.append({"requested": issue.path, "selected": candidate})
+        source_edits.append(CommandEdit(issue.step, issue.argument_index, candidate))
+    if source_edits:
+        plan = apply_edits(plan, source_edits)
+
+    report = inspect_plan(plan, cwd)
+    remaining_source = next((issue for issue in report.issues if issue.kind == "missing_source"), None)
+    if remaining_source:
+        return plan, _preflight_details(original, plan, "failed", confirmed), remaining_source.message
+
+    target_edits = []
+    handled_steps = set()
+    for issue in report.issues:
+        if issue.kind not in {"missing_target", "same_source_target"} or issue.step in handled_steps:
+            continue
+        handled_steps.add(issue.step)
+        default_target = default_target_for_step(plan, issue.step, cwd)
+        if default_target:
+            target = input_fn(f"请输入目标路径/新文件名（回车使用 {default_target}）> ").strip()
             if not target:
-                return [], confirmed, "未提供有效目标路径"
-            clarifications.append(f"复制或移动的目标路径是 {target}")
-    return clarifications, confirmed, ""
+                target, used_default = default_target, True
+        else:
+            target = input_fn("请输入目标路径/新文件名> ").strip()
+        if not target:
+            return plan, _preflight_details(original, plan, "failed", confirmed), "未提供有效目标路径"
+        selected_target = target
+        target_edits.append(CommandEdit(issue.step, issue.argument_index, target))
+    if target_edits:
+        plan = apply_edits(plan, target_edits)
+
+    final_report = inspect_plan(plan, cwd)
+    if not final_report.ok:
+        return plan, _preflight_details(original, plan, "failed", confirmed, selected_target, used_default), final_report.issues[0].message
+    return plan, _preflight_details(original, plan, "passed", confirmed, selected_target, used_default), ""
 
 
 def _preflight_plan(engine: Engine, plan, user_input: str, cwd: str, input_fn=input):
-    clarifications, confirmed, failure = _collect_preflight_clarifications(plan, cwd, input_fn)
-    if failure:
-        return plan, {"status": "failed", "confirmed_candidates": confirmed,
-                      "clarification_summary": clarifications}, failure
-    if not clarifications:
-        return plan, {"status": "passed", "confirmed_candidates": [], "clarification_summary": []}, ""
-    try:
-        regenerated = engine.generate_task_plan(user_input, cwd, clarifications=clarifications)
-    except Exception as error:
-        return plan, {"status": "failed", "confirmed_candidates": confirmed,
-                      "clarification_summary": clarifications}, f"澄清后重新生成计划失败：{error}"
-    report = inspect_plan(regenerated, cwd)
-    if regenerated.clarification or not report.ok:
-        reason = regenerated.clarification or report.issues[0].message
-        return regenerated, {"status": "failed", "confirmed_candidates": confirmed,
-                             "clarification_summary": clarifications}, f"澄清后计划仍不完整：{reason}"
-    return regenerated, {"status": "passed", "confirmed_candidates": confirmed,
-                         "clarification_summary": clarifications}, ""
+    if plan.clarification:
+        answer = input_fn(f"需要确认：{plan.clarification}\n你的回答> ").strip()
+        if not answer:
+            return plan, _preflight_details(plan, plan, "failed"), "未提供计划所需的补充信息"
+        try:
+            plan = engine.generate_task_plan(
+                user_input, cwd,
+                clarifications=[f"{plan.clarification} 用户回答：{answer}"],
+            )
+        except Exception as error:
+            return plan, _preflight_details(plan, plan, "failed"), f"澄清后重新生成计划失败：{error}"
+        if plan.clarification:
+            return plan, _preflight_details(plan, plan, "failed"), f"澄清后计划仍不完整：{plan.clarification}"
+    return _correct_file_plan(plan, cwd, input_fn)
 
 
 def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStore,
