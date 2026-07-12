@@ -1,78 +1,69 @@
 import pytest
 
-from core.settings import AppSettings, choose_runtime_settings, load_settings, save_runtime_settings
+from core.settings import (
+    AUTO_SAFE, CONFIRM_MODE, PREVIEW, AppSettings, choose_mode,
+    first_run_setup, load_settings, save_settings,
+)
 
 
-def test_settings_use_safe_defaults(monkeypatch):
-    for key in ("AUTO_EXECUTE", "EXECUTION_POLICY", "DRY_RUN", "AGENT_MODE"):
+def _clear_settings(monkeypatch):
+    for key in ("RUN_MODE", "SETUP_COMPLETE", "DRY_RUN", "AUTO_EXECUTE"):
         monkeypatch.delenv(key, raising=False)
-    assert load_settings() == AppSettings(False, "manual", False, False)
 
 
-def test_settings_reject_invalid_policy(monkeypatch):
-    monkeypatch.setenv("EXECUTION_POLICY", "unsafe")
+def test_settings_default_to_confirm(monkeypatch):
+    _clear_settings(monkeypatch)
+    assert load_settings() == AppSettings(CONFIRM_MODE, False)
+
+
+@pytest.mark.parametrize("legacy_key, expected", [("DRY_RUN", PREVIEW), ("AUTO_EXECUTE", AUTO_SAFE)])
+def test_legacy_settings_are_migrated(monkeypatch, legacy_key, expected):
+    _clear_settings(monkeypatch)
+    monkeypatch.setenv(legacy_key, "true")
+    assert load_settings().run_mode == expected
+
+
+def test_invalid_run_mode_is_rejected(monkeypatch):
+    monkeypatch.setenv("RUN_MODE", "unsafe")
     with pytest.raises(ValueError):
         load_settings()
 
 
-def test_menu_uses_existing_settings_when_direct_start_selected():
-    current = AppSettings(False, "workspace", True, True)
-    assert choose_runtime_settings(current, input_fn=lambda _: "1", output_fn=lambda _: None) == current
-
-
-def test_menu_retries_invalid_input_and_saves_selected_settings(tmp_path):
-    env_path = tmp_path / ".env"
-    env_path.write_text("LOCAL_MODEL=qwen\n# keep this comment\nAGENT_MODE=false\n", encoding="utf-8")
-    answers = iter(["bad", "2", "y", "2", "n", "n", "y"])
+def test_choose_mode_retries_invalid_input():
+    answers = iter(["bad", "3"])
     messages = []
-    selected = choose_runtime_settings(
-        AppSettings(False, "manual", False, False),
-        input_fn=lambda _: next(answers),
-        output_fn=messages.append,
-        env_path=env_path,
+    assert choose_mode(CONFIRM_MODE, lambda _: next(answers), messages.append) == AUTO_SAFE
+    assert any("请输入 1、2、3 或 0" in message for message in messages)
+
+
+def test_first_run_setup_saves_mode_and_preserves_unrelated_env(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "LOCAL_MODEL=qwen\nDEEPSEEK_API_KEY=secret\n# keep comment\n"
+        "AGENT_MODE=true\nEXECUTION_POLICY=workspace\nDRY_RUN=true\nAUTO_EXECUTE=false\n",
+        encoding="utf-8",
     )
-    assert selected == AppSettings(False, "workspace", False, True)
+    selected = first_run_setup(
+        AppSettings(PREVIEW, False), input_fn=lambda _: "2",
+        output_fn=lambda _: None, env_path=env_path,
+    )
+    assert selected == AppSettings(CONFIRM_MODE, True)
     text = env_path.read_text(encoding="utf-8")
     assert "LOCAL_MODEL=qwen" in text
-    assert "# keep this comment" in text
-    assert "AGENT_MODE=true" in text
-    assert "EXECUTION_POLICY=workspace" in text
-    assert "DRY_RUN=false" in text
-    assert "AUTO_EXECUTE=false" in text
-    assert any("请输入 1、2 或 0" in message for message in messages)
-    assert any("workspace（推荐）" in message for message in messages)
-    assert any("模型、API Key、Bash、SSH" in message for message in messages)
+    assert "DEEPSEEK_API_KEY=secret" in text
+    assert "# keep comment" in text
+    assert "RUN_MODE=confirm" in text
+    assert "SETUP_COMPLETE=true" in text
+    assert "AGENT_MODE" not in text
+    assert "EXECUTION_POLICY" not in text
+    assert "DRY_RUN" not in text
+    assert "AUTO_EXECUTE" not in text
 
 
-def test_menu_does_not_write_when_save_is_declined(tmp_path):
-    env_path = tmp_path / ".env"
-    env_path.write_text("AGENT_MODE=false\n", encoding="utf-8")
-    answers = iter(["2", "y", "", "", "", "n"])
-    choose_runtime_settings(AppSettings(False, "manual", False, False), input_fn=lambda _: next(answers), output_fn=lambda _: None, env_path=env_path)
-    assert env_path.read_text(encoding="utf-8") == "AGENT_MODE=false\n"
+def test_completed_setup_skips_wizard():
+    current = AppSettings(AUTO_SAFE, True)
+    assert first_run_setup(current, input_fn=lambda _: pytest.fail("不应询问")) == current
 
 
 def test_save_does_not_create_missing_env(tmp_path):
-    assert save_runtime_settings(AppSettings(False, "manual", False, False), tmp_path / ".env") is False
-
-
-def test_menu_exits_cleanly_on_end_of_input():
-    assert choose_runtime_settings(
-        AppSettings(False, "manual", False, False),
-        input_fn=lambda _: (_ for _ in ()).throw(EOFError),
-        output_fn=lambda _: None,
-    ) is None
-
-
-@pytest.mark.parametrize(
-    "settings, expected_note",
-    [
-        (AppSettings(True, "workspace", True, True), "Dry-run 已开启"),
-        (AppSettings(True, "manual", False, True), "manual 策略要求人工确认"),
-    ],
-)
-def test_menu_shows_safety_notes_for_conflicting_combinations(tmp_path, settings, expected_note):
-    answers = iter(["2", "", "", "", "", "n"])
-    messages = []
-    choose_runtime_settings(settings, input_fn=lambda _: next(answers), output_fn=messages.append, env_path=tmp_path / ".env")
-    assert any(expected_note in message for message in messages)
+    assert save_settings(AppSettings(CONFIRM_MODE, True), tmp_path / ".env") is False

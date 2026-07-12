@@ -1,6 +1,6 @@
 # nl2shell · 智能 Shell 命令助手
 
-用中文描述你想做的事，自动生成并执行对应的 Linux 命令。核心特性：**安全审查拦截 + 命令解释 + 意图模糊澄清**。
+用中文描述任务，系统生成最多三步的 Bash 计划，完成影响分析、安全决策、受控执行、结果验证与历史审计。
 
 ## 快速开始
 
@@ -19,10 +19,7 @@ cp .env.example .env
 # 云端模式：填入 DEEPSEEK_API_KEY
 # 本地模式：安装 Ollama，并在 .env 设置 LLM_BACKEND=local
 
-# 4. 运行（模式由 .env 中的 AGENT_MODE / EXECUTION_POLICY / DRY_RUN 配置）
-python3 cli.py
-
-# 启动后选择沿用配置或在菜单中一次性调整运行模式
+# 4. 运行；首次启动会选择默认运行方式
 python3 cli.py
 ```
 
@@ -39,19 +36,6 @@ python3 cli.py
 你想做什么？> 找出最大的三个文件
   命令：du -ah . | sort -rh | head -3
   说明：按文件大小降序排列，显示前 3 个
-执行？(y/n) > y
-```
-
-### 意图模糊澄清（多轮对话）
-
-当描述不够明确时，系统会追问一个具体问题，而不是猜测或拒绝：
-
-```
-你想做什么？> 清理一下
-❓ 你是要删除 .log 日志文件、.tmp 临时文件，还是两者都删？
-你的回答> 删除所有 .log 文件
-  命令：find . -name "*.log" -delete
-  说明：递归删除当前目录下所有 .log 文件
 执行？(y/n) > y
 ```
 
@@ -124,7 +108,7 @@ BASH_PATH=C:\Program Files\Git\bin\bash.exe
 
 ## 历史与 SSH
 
-每次生成后的最终状态都会写入用户目录的 `~/.nl2shell/history.jsonl`，包含输入、命令、风险等级、执行结果和错误摘要。CLI 内输入 `history` 可查看最近 20 条，输入 `history 50` 可查看最近 50 条。
+每次任务的最终状态都会写入用户目录的 `~/.nl2shell/history.jsonl`，包含输入、计划、风险、执行决策、验证结果和错误摘要。CLI 内输入 `/history` 可查看最近 20 条，输入 `/history 50` 可查看更多。
 
 程序只读取标准 `~/.ssh/config` 中的 `Host` 别名，帮助模型生成 `ssh <别名>`；私钥仍由 OpenSSH/ssh-agent 使用，程序不会读取或保存私钥。SSH 配置文件不在默认位置时，可设置：
 
@@ -132,29 +116,34 @@ BASH_PATH=C:\Program Files\Git\bin\bash.exe
 SSH_CONFIG_PATH=~/.ssh/config
 ```
 
-## 安全可控 Agent
+## 统一运行流程
 
-推荐直接在 `.env` 中设置运行模式，之后只运行 `python cli.py`：
+所有请求都会生成任务计划：简单请求是一条命令，复杂请求最多三步。风险分析和执行后验证始终开启，用户只需要选择一种运行方式：
 
-```env
-AGENT_MODE=true
-EXECUTION_POLICY=workspace
-DRY_RUN=true
-AUTO_EXECUTE=false
+| 运行方式 | 行为 |
+| --- | --- |
+| `preview`（预览） | 只展示计划、影响和验证方案，不调用 Bash |
+| `confirm`（确认执行，推荐） | 展示整份计划，确认后执行并验证 |
+| `auto-safe`（安全自动） | 安全操作自动执行；删除、网络等敏感操作暂停确认 |
+
+毁灭性高危命令始终阻止；`sudo`、系统级修改和未知 Shell 语法必须强确认。验证失败时只生成一次修复建议，不自动执行修复。
+
+首次运行会选择并保存默认方式，之后直接进入 Shell。运行中可使用：
+
+```text
+/mode             临时切换运行方式
+/config           修改并保存默认运行方式
+/status           查看模型、目录、运行方式和 Bash 状态
+/history [数量]   查看审计历史
+/help             显示帮助
+/exit             退出
 ```
 
-启动后会显示当前配置，可选择“直接启动”或“本次调整”。本次调整默认不保存，只有明确确认后才会更新 `.env` 的四个运行模式字段。答辩时需要真实执行时，可在菜单中关闭 Dry-run；自动执行则在菜单中开启。
+`.env` 中只需要：
 
-`--agent` 模式将一个任务拆为最多三步。每一步包含命令、预期结果和只读验证命令，并在执行后验证结果；验证失败时只生成一次修复建议，绝不自动执行修复。
+```env
+RUN_MODE=confirm
+SETUP_COMPLETE=true
+```
 
-执行策略如下：
-
-| 策略 | 行为 |
-| --- | --- |
-| `read-only` | 只允许已识别的查询命令 |
-| `workspace` | 只允许当前工作目录内的已识别操作；删除仍需人工确认 |
-| `manual` | 保留人工确认；高危命令仍须输入 `yes` |
-
-`--dry-run` 会展示命令影响、策略结论和验证方案，但不会调用 Bash。包含管道、重定向、Shell 展开或未知程序的命令会按保守规则标为未知，在受控策略下被阻止。
-
-评测结果除命令准确率和危险命令拦截率外，还会在 `--execute-safe` 时输出 SAFE 命令执行成功率；Agent 模式的 history 同时保存策略、影响标签、步骤验证结果和修复建议摘要，供答辩审计分析。
+旧版 `AGENT_MODE`、`EXECUTION_POLICY`、`DRY_RUN`、`AUTO_EXECUTE` 会在首次设置时迁移为新的运行方式。
