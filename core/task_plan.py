@@ -15,6 +15,7 @@ class TaskStep:
 @dataclass(frozen=True)
 class TaskPlan:
     steps: tuple[TaskStep, ...]
+    clarification: str = ""
 
 
 def parse_task_plan(raw: str) -> TaskPlan:
@@ -23,6 +24,9 @@ def parse_task_plan(raw: str) -> TaskPlan:
     text = text.strip().strip("`").strip()
     try:
         payload = json.loads(text)
+        clarification = payload.get("clarification", "")
+        if isinstance(clarification, str) and clarification.strip():
+            return TaskPlan((), clarification.strip())
         raw_steps = payload["steps"]
         if not isinstance(raw_steps, list) or not 1 <= len(raw_steps) <= 3:
             raise ValueError("steps 必须是 1 到 3 项")

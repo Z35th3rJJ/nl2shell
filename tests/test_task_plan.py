@@ -25,3 +25,9 @@ def test_json_with_single_trailing_backtick_is_accepted():
         '"expected":"显示列表","verification":""}]}`'
     )
     assert plan.steps[0].command == "ls"
+
+
+def test_parse_structured_clarification():
+    plan = parse_task_plan('{"clarification":"要复制成什么文件名？"}')
+    assert plan.steps == ()
+    assert plan.clarification == "要复制成什么文件名？"
