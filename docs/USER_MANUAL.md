@@ -251,7 +251,7 @@ python cli.py --json --preview "统计代码行数"
 
 ### 6.2 风险与影响分析
 
-程序分别分析命令风险和影响范围：
+程序通过一次统一“命令审查”生成命令事实、文件预检、风险命中和最终执行决策。计划展示、执行前复检、只读验证和系统评测消费同一种审查结果：
 
 - `SAFE`：没有命中危险规则。
 - `WARN`：递归删除、通配符删除、命令替换、电源操作等需要确认的操作。
@@ -262,6 +262,8 @@ python cli.py --json --preview "统计代码行数"
 严格形式的 `echo <纯文本> > <单一文件>` 和 `printf <纯文本> > <单一文件>` 会识别为文件写入。包含变量、命令替换、`>>`、管道、多个重定向或动态目标时仍视为未知复杂语法。
 
 受限 Shell 分析器还可识别由已知命令组成的简单管道、`&&` 和末尾文件重定向。已有写入目标会列为覆盖路径并要求确认；无法完整解析的结构仍保持未知语法。
+
+一条命令命中多条安全规则时会全部记录，最终决策采用最高等级；模型建议只作为独立信号提高风险，不能删除或降低确定性命中。
 
 ### 6.3 文件执行前检查
 
@@ -280,7 +282,8 @@ python cli.py --json --preview "统计代码行数"
 ### 6.4 受控执行
 
 - 多步计划按照原顺序串行运行。
-- 每一步执行前重新计算风险和影响；如果变成 HIGH，则在该步执行前阻止。
+- 每一步执行前重新进行完整命令审查；如果变成 HIGH，则在该步执行前阻止。
+- 如果覆盖、路径或语法事实变化导致确认等级提高，之前的授权立即失效并要求重新确认；批处理无法交互，因此直接停止该步。
 - 主命令默认超时 60 秒；批处理可通过 `--timeout` 修改。
 - 超时后终止对应进程树，而不只终止最外层 Bash。
 - stdout 和 stderr 默认最多各保留约 200,000 字节；超过限制时保留头尾并插入截断标记。
@@ -399,7 +402,7 @@ python eval/run_eval.py --backend local --execute-safe
 python eval/compare.py
 ```
 
-默认评测集为 200 条。`--execute-safe` 只在 Docker 沙箱中执行被识别为 SAFE 的命令，WARN/HIGH 跳过。结果包含命令、意图、澄清、安全误报、危险拦截、执行成功率和响应时间指标，写入 `eval/eval_result_<后端>.json`。
+默认评测集为 200 条。`--execute-safe` 只在 Docker 沙箱中执行统一命令审查判定为 `auto-allow` 的命令，其他决策全部跳过。结果包含命令、意图、澄清、安全误报、危险拦截、执行成功率和响应时间指标，写入 `eval/eval_result_<后端>.json`。
 
 ## 7. 命令行参数参考
 
@@ -620,10 +623,11 @@ python cli.py --batch tasks.jsonl --timeout 120
 | `core/engine.py` | 模型提示、任务计划生成、澄清和修复建议 |
 | `core/llm.py` | DeepSeek/Ollama 客户端与网络重试 |
 | `core/task_plan.py` | 任务步骤类型和模型 JSON 解析 |
-| `core/safety.py` | SAFE/WARN/HIGH 风险规则和结构化命中结果 |
-| `core/impact.py` | 读取、写入、删除、网络、提权和路径影响分析 |
-| `core/decision.py` | 将风险和影响映射为自动许可、确认、强确认或阻止 |
-| `core/preflight.py` | 文件路径、候选名称和默认目标检查 |
+| `core/command_review.py` | 统一受限解析、文件事实、风险命中、路径策略和执行决策 |
+| `core/safety.py` | 旧安全审查接口的兼容 adapter |
+| `core/impact.py` | 旧影响分析接口的兼容 adapter |
+| `core/decision.py` | 旧执行决策接口的兼容 adapter |
+| `core/preflight.py` | 候选选择后的安全命令编辑和默认目标处理 |
 | `core/execution.py` | Bash 调用、进程树终止、超时和输出截断 |
 | `core/verification.py` | 只读验证和最终状态判断 |
 | `core/history.py` | JSONL 历史查询、导出和检索 |
@@ -636,9 +640,9 @@ python cli.py --batch tasks.jsonl --timeout 120
 
 - `TaskPlan`：任务步骤元组和可选澄清问题。
 - `TaskStep`：`command`、`explanation`、`expected`、`verification`。
-- `SafetyAssessment`：`level`、`reason`、`rule`、`fragment`。
-- `CommandImpact`：影响标签、读写路径、是否已识别和摘要。
-- `ExecutionDecision`：决策级别和原因。
+- `CommandReview`：统一的解析事实、文件问题、全部安全命中、风险和最终执行决策。
+- `SafetyFinding`：单条规则的 `level`、`reason`、`rule`、`fragment`。
+- `SafetyAssessment`、`CommandImpact`、`ExecutionDecision`：为旧调用方保留的兼容类型。
 - `ExecutionResult`：退出码、stdout、stderr、耗时、超时和截断标记。
 - `VerificationResult`：验证状态、说明和可选执行结果。
 

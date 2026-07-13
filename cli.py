@@ -9,8 +9,10 @@ from uuid import uuid4
 
 from dotenv import load_dotenv
 
-from core.command_analysis import analyze_command, raise_risk
-from core.decision import AUTO_ALLOW, BLOCK, STRONG_CONFIRM, decide
+from core.command_review import (
+    AUTO_ALLOW, BLOCK, CONFIRM, HIGH, SAFE, STRONG_CONFIRM, WARN,
+    review_command,
+)
 from core.diagnostics import diagnose_environment
 from core.engine import Engine
 from core.error_analysis import classify_error
@@ -19,10 +21,8 @@ from core.execution import (
     try_change_directory,
 )
 from core.history import HistoryStore
-from core.impact import analyze
 from core.input_session import create_input_session
 from core.preflight import CommandEdit, apply_edits, default_target_for_step, inspect_plan
-from core.safety import HIGH, SAFE, WARN, assess, check
 from core.settings import (
     AUTO_SAFE, ENV_PATH, PREVIEW, AppSettings,
     choose_mode, first_run_setup, load_settings, mode_description, mode_name,
@@ -37,6 +37,7 @@ load_dotenv(ENV_PATH)
 
 RED, YELLOW, GREEN, BOLD, RESET = "\033[91m", "\033[93m", "\033[92m", "\033[1m", "\033[0m"
 _RISK_ORDER = {SAFE: 0, WARN: 1, HIGH: 2}
+_DECISION_ORDER = {AUTO_ALLOW: 0, CONFIRM: 1, STRONG_CONFIRM: 2, BLOCK: 3}
 BATCH = "batch"
 
 
@@ -149,8 +150,8 @@ def print_status(mode: str, executor: BashExecutor) -> None:
 
 def _confirm_plan(mode: str, decisions, *, assume_yes: bool = False, input_fn=input) -> str:
     if mode == BATCH:
-        return "yes" if {item[4].level for item in decisions} == {AUTO_ALLOW} else "no"
-    levels = {item[4].level for item in decisions}
+        return "yes" if {item[1].decision.level for item in decisions} == {AUTO_ALLOW} else "no"
+    levels = {item[1].decision.level for item in decisions}
     if mode == AUTO_SAFE and levels == {AUTO_ALLOW}:
         print(f"{GREEN}安全自动：计划全部满足自动执行条件。{RESET}")
         return "yes"
@@ -162,6 +163,17 @@ def _confirm_plan(mode: str, decisions, *, assume_yes: bool = False, input_fn=in
     return answer if answer in {"y", "r", "e"} else "no"
 
 
+def _confirm_increased_risk(initial_review, current_review, mode: str, input_fn=input) -> bool:
+    if _DECISION_ORDER[current_review.decision.level] <= _DECISION_ORDER[initial_review.decision.level]:
+        return True
+    if mode == BATCH:
+        return False
+    reason = current_review.decision.reason
+    if current_review.decision.level == STRONG_CONFIRM:
+        return input_fn(f"执行前风险已提高：{reason}，继续执行请输入 yes > ").strip() == "yes"
+    return input_fn(f"执行前风险已提高：{reason}，是否继续？(y/n) > ").strip().lower() in {"y", "yes"}
+
+
 def _preflight_details(original, corrected, status, confirmed=None, target="", used_default=False):
     return {
         "status": status,
@@ -170,6 +182,25 @@ def _preflight_details(original, corrected, status, confirmed=None, target="", u
         "confirmed_candidates": confirmed or [],
         "selected_target": target,
         "used_default_target": used_default,
+    }
+
+
+def _review_history_details(reviews):
+    return {
+        "decisions": [review.decision.level for review in reviews],
+        "impact_tags": [review.impact.tags for review in reviews],
+        "safety": [{"level": review.safety.level, "reason": review.safety.reason,
+                    "rule": review.safety.rule, "fragment": review.safety.fragment}
+                   for review in reviews],
+        "safety_findings": [[{"level": finding.level, "reason": finding.reason,
+                              "rule": finding.rule, "fragment": finding.fragment}
+                             for finding in review.findings]
+                            for review in reviews],
+        "overwrite_paths": [review.overwrite_paths for review in reviews],
+        "path_findings": [[{"kind": finding.kind, "path": finding.path,
+                            "message": finding.message}
+                           for finding in review.path_findings]
+                          for review in reviews],
     }
 
 
@@ -215,7 +246,9 @@ def _correct_file_plan(plan, cwd: str, input_fn=input):
         if failure:
             return plan, _preflight_details(original, plan, "failed", confirmed), failure
         confirmed.append({"requested": issue.path, "selected": candidate})
-        source_edits.append(CommandEdit(issue.step, issue.argument_index, candidate))
+        source_edits.append(CommandEdit(
+            issue.step, issue.argument_index, candidate, issue.segment,
+        ))
     if source_edits:
         plan = apply_edits(plan, source_edits)
 
@@ -227,10 +260,11 @@ def _correct_file_plan(plan, cwd: str, input_fn=input):
     target_edits = []
     handled_steps = set()
     for issue in report.issues:
-        if issue.kind not in {"missing_target", "same_source_target"} or issue.step in handled_steps:
+        issue_location = (issue.step, issue.segment)
+        if issue.kind not in {"missing_target", "same_source_target"} or issue_location in handled_steps:
             continue
-        handled_steps.add(issue.step)
-        default_target = default_target_for_step(plan, issue.step, cwd)
+        handled_steps.add(issue_location)
+        default_target = default_target_for_step(plan, issue.step, cwd) if issue.segment == 0 else None
         if default_target:
             target = input_fn(f"请输入目标路径/新文件名（回车使用 {default_target}）> ").strip()
             if not target:
@@ -240,7 +274,9 @@ def _correct_file_plan(plan, cwd: str, input_fn=input):
         if not target:
             return plan, _preflight_details(original, plan, "failed", confirmed), "未提供有效目标路径"
         selected_target = target
-        target_edits.append(CommandEdit(issue.step, issue.argument_index, target))
+        target_edits.append(CommandEdit(
+            issue.step, issue.argument_index, target, issue.segment,
+        ))
     if target_edits:
         plan = apply_edits(plan, target_edits)
 
@@ -295,48 +331,37 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     print(f"\n{BOLD}任务计划（{len(plan.steps)} 步）{RESET}")
     print(f"意图：{plan.intent} / {plan.operation or '未细分'} | 实体：{plan.entities or '无'}")
     for index, step in enumerate(plan.steps, 1):
-        analysis = analyze_command(step.command, cwd)
-        deterministic_risk = analysis.safety.level
-        risk = raise_risk(deterministic_risk, plan.risk_advisory)
-        risk_reason = (analysis.safety.reason if risk == deterministic_risk
-                       else "模型语义风险建议提高了风险等级")
-        impact = analysis.impact
-        decision = decide(impact, risk, cwd, analysis.overwrite_paths)
-        assessments.append((step, risk, risk_reason, impact, decision, analysis))
+        review = review_command(step.command, cwd, plan.risk_advisory)
+        assessments.append((step, review))
         print(
             f"{index}. {GREEN}{step.command}{RESET}\n"
             f"   说明：{step.explanation}\n"
             f"   预期：{step.expected or '按退出码判断'}\n"
             f"   验证：{step.verification or '仅检查退出码'}\n"
-            f"   影响：{impact.summary}（{', '.join(impact.tags)}）\n"
-            f"   覆盖：{', '.join(analysis.overwrite_paths) if analysis.overwrite_paths else '无'}\n"
-            f"   决策：{decision.level} - {decision.reason}"
+            f"   影响：{review.impact.summary}（{', '.join(review.impact.tags)}）\n"
+            f"   覆盖：{', '.join(review.overwrite_paths) if review.overwrite_paths else '无'}\n"
+            f"   决策：{review.decision.level} - {review.decision.reason}"
         )
 
-    joined = " && ".join(item[0].command for item in assessments)
-    max_risk = max((item[1] for item in assessments), key=_RISK_ORDER.get)
+    joined = " && ".join(step.command for step, _ in assessments)
+    max_risk = max((review.effective_risk for _, review in assessments), key=_RISK_ORDER.get)
     details = {
         "run_mode": mode,
-        "decisions": [item[4].level for item in assessments],
-        "impact_tags": [item[3].tags for item in assessments],
         "steps": len(assessments),
         "preflight": preflight,
         "intent": plan.intent,
         "operation": plan.operation,
         "entities": plan.entities,
         "risk_advisory": plan.risk_advisory,
-        "safety": [{"level": item[5].safety.level, "reason": item[5].safety.reason,
-                    "rule": item[5].safety.rule, "fragment": item[5].safety.fragment}
-                   for item in assessments],
-        "overwrite_paths": [item[5].overwrite_paths for item in assessments],
+        **_review_history_details([review for _, review in assessments]),
         **batch_details,
     }
-    blocked = next((item for item in assessments if item[4].level == BLOCK), None)
+    blocked = next((item for item in assessments if item[1].decision.level == BLOCK), None)
     if blocked:
-        print(f"{RED}计划已阻止：{blocked[4].reason}{RESET}")
+        print(f"{RED}计划已阻止：{blocked[1].decision.reason}{RESET}")
         save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
-                     status="blocked", executed=False, block_reason=blocked[4].reason,
-                     block_rule=blocked[4].rule, **details)
+                     status="blocked", executed=False, block_reason=blocked[1].decision.reason,
+                     block_rule=blocked[1].decision.rule, **details)
         _remember_task(engine, mode, user_input, cwd, plan, "blocked", False)
         return "blocked"
     if mode == PREVIEW:
@@ -373,17 +398,25 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         _remember_task(engine, mode, user_input, cwd, plan, "cancelled", False)
         return "cancelled"
 
-    outcomes, fix_suggestion = [], ""
-    for step_index, (step, _, _, _, _, _) in enumerate(assessments, 1):
-        current = analyze_command(step.command, cwd)
-        current_decision = decide(current.impact, current.safety.level, cwd, current.overwrite_paths)
-        if current_decision.level == BLOCK:
+    outcomes, fix_suggestion, executed_any = [], "", False
+    final_reviews = [review for _, review in assessments]
+    for step_index, (step, initial_review) in enumerate(assessments, 1):
+        current = review_command(step.command, cwd, plan.risk_advisory)
+        final_reviews[step_index - 1] = current
+        if current.decision.level == BLOCK:
             outcomes.append({"command": step.command, "status": "blocked",
-                             "detail": current_decision.reason, "rule": current_decision.rule,
+                             "detail": current.decision.reason, "rule": current.decision.rule,
                              "step": step_index})
-            print(f"{RED}第 {step_index} 步在执行前被阻止：{current_decision.reason}{RESET}")
+            print(f"{RED}第 {step_index} 步在执行前被阻止：{current.decision.reason}{RESET}")
+            break
+        if not _confirm_increased_risk(initial_review, current, mode, input_fn):
+            outcomes.append({"command": step.command, "status": "blocked_before_execution",
+                             "detail": current.decision.reason, "rule": "review_changed",
+                             "step": step_index})
+            print(f"{RED}第 {step_index} 步因执行前风险提高且未获新授权，已停止。{RESET}")
             break
         try:
+            executed_any = True
             result = run(step.command, executor, cwd=cwd, timeout_seconds=timeout_seconds,
                          persist_cwd=mode != BATCH)
             if result.stdout:
@@ -425,12 +458,14 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     print(f"任务结果：完成 {completed}/{len(assessments)} 步"
           + (f"，第 {failed['step']} 步失败" if failed else "，全部成功"))
     final_status = failed["status"] if failed else (outcomes[-1]["status"] if outcomes else "execution_error")
+    details.update(_review_history_details(final_reviews))
     save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
-                 status=final_status, executed=True, verification=outcomes,
+                 status=final_status, executed=executed_any, verification=outcomes,
                  fix_suggestion=fix_suggestion[:500], timed_out=any(item.get("timed_out") for item in outcomes),
                  **details)
-    engine.remember(user_input, joined)
-    _remember_task(engine, mode, user_input, cwd, plan, final_status, True)
+    if executed_any:
+        engine.remember(user_input, joined)
+    _remember_task(engine, mode, user_input, cwd, plan, final_status, executed_any)
     return final_status
 
 
@@ -468,7 +503,7 @@ def run_batch(engine: Engine, executor: BashExecutor, history: HistoryStore, tas
             summary["results"].append({"index": index, "input": task["input"], "status": status})
             if status in {"verified", "exit_code_only"}:
                 summary["success"] += 1
-            elif status == "blocked":
+            elif status in {"blocked", "blocked_before_execution"}:
                 summary["blocked"] += 1
             elif status == "command_failed" and history.query(1, batch_id=batch_id)[0].get("timed_out"):
                 summary["timed_out"] += 1

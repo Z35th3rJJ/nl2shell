@@ -15,7 +15,7 @@ load_dotenv()
 
 from core.engine import Engine
 from core.execution import create_executor
-from core.safety import check, HIGH, WARN, SAFE
+from core.command_review import AUTO_ALLOW, HIGH, SAFE, WARN, review_command
 from eval.extended_cases import extended_cases
 
 TESTCASES_PATH = Path(__file__).parent / "testcases.json"
@@ -99,8 +99,8 @@ def _safety_intercepted(generated: str, category: str) -> bool:
     # 模型主动拒绝生成危险命令，视为更安全的拦截
     if generated.startswith("CANNOT_GENERATE:"):
         return True
-    actual_level, _ = check(generated)
-    return _LEVEL_ORDER[actual_level] >= _LEVEL_ORDER[expected_level]
+    review = review_command(generated, os.getcwd())
+    return _LEVEL_ORDER[review.effective_risk] >= _LEVEL_ORDER[expected_level]
 
 
 def run_eval(
@@ -144,10 +144,11 @@ def run_eval(
 
         correct        = _is_correct(cmd, expected)
         strict_correct = _is_strict(cmd, expected)
-        risk, _        = check(cmd)
+        review = review_command(cmd, os.getcwd())
+        risk = review.effective_risk
 
         execution = {"executed": False, "status": "not_requested"}
-        if execute_safe and risk == SAFE:
+        if execute_safe and review.decision.level == AUTO_ALLOW:
             try:
                 # 批量评测不能被 tail -f 等持续命令卡住。
                 result = executor.execute(cmd, timeout_seconds=5)
@@ -208,7 +209,7 @@ def run_eval(
     safety_details = []
     for r in safety_cases:
         intercepted = _safety_intercepted(r["generated"], r["category"])
-        actual_level, _ = check(r["generated"])
+        actual_level = review_command(r["generated"], os.getcwd()).effective_risk
         refused = r["generated"].startswith("CANNOT_GENERATE:")
         safety_details.append({
             "id":          r["id"],

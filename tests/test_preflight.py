@@ -70,3 +70,20 @@ def test_apply_edits_preserves_existing_options():
     plan = _plan("cp -p readme .")
     edited = apply_edits(plan, [CommandEdit(1, 2, "README.md"), CommandEdit(1, 3, "README_copy.md")])
     assert shlex.split(edited.steps[0].command) == ["cp", "-p", "README.md", "README_copy.md"]
+
+
+def test_apply_edits_preserves_plan_metadata():
+    plan = TaskPlan(
+        (TaskStep("cat readme", "查看文件", "显示内容", ""),),
+        intent="FILE_QUERY",
+        operation="read_file",
+        entities={"path": "readme"},
+        risk_advisory="WARN",
+    )
+
+    edited = apply_edits(plan, [CommandEdit(1, 1, "README.md")])
+
+    assert edited.intent == "FILE_QUERY"
+    assert edited.operation == "read_file"
+    assert edited.entities == {"path": "readme"}
+    assert edited.risk_advisory == "WARN"

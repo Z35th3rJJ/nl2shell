@@ -49,7 +49,7 @@ def test_workspace_root_delete_records_structured_block_reason(tmp_path):
     executor.execute.assert_not_called()
 
 
-def test_verification_failure_generates_only_one_fix_suggestion():
+def test_verification_failure_generates_only_one_fix_suggestion(tmp_path):
     engine = _engine(
         TaskStep("touch result.txt", "创建文件", "文件存在", "test -e result.txt"),
         TaskStep("ls", "列出文件", "显示列表", ""),
@@ -60,7 +60,7 @@ def test_verification_failure_generates_only_one_fix_suggestion():
         ExecutionResult(0, "", "", 0.1),
         ExecutionResult(1, "", "missing", 0.1),
     ]
-    execute_request(engine, executor, history, "创建并查看文件", "/work", AUTO_SAFE)
+    execute_request(engine, executor, history, "创建并查看文件", str(tmp_path), AUTO_SAFE)
     engine.suggest_fix.assert_called_once()
     assert executor.execute.call_count == 2
     assert history.records[0]["status"] == "verification_failed"
@@ -236,3 +236,58 @@ def test_clarification_regenerates_only_once(tmp_path):
     assert engine.generate_task_plan.call_count == 2
     executor.execute.assert_not_called()
     assert history.records[0]["status"] == "preflight_failed"
+
+
+def test_execution_rechecks_and_requires_new_consent_when_risk_increases(tmp_path):
+    engine = _engine(TaskStep("echo new > result.txt", "写入文件", "文件已更新", ""))
+    executor, history = Mock(), History()
+
+    def become_available():
+        (tmp_path / "result.txt").write_text("other process", encoding="utf-8")
+        return True
+
+    executor.is_available.side_effect = become_available
+    status = execute_request(
+        engine, executor, history, "写入结果", str(tmp_path), AUTO_SAFE,
+        input_fn=lambda _: "n",
+    )
+
+    assert status == "blocked_before_execution"
+    executor.execute.assert_not_called()
+    assert history.records[0]["executed"] is False
+    assert history.records[0]["decisions"] == ["confirm"]
+    assert history.records[0]["overwrite_paths"] == [(str((tmp_path / "result.txt").resolve()),)]
+
+
+def test_batch_does_not_execute_when_recheck_requires_confirmation(tmp_path):
+    engine = _engine(TaskStep("echo new > result.txt", "写入文件", "", ""))
+    executor, history = Mock(), History()
+
+    def become_available():
+        (tmp_path / "result.txt").write_text("created later", encoding="utf-8")
+        return True
+
+    executor.is_available.side_effect = become_available
+    status = execute_request(
+        engine, executor, history, "写入结果", str(tmp_path), BATCH,
+        input_fn=lambda _: (_ for _ in ()).throw(AssertionError("批处理不得询问")),
+    )
+
+    assert status == "blocked_before_execution"
+    executor.execute.assert_not_called()
+
+
+def test_candidate_in_later_command_segment_is_edited_safely(tmp_path):
+    (tmp_path / "README.md").write_text("docs", encoding="utf-8")
+    engine = _engine(TaskStep("ls && cat readme", "列出并查看", "", ""))
+    executor, history = Mock(), History()
+
+    status = execute_request(
+        engine, executor, history, "列出并查看readme", str(tmp_path), PREVIEW,
+        input_fn=lambda _: "",
+    )
+
+    assert status == "preview"
+    assert history.records[0]["preflight"]["corrected_commands"] == [
+        "ls && cat README.md"
+    ]

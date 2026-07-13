@@ -1,46 +1,15 @@
-"""把命令风险、影响范围统一映射为执行决策。"""
-from dataclasses import dataclass
-
-from .impact import (
-    CommandImpact, deletion_covers_workspace, paths_stay_in_workspace,
-    reads_stay_in_workspace,
+"""兼容 adapter：新代码应使用 core.command_review。"""
+from .command_review import (
+    AUTO_ALLOW,
+    BLOCK,
+    CONFIRM,
+    STRONG_CONFIRM,
+    CommandImpact,
+    ExecutionDecision,
+    decide_execution,
 )
-from .safety import HIGH, WARN
-
-AUTO_ALLOW = "auto-allow"
-CONFIRM = "confirm"
-STRONG_CONFIRM = "strong-confirm"
-BLOCK = "block"
-
-
-@dataclass(frozen=True)
-class ExecutionDecision:
-    level: str
-    reason: str
-    rule: str = ""
 
 
 def decide(impact: CommandImpact, risk: str, cwd: str,
            overwrite_paths: tuple[str, ...] = ()) -> ExecutionDecision:
-    tags = set(impact.tags)
-    if risk == HIGH:
-        return ExecutionDecision(BLOCK, "命令属于毁灭性高危操作，已永久阻止", "high_risk")
-    if deletion_covers_workspace(impact, cwd):
-        return ExecutionDecision(
-            BLOCK, "禁止删除当前工作区本身或其父目录", "workspace_root_delete",
-        )
-    if "privilege" in tags:
-        return ExecutionDecision(STRONG_CONFIRM, "命令需要 sudo 或系统级权限")
-    if not impact.known or "unknown" in tags:
-        return ExecutionDecision(STRONG_CONFIRM, "命令包含未知或复杂 Shell 语法")
-    if risk == WARN or "delete" in tags:
-        return ExecutionDecision(CONFIRM, "命令包含删除或警告级操作")
-    if overwrite_paths:
-        return ExecutionDecision(CONFIRM, "命令会覆盖已有文件", "file_overwrite")
-    if "network" in tags:
-        return ExecutionDecision(CONFIRM, "命令会访问网络")
-    if "write" in tags and not paths_stay_in_workspace(impact, cwd):
-        return ExecutionDecision(CONFIRM, "命令可能写入当前工作目录之外")
-    if impact.read_paths and not reads_stay_in_workspace(impact, cwd):
-        return ExecutionDecision(AUTO_ALLOW, "命令会读取工作区外文件，但写入仍在工作区内")
-    return ExecutionDecision(AUTO_ALLOW, "已识别的安全操作")
+    return decide_execution(impact, risk, cwd, overwrite_paths)

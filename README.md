@@ -83,7 +83,8 @@ nl2shell/
 ├── core/
 │   ├── llm.py       # 模型 API 封装（支持 DeepSeek 云端 / 本地 Ollama 切换）
 │   ├── engine.py    # 核心内核：命令生成、意图澄清、上下文管理
-│   └── safety.py    # 安全审查：危险命令检测与风险分级
+│   ├── command_review.py # 统一命令分析、文件事实、风险与执行决策
+│   └── safety.py    # 旧安全接口的兼容 adapter
 ├── eval/
 │   ├── testcases.json   # 基础用例；运行时与扩展场景组成 200 条系统评测集
 │   ├── run_eval.py      # 自动评测脚本（双指标 + 安全拦截率）
@@ -224,7 +225,7 @@ SETUP_COMPLETE=true
 
 可设置 `EXECUTION_BACKEND=sandbox` 使用 Docker 沙箱。沙箱默认无网络、非 root、丢弃 Linux capabilities，并限制内存、CPU 和进程数量；Docker 不可用时任务直接报错，不会静默改用本机 Bash。
 
-任务计划包含结构化 `intent`、`operation`、`entities` 和模型风险建议。确定性规则拥有最终决定权，模型建议只能提高风险等级。受限解析器可识别简单管道、`&&` 和文件重定向，无法证明安全的语法继续要求强确认。
+任务计划包含结构化 `intent`、`operation`、`entities` 和模型风险建议。统一 `CommandReview` 供计划展示、执行前复检、验证和评测复用；确定性规则拥有最终决定权，模型建议只能提高风险等级。受限解析器可识别简单管道、`&&` 和文件重定向，无法证明安全的语法继续要求强确认。执行前复检若提高确认等级，旧授权立即失效，批处理不会静默执行。
 
 ## 开发与测试
 

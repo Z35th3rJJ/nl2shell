@@ -1,8 +1,7 @@
 """命令执行后的保守验证器。"""
 from dataclasses import dataclass
+from .command_review import SAFE, review_command
 from .execution import BashExecutor, ExecutionResult
-from .impact import analyze
-from .safety import SAFE, assess
 
 
 @dataclass(frozen=True)
@@ -20,11 +19,10 @@ def verify(executor: BashExecutor, command_result: ExecutionResult, verification
         return VerificationResult("command_failed", "主命令退出码非 0")
     if not verification_command:
         return VerificationResult("exit_code_only", "未提供验证命令，已按退出码判定")
-    safety = assess(verification_command)
-    if safety.level != SAFE:
-        return VerificationResult("invalid_verifier", f"验证命令存在风险：{safety.reason}")
-    impact = analyze(verification_command)
-    if not impact.known or set(impact.tags) != {"read"}:
+    review = review_command(verification_command, cwd or ".")
+    if review.deterministic_risk != SAFE:
+        return VerificationResult("invalid_verifier", f"验证命令存在风险：{review.safety.reason}")
+    if not review.verification_allowed:
         return VerificationResult("invalid_verifier", "验证命令不是已识别的只读命令")
     result = executor.execute(verification_command, timeout_seconds=10, cwd=cwd)
     if result.timed_out:
