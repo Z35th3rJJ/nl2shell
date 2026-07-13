@@ -2,6 +2,7 @@ import os
 import time
 import httpx
 from openai import APIConnectionError, APITimeoutError, OpenAI
+from .redaction import redact_messages
 
 # 按后端缓存客户端，支持同进程内切换（对比实验用）
 _clients: dict[str, tuple[OpenAI, str]] = {}
@@ -45,10 +46,11 @@ def _get_client(backend: str | None = None) -> tuple[OpenAI, str]:
 
 def chat(messages: list[dict], backend: str | None = None) -> str:
     client, model = _get_client(backend)
+    safe_messages = redact_messages(messages)
     for attempt in range(2):
         try:
             response = client.chat.completions.create(
-                model=model, messages=messages, temperature=0,
+                model=model, messages=safe_messages, temperature=0,
             )
             content = response.choices[0].message.content
             if not content or not content.strip():

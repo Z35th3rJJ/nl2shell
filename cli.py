@@ -9,10 +9,15 @@ from uuid import uuid4
 
 from dotenv import load_dotenv
 
+from core.command_analysis import analyze_command, raise_risk
 from core.decision import AUTO_ALLOW, BLOCK, STRONG_CONFIRM, decide
 from core.diagnostics import diagnose_environment
 from core.engine import Engine
-from core.execution import BashExecutor, bash_unavailable_message, try_change_directory
+from core.error_analysis import classify_error
+from core.execution import (
+    BashExecutor, DockerExecutor, bash_unavailable_message, create_executor,
+    try_change_directory,
+)
 from core.history import HistoryStore
 from core.impact import analyze
 from core.input_session import create_input_session
@@ -137,7 +142,8 @@ def print_status(mode: str, executor: BashExecutor) -> None:
         f"  模型：{backend} / {model}\n"
         f"  工作目录：{os.getcwd()}\n"
         f"  运行方式：{mode_name(mode)} - {mode_description(mode)}\n"
-        f"  Bash：{'可用' if executor.is_available() else '不可用'}"
+        f"  执行后端：{'Docker 沙箱' if isinstance(executor, DockerExecutor) else '本机 Bash'}"
+        f"（{'可用' if executor.is_available() else '不可用'}）"
     )
 
 
@@ -287,17 +293,23 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
 
     assessments = []
     print(f"\n{BOLD}任务计划（{len(plan.steps)} 步）{RESET}")
+    print(f"意图：{plan.intent} / {plan.operation or '未细分'} | 实体：{plan.entities or '无'}")
     for index, step in enumerate(plan.steps, 1):
-        risk, risk_reason = check(step.command)
-        impact = analyze(step.command)
-        decision = decide(impact, risk, cwd)
-        assessments.append((step, risk, risk_reason, impact, decision))
+        analysis = analyze_command(step.command, cwd)
+        deterministic_risk = analysis.safety.level
+        risk = raise_risk(deterministic_risk, plan.risk_advisory)
+        risk_reason = (analysis.safety.reason if risk == deterministic_risk
+                       else "模型语义风险建议提高了风险等级")
+        impact = analysis.impact
+        decision = decide(impact, risk, cwd, analysis.overwrite_paths)
+        assessments.append((step, risk, risk_reason, impact, decision, analysis))
         print(
             f"{index}. {GREEN}{step.command}{RESET}\n"
             f"   说明：{step.explanation}\n"
             f"   预期：{step.expected or '按退出码判断'}\n"
             f"   验证：{step.verification or '仅检查退出码'}\n"
             f"   影响：{impact.summary}（{', '.join(impact.tags)}）\n"
+            f"   覆盖：{', '.join(analysis.overwrite_paths) if analysis.overwrite_paths else '无'}\n"
             f"   决策：{decision.level} - {decision.reason}"
         )
 
@@ -309,11 +321,14 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         "impact_tags": [item[3].tags for item in assessments],
         "steps": len(assessments),
         "preflight": preflight,
-        "safety": [
-            {"level": result.level, "reason": result.reason,
-             "rule": result.rule, "fragment": result.fragment}
-            for result in (assess(item[0].command) for item in assessments)
-        ],
+        "intent": plan.intent,
+        "operation": plan.operation,
+        "entities": plan.entities,
+        "risk_advisory": plan.risk_advisory,
+        "safety": [{"level": item[5].safety.level, "reason": item[5].safety.reason,
+                    "rule": item[5].safety.rule, "fragment": item[5].safety.fragment}
+                   for item in assessments],
+        "overwrite_paths": [item[5].overwrite_paths for item in assessments],
         **batch_details,
     }
     blocked = next((item for item in assessments if item[4].level == BLOCK), None)
@@ -331,7 +346,9 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         _remember_task(engine, mode, user_input, cwd, plan, "preview", False)
         return "preview"
     if not executor.is_available():
-        print(f"{RED}错误：{bash_unavailable_message()}{RESET}")
+        unavailable = ("Docker 沙箱不可用；请安装并启动 Docker，程序不会降级到本机执行"
+                       if isinstance(executor, DockerExecutor) else bash_unavailable_message())
+        print(f"{RED}错误：{unavailable}{RESET}")
         save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
                      status="bash_unavailable", executed=False, **details)
         _remember_task(engine, mode, user_input, cwd, plan, "bash_unavailable", False)
@@ -357,10 +374,9 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         return "cancelled"
 
     outcomes, fix_suggestion = [], ""
-    for step_index, (step, _, _, _, _) in enumerate(assessments, 1):
-        current_safety = assess(step.command)
-        current_impact = analyze(step.command)
-        current_decision = decide(current_impact, current_safety.level, cwd)
+    for step_index, (step, _, _, _, _, _) in enumerate(assessments, 1):
+        current = analyze_command(step.command, cwd)
+        current_decision = decide(current.impact, current.safety.level, cwd, current.overwrite_paths)
         if current_decision.level == BLOCK:
             outcomes.append({"command": step.command, "status": "blocked",
                              "detail": current_decision.reason, "rule": current_decision.rule,
@@ -375,12 +391,15 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             if result.stderr:
                 print(f"{RED}{result.stderr}{RESET}", end="" if result.stderr.endswith("\n") else "\n")
             verification = verify(executor, result, step.verification, cwd=cwd)
+            error_analysis = classify_error(result)
             print(f"  验证结果：{verification.status} - {verification.detail}")
             outcomes.append({"command": step.command, "status": verification.status,
                              "detail": verification.detail, "timed_out": result.timed_out,
                              "stdout": result.stdout[-2000:], "stderr": result.stderr[-2000:],
                              "output_truncated": result.output_truncated, "step": step_index,
-                             "duration_seconds": result.duration_seconds})
+                             "duration_seconds": result.duration_seconds,
+                             "error_category": error_analysis.category if error_analysis else "",
+                             "suggested_checks": error_analysis.checks if error_analysis else ()})
         except Exception as error:
             outcomes.append({"command": step.command, "status": "execution_error", "detail": str(error),
                              "step": step_index})
@@ -388,7 +407,12 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             break
         if verification.status in {"command_failed", "verification_failed", "invalid_verifier"}:
             try:
-                fix_suggestion = engine.suggest_fix(step.command, verification.detail)
+                diagnostic = verification.detail
+                if result.stderr:
+                    diagnostic += f"\nstderr：{result.stderr[-2000:]}"
+                if error_analysis:
+                    diagnostic += f"\n错误类别：{error_analysis.category}\n建议检查：{'；'.join(error_analysis.checks)}"
+                fix_suggestion = engine.suggest_fix(step.command, diagnostic)
             except Exception as error:
                 fix_suggestion = f"修复建议生成失败：{error}"
             print(f"{YELLOW}修复建议（不会自动执行）：{fix_suggestion}{RESET}")
@@ -546,7 +570,12 @@ def main(input_session=None, args=None) -> None:
     except ValueError as error:
         print(f"{RED}配置错误：{error}{RESET}")
         return
-    executor, engine, history = BashExecutor(), Engine(), HistoryStore()
+    try:
+        executor = create_executor()
+    except ValueError as error:
+        print(f"{RED}执行后端配置错误：{error}{RESET}")
+        return
+    engine, history = Engine(), HistoryStore()
     if args.batch:
         try:
             run_batch(engine, executor, history, Path(args.batch), args.timeout)

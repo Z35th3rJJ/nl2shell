@@ -4,7 +4,7 @@ from pathlib import Path
 import shlex
 
 
-READ_COMMANDS = {"ls", "pwd", "cat", "grep", "find", "head", "tail", "wc", "du", "df", "free", "ps", "uptime", "whoami", "uname", "ip", "ss", "stat", "test"}
+READ_COMMANDS = {"ls", "pwd", "cat", "grep", "find", "head", "tail", "wc", "du", "df", "free", "ps", "uptime", "whoami", "uname", "ip", "ss", "stat", "test", "sort", "uniq", "awk", "sed", "cut"}
 WRITE_COMMANDS = {"mkdir", "touch", "cp", "mv", "tar", "zip", "chmod", "rmdir"}
 DELETE_COMMANDS = {"rm", "rmdir"}
 NETWORK_COMMANDS = {"curl", "wget", "ping", "ssh", "scp", "rsync"}
@@ -25,6 +25,56 @@ def _simple_file_write(command: str) -> "CommandImpact | None":
     if not destination or any(character in destination for character in "*?[]"):
         return None
     return CommandImpact(("write",), (), (destination,), True, "该命令将写入文件")
+
+
+def _composite_impact(command: str) -> "CommandImpact | None":
+    if any(character in command for character in "$`;`"):  # 展开、分号与嵌套命令保持未知
+        return None
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    if not any(token in {"|", "&&", ">"} for token in tokens):
+        return None
+    if any(token in {"||", ";", "<", ">>"} for token in tokens):
+        return None
+
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in {"|", "&&"}:
+            if not segments[-1]:
+                return None
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    if not segments[-1]:
+        return None
+
+    impacts = []
+    for segment in segments:
+        write_paths: tuple[str, ...] = ()
+        if ">" in segment:
+            if segment.count(">") != 1 or segment.index(">") != len(segment) - 2:
+                return None
+            destination = segment[-1]
+            if any(character in destination for character in "*?[]"):
+                return None
+            write_paths = (destination,)
+            segment = segment[:-2]
+        if not segment:
+            return None
+        impact = analyze(shlex.join(segment))
+        if not impact.known:
+            return None
+        tags = tuple(dict.fromkeys((*impact.tags, *(('write',) if write_paths else ()))))
+        impacts.append(CommandImpact(tags, impact.read_paths, (*impact.write_paths, *write_paths),
+                                     True, impact.summary))
+    tags = tuple(dict.fromkeys(tag for impact in impacts for tag in impact.tags))
+    reads = tuple(path for impact in impacts for path in impact.read_paths)
+    writes = tuple(path for impact in impacts for path in impact.write_paths)
+    return CommandImpact(tags, reads, writes, True, "该组合命令的结构和影响已识别")
 
 
 @dataclass(frozen=True)
@@ -56,6 +106,9 @@ def analyze(command: str) -> CommandImpact:
     simple_write = _simple_file_write(command)
     if simple_write is not None:
         return simple_write
+    composite = _composite_impact(command)
+    if composite is not None:
+        return composite
     try:
         parts = shlex.split(command)
     except ValueError:

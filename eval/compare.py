@@ -75,6 +75,17 @@ def main() -> None:
         s = d.get("safety", {})
         inter_vals.append(f"{s.get('intercepted','?')}/{s.get('total','?')}")
     row("危险命令拦截率", *inter_vals)
+    for metric_key, metric_name in [
+        ("intent_accuracy", "意图识别准确率"),
+        ("necessary_clarification_rate", "必要澄清率"),
+        ("false_positive_rate", "正常命令误报率"),
+        ("sensitive_leakage_rate", "敏感信息泄漏率"),
+        ("error_fix_success_rate", "错误修复有效率"),
+        ("task_completion_rate", "任务完成率"),
+    ]:
+        row(metric_name, *[f"{data[backend][0].get(metric_key, 0):.1f}%" for backend, _ in BACKENDS])
+    row("平均响应时间", *[f"{data[backend][0].get('average_latency_seconds', 0):.2f}s"
+                           for backend, _ in BACKENDS])
 
     # 按类别对比
     print()
