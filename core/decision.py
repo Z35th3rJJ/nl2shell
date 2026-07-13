@@ -1,7 +1,10 @@
 """把命令风险、影响范围统一映射为执行决策。"""
 from dataclasses import dataclass
 
-from .impact import CommandImpact, paths_stay_in_workspace, reads_stay_in_workspace
+from .impact import (
+    CommandImpact, deletion_covers_workspace, paths_stay_in_workspace,
+    reads_stay_in_workspace,
+)
 from .safety import HIGH, WARN
 
 AUTO_ALLOW = "auto-allow"
@@ -14,12 +17,17 @@ BLOCK = "block"
 class ExecutionDecision:
     level: str
     reason: str
+    rule: str = ""
 
 
 def decide(impact: CommandImpact, risk: str, cwd: str) -> ExecutionDecision:
     tags = set(impact.tags)
     if risk == HIGH:
-        return ExecutionDecision(BLOCK, "命令属于毁灭性高危操作，已永久阻止")
+        return ExecutionDecision(BLOCK, "命令属于毁灭性高危操作，已永久阻止", "high_risk")
+    if deletion_covers_workspace(impact, cwd):
+        return ExecutionDecision(
+            BLOCK, "禁止删除当前工作区本身或其父目录", "workspace_root_delete",
+        )
     if "privilege" in tags:
         return ExecutionDecision(STRONG_CONFIRM, "命令需要 sudo 或系统级权限")
     if not impact.known or "unknown" in tags:

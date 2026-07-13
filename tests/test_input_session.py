@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 from types import ModuleType
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import cli
 from core.input_session import BasicInputSession, create_input_session, default_input_history_path
@@ -89,3 +89,14 @@ def test_main_uses_session_only_for_primary_command_input(monkeypatch):
     monkeypatch.setattr(cli, "HistoryStore", Mock)
     cli.main(input_session=session)
     session.prompt.assert_called_once()
+
+
+def test_recover_working_directory_uses_existing_parent(tmp_path, monkeypatch):
+    deleted = tmp_path / "project"
+    deleted.mkdir()
+    deleted.rmdir()
+    with patch("cli.os.getcwd", side_effect=FileNotFoundError), \
+         patch("cli.os.chdir"):
+        cwd, warning = cli.recover_working_directory(str(deleted))
+    assert cwd == str(tmp_path.resolve())
+    assert "已切换" in warning

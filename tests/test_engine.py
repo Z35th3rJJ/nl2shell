@@ -40,3 +40,13 @@ def test_remember_adds_short_term_context():
     engine.remember("列文件", "ls")
 
     assert engine._history == [("列文件", "ls")]
+
+
+@pytest.mark.parametrize("user_input", ["删除", "清理一下", "请帮我移除"])
+def test_ambiguous_deletion_requires_clarification_without_calling_model(monkeypatch, user_input):
+    from core.engine import Engine
+
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: pytest.fail("不应调用模型"))
+    plan = Engine(ssh_hosts=[]).generate_task_plan(user_input, "/work")
+    assert not plan.steps
+    assert "明确" in plan.clarification

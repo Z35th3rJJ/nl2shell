@@ -37,6 +37,17 @@ def test_destructive_command_is_blocked_before_execution():
     assert history.records[0]["status"] == "blocked"
 
 
+def test_workspace_root_delete_records_structured_block_reason(tmp_path):
+    engine = _engine(TaskStep(f"rm -rf {tmp_path.as_posix()}", "删除项目", "", ""))
+    executor, history = Mock(), History()
+    status = execute_request(engine, executor, history, "删除", str(tmp_path), AUTO_SAFE)
+    assert status == "blocked"
+    assert history.records[0]["block_rule"] == "workspace_root_delete"
+    payload = json_result(history.records[0], status)
+    assert payload["error"] == "禁止删除当前工作区本身或其父目录"
+    executor.execute.assert_not_called()
+
+
 def test_verification_failure_generates_only_one_fix_suggestion():
     engine = _engine(
         TaskStep("touch result.txt", "创建文件", "文件存在", "test -e result.txt"),
