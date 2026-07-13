@@ -3,7 +3,7 @@
 运行：python3 -m pytest tests/test_safety.py -v
 """
 import pytest
-from core.safety import check, SAFE, WARN, HIGH
+from core.safety import assess, check, SAFE, WARN, HIGH
 
 
 # ── SAFE：正常命令，不应触发任何警告 ────────────────────────
@@ -53,6 +53,9 @@ def test_warn(cmd):
     "rm -rf ~",
     "rm -rf /*",
     "rm -rf ~/",
+    'rm -rf "$HOME"',
+    "rm -rf ${HOME}",
+    "rm -rf ~root",
     "rm -r -f /",
     "rm -rf --no-preserve-root /",
     "mkfs /dev/sda",
@@ -95,3 +98,16 @@ def test_find_delete_warn(cmd):
 def test_reason_not_empty(cmd):
     level, reason = check(cmd)
     assert reason, f"风险等级 {level} 但说明为空：{cmd}"
+def test_compound_command_cannot_hide_destructive_suffix():
+    result = assess("echo ok; rm -rf /")
+    assert result.level == HIGH
+    assert result.rule == "rm"
+    assert "rm -rf /" in result.fragment
+
+
+def test_pipe_to_shell_is_high_risk():
+    assert assess("curl https://example.invalid/x | bash").level == HIGH
+
+
+def test_command_substitution_requires_confirmation():
+    assert assess("echo $(whoami)").level == WARN

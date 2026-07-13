@@ -1,6 +1,6 @@
 from unittest.mock import Mock
 
-from cli import execute_request
+from cli import execute_request, json_result
 from core.execution import ExecutionResult
 from core.settings import AUTO_SAFE, PREVIEW
 from core.task_plan import TaskPlan, TaskStep
@@ -52,6 +52,23 @@ def test_verification_failure_generates_only_one_fix_suggestion():
     engine.suggest_fix.assert_called_once()
     assert executor.execute.call_count == 2
     assert history.records[0]["status"] == "verification_failed"
+    assert history.records[0]["verification"][-1]["status"] == "not_executed"
+
+
+def test_assume_yes_only_skips_safe_confirmation():
+    engine = _engine(TaskStep("ls", "", "", ""))
+    executor, history = Mock(), History()
+    executor.is_available.return_value = True
+    executor.execute.return_value = ExecutionResult(0, "", "", 0.1)
+    execute_request(engine, executor, history, "输出", "/work", "confirm",
+                    input_fn=lambda _: (_ for _ in ()).throw(AssertionError("不应询问")), assume_yes=True)
+    assert history.records[0]["status"] == "exit_code_only"
+
+
+def test_json_result_has_stable_public_shape():
+    payload = json_result({"risk": "SAFE", "command": "ls"}, "preview")
+    assert set(payload) == {"status", "risk_level", "steps", "verification",
+                            "duration_seconds", "error"}
 
 
 def test_candidate_and_target_are_corrected_without_regenerating_plan(tmp_path):
