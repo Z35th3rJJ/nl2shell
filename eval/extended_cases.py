@@ -46,6 +46,8 @@ def extended_cases(start_id: int = 51) -> list[dict]:
     for command in ("docker", "git", "python", "node", "make"):
         add("错误修复", f"命令 {command} 提示 command not found，先检查它是否存在",
             f"command -v {command}", "ERROR_FIX")
+    add("文件查询", "统计当前目录下的 Python 文件",
+        "find . -maxdepth 1 -type f -name '*.py' | wc -l", "FILE_QUERY")
     while len(cases) < 150:
         index = len(cases)
         add("文件查询", f"列出当前目录文件（变体 {index}）", "ls", "FILE_QUERY")

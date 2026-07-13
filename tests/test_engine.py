@@ -82,6 +82,169 @@ def test_create_file_prompt_forbids_guessing_content(monkeypatch):
     assert "不得从文件名猜测内容" in captured["messages"][0]["content"]
 
 
+def test_file_count_plan_retries_semantically_wrong_result(monkeypatch):
+    from core.engine import Engine
+
+    replies = iter([
+        '{"intent":"FILE_QUERY","operation":"find_files",'
+        '"entities":{"path":"/work/project","pattern":"*.py"},'
+        '"steps":[{"command":"ls -l /work/project/*.py","explanation":"列出文件",'
+        '"expected":"文件列表","verification":"ls -l /work/project/*.py"}]}',
+        '{"intent":"FILE_QUERY","operation":"count_files",'
+        '"entities":{"path":".","pattern":"*.py"},'
+        '"steps":[{"command":"find . -maxdepth 1 -type f -name \'*.py\' | wc -l",'
+        '"explanation":"统计当前层 Python 文件数量","expected":"输出文件数量",'
+        '"verification":""}]}',
+    ])
+    calls = []
+
+    def fake_chat(messages, backend=None):
+        calls.append(messages)
+        return next(replies)
+
+    monkeypatch.setattr("core.engine.chat", fake_chat)
+    plan = Engine(ssh_hosts=[]).generate_task_plan(
+        "统计当前目录下的 Python 文件", "/work/project"
+    )
+
+    assert len(calls) == 2
+    assert plan.operation == "count_files"
+    assert plan.entities == {"path": ".", "pattern": "*.py"}
+    assert plan.steps[0].command == "find . -maxdepth 1 -type f -name '*.py' | wc -l"
+    assert plan.steps[0].verification == ""
+    assert "count_files" in calls[1][-1]["content"]
+    assert "/work/project" in calls[1][-1]["content"]
+
+
+def test_file_count_plan_fails_after_one_retry(monkeypatch):
+    from core.engine import Engine
+
+    bad_reply = (
+        '{"intent":"FILE_QUERY","operation":"find_files","entities":{"path":"."},'
+        '"steps":[{"command":"ls *.py","explanation":"列出文件",'
+        '"expected":"文件列表","verification":""}]}'
+    )
+    calls = []
+
+    def fake_chat(messages, backend=None):
+        calls.append(messages)
+        return bad_reply
+
+    monkeypatch.setattr("core.engine.chat", fake_chat)
+    with pytest.raises(ValueError, match="两次生成的计划均未满足任务约束"):
+        Engine(ssh_hosts=[]).generate_task_plan("统计当前目录下的 Python 文件", "/work")
+
+    assert len(calls) == 2
+
+
+def test_current_directory_count_rejects_recursive_scope_and_cwd_in_entities(monkeypatch):
+    from core.engine import Engine
+
+    replies = iter([
+        '{"intent":"FILE_QUERY","operation":"count_files",'
+        '"entities":{"path":"/work/project/src","pattern":"*.py"},'
+        '"steps":[{"command":"find . -type f -name \'*.py\' | wc -l",'
+        '"explanation":"统计文件数量","expected":"输出数量","verification":""}]}',
+        '{"intent":"FILE_QUERY","operation":"count_files",'
+        '"entities":{"path":".","pattern":"*.py"},'
+        '"steps":[{"command":"find . -maxdepth 1 -type f -name \'*.py\' | wc -l",'
+        '"explanation":"统计当前层文件数量","expected":"输出数量","verification":""}]}',
+    ])
+    calls = []
+
+    def fake_chat(messages, backend=None):
+        calls.append(messages)
+        return next(replies)
+
+    monkeypatch.setattr("core.engine.chat", fake_chat)
+    plan = Engine(ssh_hosts=[]).generate_task_plan(
+        "统计当前目录下的 Python 文件", "/work/project"
+    )
+
+    assert len(calls) == 2
+    assert plan.entities["path"] == "."
+    correction = calls[1][-1]["content"]
+    assert "当前层" in correction
+    assert "entities" in correction
+
+
+def test_file_count_rejects_counting_lines_inside_files(monkeypatch):
+    from core.engine import Engine
+
+    reply = (
+        '{"intent":"FILE_QUERY","operation":"count_files",'
+        '"entities":{"path":".","pattern":"*.py"},'
+        '"steps":[{"command":"wc -l *.py","explanation":"统计数量",'
+        '"expected":"输出数量","verification":""}]}'
+    )
+    monkeypatch.setattr("core.engine.chat", lambda messages, backend=None: reply)
+
+    with pytest.raises(ValueError, match="通过管道执行实际计数"):
+        Engine(ssh_hosts=[]).generate_task_plan("统计当前目录下的 Python 文件", "/work")
+
+
+def test_file_count_plan_allows_user_supplied_absolute_path(monkeypatch):
+    from core.engine import Engine
+
+    calls = []
+    reply = (
+        '{"intent":"FILE_QUERY","operation":"count_files",'
+        '"entities":{"path":"/data/project","pattern":"*.py"},'
+        '"steps":[{"command":"find /data/project -maxdepth 1 -type f -name \'*.py\' | wc -l",'
+        '"explanation":"统计文件数量","expected":"输出数量","verification":""}]}'
+    )
+
+    def fake_chat(messages, backend=None):
+        calls.append(messages)
+        return reply
+
+    monkeypatch.setattr("core.engine.chat", fake_chat)
+    plan = Engine(ssh_hosts=[]).generate_task_plan(
+        "统计 /data/project 下的 Python 文件数量", "/data/project"
+    )
+
+    assert len(calls) == 1
+    assert plan.entities["path"] == "/data/project"
+    assert "/data/project" in plan.steps[0].command
+
+
+def test_list_files_request_does_not_require_count_operation(monkeypatch):
+    from core.engine import Engine
+
+    calls = []
+    reply = (
+        '{"intent":"FILE_QUERY","operation":"find_files",'
+        '"entities":{"path":".","pattern":"*.py"},'
+        '"steps":[{"command":"find . -maxdepth 1 -type f -name \'*.py\'",'
+        '"explanation":"列出文件","expected":"文件列表","verification":""}]}'
+    )
+
+    def fake_chat(messages, backend=None):
+        calls.append(messages)
+        return reply
+
+    monkeypatch.setattr("core.engine.chat", fake_chat)
+    plan = Engine(ssh_hosts=[]).generate_task_plan("列出当前目录下的 Python 文件", "/work")
+
+    assert len(calls) == 1
+    assert plan.operation == "find_files"
+
+
+def test_duplicate_verification_command_is_cleared(monkeypatch):
+    from core.engine import Engine
+
+    reply = (
+        '{"intent":"FILE_QUERY","operation":"find_files","entities":{"path":"."},'
+        '"steps":[{"command":"ls","explanation":"列出文件",'
+        '"expected":"文件列表","verification":"ls"}]}'
+    )
+    monkeypatch.setattr("core.engine.chat", lambda messages, backend=None: reply)
+
+    plan = Engine(ssh_hosts=[]).generate_task_plan("列出当前目录文件", "/work")
+
+    assert plan.steps[0].verification == ""
+
+
 def test_fix_prompt_marks_execution_output_untrusted(monkeypatch):
     from core.engine import Engine
 

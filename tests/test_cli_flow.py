@@ -30,6 +30,27 @@ def test_preview_never_calls_bash():
     engine.remember_task.assert_called_once()
 
 
+def test_invalid_file_count_plan_is_recorded_without_calling_bash(monkeypatch):
+    from core.engine import Engine
+
+    bad_reply = (
+        '{"intent":"FILE_QUERY","operation":"find_files","entities":{"path":"."},'
+        '"steps":[{"command":"ls *.py","explanation":"列出文件",'
+        '"expected":"文件列表","verification":""}]}'
+    )
+    monkeypatch.setattr("core.engine.chat", lambda messages, backend=None: bad_reply)
+    executor, history = Mock(), History()
+
+    status = execute_request(
+        Engine(ssh_hosts=[]), executor, history,
+        "统计当前目录下的 Python 文件", "/work", PREVIEW,
+    )
+
+    assert status == "plan_failed"
+    assert history.records[0]["status"] == "plan_failed"
+    executor.execute.assert_not_called()
+
+
 def test_destructive_command_is_blocked_before_execution():
     engine = _engine(TaskStep("rm -rf /", "删除系统", "", ""))
     executor, history = Mock(), History()
