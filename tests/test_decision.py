@@ -36,7 +36,12 @@ def test_copy_only_uses_destination_for_write_boundary(tmp_path):
 
 def test_sudo_and_unknown_syntax_require_strong_confirmation():
     assert _decide("sudo apt update").level == STRONG_CONFIRM
-    assert _decide("ls | wc -l").level == STRONG_CONFIRM
+    assert _decide("echo $HOME").level == STRONG_CONFIRM
+
+
+def test_existing_overwrite_requires_confirmation():
+    impact = analyze("touch result.txt")
+    assert decide(impact, "SAFE", "/work", ("/work/result.txt",)).level == CONFIRM
 
 
 def test_destructive_command_is_always_blocked():

@@ -85,7 +85,7 @@ nl2shell/
 │   ├── engine.py    # 核心内核：命令生成、意图澄清、上下文管理
 │   └── safety.py    # 安全审查：危险命令检测与风险分级
 ├── eval/
-│   ├── testcases.json   # 50 条中文指令测试集
+│   ├── testcases.json   # 基础用例；运行时与扩展场景组成 200 条系统评测集
 │   ├── run_eval.py      # 自动评测脚本（双指标 + 安全拦截率）
 │   └── compare.py       # 云端 vs 本地模型对比报告
 ├── tests/
@@ -111,6 +111,8 @@ python3 eval/compare.py
 # 实际执行评测中的 SAFE 命令（WARN/HIGH 始终不执行）
 python3 eval/run_eval.py --backend local --execute-safe
 ```
+
+评测默认运行 200 条用例并输出命令准确率、意图准确率、必要澄清率、安全误报率、危险命令拦截率和平均响应时间。`--execute-safe` 强制使用 Docker 沙箱，不会降级到本机执行。
 
 ## 批量自动化
 
@@ -217,6 +219,12 @@ SETUP_COMPLETE=true
 交互模式启动时会显示环境问题，也可以随时输入 `/doctor`。模型网络连接失败会自动重试一次，随后返回可读错误，不会无限重试。
 
 需要机器可读的本地运行日志时，可设置 `NL2SHELL_LOG_JSON=~/.nl2shell/runtime.jsonl`；默认关闭，并且不会记录 API Key、完整环境变量或原始命令输出。
+
+模型请求、历史和结构化日志共用一套敏感信息脱敏规则，覆盖常见 API Key、Token、密码、Cookie、连接串和私钥。执行输出在发送给错误诊断模型时会标记为不可信数据，不能覆盖系统安全指令。
+
+可设置 `EXECUTION_BACKEND=sandbox` 使用 Docker 沙箱。沙箱默认无网络、非 root、丢弃 Linux capabilities，并限制内存、CPU 和进程数量；Docker 不可用时任务直接报错，不会静默改用本机 Bash。
+
+任务计划包含结构化 `intent`、`operation`、`entities` 和模型风险建议。确定性规则拥有最终决定权，模型建议只能提高风险等级。受限解析器可识别简单管道、`&&` 和文件重定向，无法证明安全的语法继续要求强确认。
 
 ## 开发与测试
 

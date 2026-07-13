@@ -20,7 +20,8 @@ class ExecutionDecision:
     rule: str = ""
 
 
-def decide(impact: CommandImpact, risk: str, cwd: str) -> ExecutionDecision:
+def decide(impact: CommandImpact, risk: str, cwd: str,
+           overwrite_paths: tuple[str, ...] = ()) -> ExecutionDecision:
     tags = set(impact.tags)
     if risk == HIGH:
         return ExecutionDecision(BLOCK, "命令属于毁灭性高危操作，已永久阻止", "high_risk")
@@ -34,6 +35,8 @@ def decide(impact: CommandImpact, risk: str, cwd: str) -> ExecutionDecision:
         return ExecutionDecision(STRONG_CONFIRM, "命令包含未知或复杂 Shell 语法")
     if risk == WARN or "delete" in tags:
         return ExecutionDecision(CONFIRM, "命令包含删除或警告级操作")
+    if overwrite_paths:
+        return ExecutionDecision(CONFIRM, "命令会覆盖已有文件", "file_overwrite")
     if "network" in tags:
         return ExecutionDecision(CONFIRM, "命令会访问网络")
     if "write" in tags and not paths_stay_in_workspace(impact, cwd):

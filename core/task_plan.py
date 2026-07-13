@@ -1,7 +1,24 @@
 """面向小模型的 JSON 任务计划与旧格式兼容解析。"""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
+
+
+INTENTS = {
+    "FILE_QUERY", "FILE_MODIFY", "SYSTEM_MONITOR", "PROCESS_MANAGE",
+    "NETWORK_QUERY", "SOFTWARE_MANAGE", "GIT_OPERATION", "DOCKER_OPERATION",
+    "COMMAND_EXPLAIN", "ERROR_FIX", "UNKNOWN",
+}
+
+
+def _intent(value) -> str:
+    normalized = str(value or "UNKNOWN").upper()
+    return normalized if normalized in INTENTS else "UNKNOWN"
+
+
+def _risk(value) -> str:
+    normalized = str(value or "SAFE").upper()
+    return normalized if normalized in {"SAFE", "WARN", "HIGH"} else "SAFE"
 
 
 @dataclass(frozen=True)
@@ -16,6 +33,10 @@ class TaskStep:
 class TaskPlan:
     steps: tuple[TaskStep, ...]
     clarification: str = ""
+    intent: str = "UNKNOWN"
+    operation: str = ""
+    entities: dict[str, object] = field(default_factory=dict)
+    risk_advisory: str = "SAFE"
 
 
 def parse_task_plan(raw: str) -> TaskPlan:
@@ -26,7 +47,13 @@ def parse_task_plan(raw: str) -> TaskPlan:
         payload = json.loads(text)
         clarification = payload.get("clarification", "")
         if isinstance(clarification, str) and clarification.strip():
-            return TaskPlan((), clarification.strip())
+            return TaskPlan(
+                (), clarification.strip(),
+                _intent(payload.get("intent")),
+                str(payload.get("operation", "")),
+                payload.get("entities", {}) if isinstance(payload.get("entities", {}), dict) else {},
+                _risk(payload.get("risk_advisory")),
+            )
         raw_steps = payload["steps"]
         if not isinstance(raw_steps, list) or not 1 <= len(raw_steps) <= 3:
             raise ValueError("steps 必须是 1 到 3 项")
@@ -38,7 +65,14 @@ def parse_task_plan(raw: str) -> TaskPlan:
             if not all(isinstance(value, str) for value in values.values()):
                 raise ValueError("步骤字段必须为字符串")
             steps.append(TaskStep(item["command"].strip(), values["explanation"].strip(), values["expected"].strip(), values["verification"].strip()))
-        return TaskPlan(tuple(steps))
+        entities = payload.get("entities", {})
+        if not isinstance(entities, dict):
+            raise ValueError("entities 必须是对象")
+        return TaskPlan(
+            tuple(steps), "", _intent(payload.get("intent")),
+            str(payload.get("operation", "")), entities,
+            _risk(payload.get("risk_advisory")),
+        )
     except (json.JSONDecodeError, KeyError, ValueError, TypeError):
         if text.lstrip().startswith(("{", "[")):
             raise ValueError("JSON 任务计划格式不合法")

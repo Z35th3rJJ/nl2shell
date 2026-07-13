@@ -8,6 +8,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from uuid import uuid4
 
 
 @dataclass
@@ -94,10 +95,17 @@ class BashExecutor:
         if not self.bash_path:
             raise RuntimeError(bash_unavailable_message())
 
+        return self._execute_argv(
+            [self.bash_path, "-lc", command], timeout_seconds=timeout_seconds, cwd=cwd,
+        )
+
+    def _execute_argv(self, argv: list[str], timeout_seconds: float | None,
+                      cwd: str | None = None) -> ExecutionResult:
+
         start = time.monotonic()
         with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
             process = subprocess.Popen(
-                [self.bash_path, "-lc", command], stdout=stdout_file, stderr=stderr_file,
+                argv, stdout=stdout_file, stderr=stderr_file,
                 cwd=cwd, start_new_session=os.name != "nt",
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             )
@@ -119,6 +127,67 @@ class BashExecutor:
             duration_seconds=time.monotonic() - start,
             output_truncated=stdout_truncated or stderr_truncated,
         )
+
+
+LocalExecutor = BashExecutor
+
+
+class DockerExecutor(BashExecutor):
+    """受限 Docker 执行后端；不可用时绝不降级到本机 Bash。"""
+
+    def __init__(self, docker_path: str | None = None, output_limit: int = DEFAULT_OUTPUT_LIMIT,
+                 image: str | None = None):
+        super().__init__(docker_path or shutil.which("docker"), output_limit)
+        self.docker_path = self.bash_path
+        self.image = image or os.environ.get("SANDBOX_IMAGE", "ubuntu:22.04")
+
+    def is_available(self) -> bool:
+        if not self.docker_path:
+            return False
+        try:
+            return subprocess.run(
+                [self.docker_path, "info"], capture_output=True, check=False, timeout=5,
+            ).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    def execute(self, command: str, timeout_seconds: float | None = 60,
+                cwd: str | None = None) -> ExecutionResult:
+        if not self.docker_path:
+            raise RuntimeError("Docker 沙箱不可用；请安装并启动 Docker")
+        if not cwd or not Path(cwd).is_dir():
+            raise RuntimeError("Docker 沙箱需要有效的工作目录")
+        workspace = str(Path(cwd).resolve())
+        container_name = f"nl2shell-{uuid4().hex[:12]}"
+        argv = [
+            self.docker_path, "run", "--rm", "--name", container_name, "--network", "none",
+            "--memory", os.environ.get("SANDBOX_MEMORY", "512m"),
+            "--cpus", os.environ.get("SANDBOX_CPUS", "1"),
+            "--pids-limit", os.environ.get("SANDBOX_PIDS", "64"),
+            "--user", os.environ.get("SANDBOX_USER", "65534:65534"),
+            "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
+            "-v", f"{workspace}:/workspace:rw", "-w", "/workspace",
+            self.image, "bash", "-lc", command,
+        ]
+        result = self._execute_argv(argv, timeout_seconds=timeout_seconds)
+        if result.timed_out:
+            try:
+                subprocess.run(
+                    [self.docker_path, "rm", "-f", container_name], capture_output=True,
+                    check=False, timeout=10,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return result
+
+
+def create_executor(*, require_sandbox: bool = False) -> BashExecutor:
+    backend = os.environ.get("EXECUTION_BACKEND", "local").lower()
+    if require_sandbox or backend == "sandbox":
+        return DockerExecutor()
+    if backend != "local":
+        raise ValueError("EXECUTION_BACKEND 必须是 local 或 sandbox")
+    return LocalExecutor()
 
 
 def try_change_directory(command: str) -> ExecutionResult | None:

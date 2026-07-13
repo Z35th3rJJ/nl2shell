@@ -1,6 +1,6 @@
 # nl2shell 完整产品说明书
 
-> 适用版本：0.1.0
+> 适用版本：0.2.0
 > 文档语言：简体中文
 
 ## 目录
@@ -152,6 +152,12 @@ LOCAL_MODEL=qwen2.5-coder:1.5b
 | `RUN_MODE` | `confirm` | `preview`、`confirm` 或 `auto-safe` |
 | `SETUP_COMPLETE` | `false` | 首次运行向导是否已完成 |
 | `NL2SHELL_LOG_JSON` | 空（关闭） | 启用结构化运行日志并指定 JSONL 文件 |
+| `EXECUTION_BACKEND` | `local` | `local` 本机 Bash 或 `sandbox` Docker 沙箱 |
+| `SANDBOX_IMAGE` | `ubuntu:22.04` | Docker 沙箱镜像 |
+| `SANDBOX_MEMORY` | `512m` | 沙箱内存限制 |
+| `SANDBOX_CPUS` | `1` | 沙箱 CPU 限制 |
+| `SANDBOX_PIDS` | `64` | 沙箱进程数量限制 |
+| `SANDBOX_USER` | `65534:65534` | 沙箱非 root 用户及组 |
 
 首次交互运行会选择默认运行方式，并把 `RUN_MODE` 与 `SETUP_COMPLETE=true` 写回 `.env`。旧配置项 `AGENT_MODE`、`EXECUTION_POLICY`、`DRY_RUN` 和 `AUTO_EXECUTE` 会在首次设置时迁移。
 
@@ -240,6 +246,8 @@ python cli.py --json --preview "统计代码行数"
 - 只要求创建或生成文件、但没有指定内容时使用 `touch`，不会从文件名猜测内容。
 - 模型返回的 JSON 不合法或为空时，任务以计划生成失败结束，不执行 Bash。
 - 模型连接或超时错误会自动重试一次；再次失败后返回可读错误。
+- 计划同时保存 `intent`、`operation`、`entities` 和 `risk_advisory`；旧格式仍可解析。
+- 模型风险建议只能提高风险，不能降低确定性安全规则给出的等级。
 
 ### 6.2 风险与影响分析
 
@@ -252,6 +260,8 @@ python cli.py --json --preview "统计代码行数"
 影响标签包括读取、写入、删除、网络、提权和未知语法。风险等级只是输入之一；即使命令为 `SAFE`，未知语法、网络访问或工作区外写入仍可能要求确认。
 
 严格形式的 `echo <纯文本> > <单一文件>` 和 `printf <纯文本> > <单一文件>` 会识别为文件写入。包含变量、命令替换、`>>`、管道、多个重定向或动态目标时仍视为未知复杂语法。
+
+受限 Shell 分析器还可识别由已知命令组成的简单管道、`&&` 和末尾文件重定向。已有写入目标会列为覆盖路径并要求确认；无法完整解析的结构仍保持未知语法。
 
 ### 6.3 文件执行前检查
 
@@ -371,7 +381,15 @@ NL2SHELL_LOG_JSON=~/.nl2shell/runtime.jsonl
 
 日志记录任务结束时间、状态、风险、是否执行和工作目录，不记录 API Key、完整环境变量或原始命令输出。包含常见 `token`、`password`、`secret`、`api_key` 形式的字符串会被脱敏。
 
-### 6.12 模型评测
+同一脱敏器也用于模型请求和历史记录，并覆盖 Bearer Token、Cookie、数据库连接串和私钥块。命令错误输出会以“不可信执行数据”传给诊断模型，数据中的提示词不会被视为系统指令。
+
+### 6.12 Docker 沙箱
+
+设置 `EXECUTION_BACKEND=sandbox` 后，命令通过 Docker 执行。默认镜像为 `ubuntu:22.04`，关闭网络、使用非 root 用户、丢弃 capabilities，并限制 512MB 内存、1 个 CPU 和 64 个进程。相关环境变量为 `SANDBOX_IMAGE`、`SANDBOX_MEMORY`、`SANDBOX_CPUS`、`SANDBOX_PIDS` 和 `SANDBOX_USER`。
+
+沙箱只挂载当前工作区到 `/workspace`。Docker 不可用、工作区无效或非 root 用户无写权限时返回错误，不会降级到本机。自动执行评测必须使用该后端。
+
+### 6.13 模型评测
 
 ```bash
 python eval/run_eval.py --backend deepseek
@@ -381,7 +399,7 @@ python eval/run_eval.py --backend local --execute-safe
 python eval/compare.py
 ```
 
-`--execute-safe` 只实际执行评测中被识别为 SAFE 的命令，WARN/HIGH 跳过。评测结果写入 `eval/eval_result_<后端>.json`，该文件默认不进入 Git。
+默认评测集为 200 条。`--execute-safe` 只在 Docker 沙箱中执行被识别为 SAFE 的命令，WARN/HIGH 跳过。结果包含命令、意图、澄清、安全误报、危险拦截、执行成功率和响应时间指标，写入 `eval/eval_result_<后端>.json`。
 
 ## 7. 命令行参数参考
 
@@ -652,4 +670,4 @@ CI 不需要真实 API Key；模型调用由测试替身代替。
 
 ### 12.5 版本与变更
 
-当前版本为 0.1.0。版本信息位于 `core/__init__.py` 和 `pyproject.toml`，变更记录见项目根目录的 `CHANGELOG.md`。
+当前版本为 0.2.0。版本信息位于 `core/__init__.py` 和 `pyproject.toml`，变更记录见项目根目录的 `CHANGELOG.md`。

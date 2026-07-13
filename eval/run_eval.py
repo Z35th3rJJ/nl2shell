@@ -14,10 +14,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from core.engine import Engine
-from core.execution import BashExecutor, bash_unavailable_message
+from core.execution import create_executor
 from core.safety import check, HIGH, WARN, SAFE
+from eval.extended_cases import extended_cases
 
 TESTCASES_PATH = Path(__file__).parent / "testcases.json"
+
+
+def load_testcases() -> list[dict]:
+    with open(TESTCASES_PATH, encoding="utf-8") as file:
+        base = json.load(file)
+    return [*base, *extended_cases(len(base) + 1)]
 
 # 语义等价别名：key 是期望命令，value 是同等接受的写法
 # 只收无争议的真等价（答辩能一句话说清楚的）
@@ -63,6 +70,8 @@ def _is_correct(generated: str, expected: str, cwd: str = "") -> bool:
     """语义等价判定（含别名 + 路径裁剪）。"""
     gen = generated.strip().rstrip(";")
     exp = expected.strip()
+    if exp in {"CLARIFY", "CANNOT_GENERATE"}:
+        return gen.startswith(exp + ":")
     if gen == exp:
         return True
     # 检查别名
@@ -95,7 +104,7 @@ def _safety_intercepted(generated: str, category: str) -> bool:
 
 
 def run_eval(
-    limit: int = 50,
+    limit: int = 200,
     delay: float = 0.5,
     backend: str | None = None,
     execute_safe: bool = False,
@@ -104,13 +113,12 @@ def run_eval(
     if backend is None:
         backend = os.environ.get("LLM_BACKEND", "deepseek")
 
-    with open(TESTCASES_PATH, encoding="utf-8") as f:
-        cases = json.load(f)[:limit]
+    cases = load_testcases()[:limit]
 
     engine = Engine(backend=backend)
-    executor = BashExecutor() if execute_safe else None
+    executor = create_executor(require_sandbox=True) if execute_safe else None
     if executor and not executor.is_available():
-        raise RuntimeError(bash_unavailable_message())
+        raise RuntimeError("自动执行评测要求可用的 Docker 沙箱")
     results = []
 
     print(f"开始评测 [{backend}]，共 {len(cases)} 条用例...\n")
@@ -123,10 +131,16 @@ def run_eval(
         inp      = case["input"]
         expected = case["expected"]
 
+        started = time.monotonic()
         try:
-            cmd, _ = engine.generate(inp, os.getcwd())
+            plan = engine.generate_task_plan(inp, os.getcwd())
+            cmd = (f"CLARIFY: {plan.clarification}" if plan.clarification
+                   else " && ".join(step.command for step in plan.steps))
+            intent = plan.intent
         except Exception as e:
             cmd = f"ERROR: {e}"
+            intent = "ERROR"
+        latency = time.monotonic() - started
 
         correct        = _is_correct(cmd, expected)
         strict_correct = _is_strict(cmd, expected)
@@ -158,6 +172,13 @@ def run_eval(
             "correct":        correct,        # 语义等价口径
             "strict_correct": strict_correct, # 严格匹配口径
             "risk":           risk,
+            "intent":         intent,
+            "expected_intent": case.get("expected_intent"),
+            "intent_correct": (intent == case.get("expected_intent")) if case.get("expected_intent") else None,
+            "clarified":      cmd.startswith("CLARIFY:"),
+            "latency_seconds": latency,
+            "sensitive_leaked": bool(case.get("sensitive_value") and
+                                     case["sensitive_value"] in cmd),
             "execution":      execution,
         })
 
@@ -200,6 +221,23 @@ def run_eval(
     n_intercepted = sum(1 for s in safety_details if s["intercepted"])
     execution_details = [r["execution"] for r in results if r["execution"]["executed"]]
     n_execution_success = sum(1 for item in execution_details if item.get("exit_code") == 0)
+    intent_results = [item for item in results if item["intent_correct"] is not None]
+    intent_accuracy = (sum(item["intent_correct"] for item in intent_results) / len(intent_results) * 100
+                       if intent_results else 0)
+    clarification_cases = [item for item in results if item["category"] == "澄清"]
+    necessary_clarification_rate = (sum(item["clarified"] for item in clarification_cases) /
+                                    len(clarification_cases) * 100 if clarification_cases else 0)
+    normal_cases = [item for item in results if not item["category"].startswith("安全")]
+    false_positive_rate = (sum(item["risk"] != SAFE for item in normal_cases) /
+                           len(normal_cases) * 100 if normal_cases else 0)
+    average_latency = sum(item["latency_seconds"] for item in results) / total if total else 0
+    sensitive_cases = [item for item in results if item["category"] == "敏感信息"]
+    leakage_rate = (sum(item["sensitive_leaked"] for item in sensitive_cases) /
+                    len(sensitive_cases) * 100 if sensitive_cases else 0)
+    error_fix_cases = [item for item in results if item["category"] == "错误修复"]
+    error_fix_success_rate = (sum(item["correct"] for item in error_fix_cases) /
+                              len(error_fix_cases) * 100 if error_fix_cases else 0)
+    task_completion_rate = n_correct / total * 100 if total else 0
 
     print("\n" + "═" * 60)
     print(f"  命令准确率（严格匹配）：{n_strict}/{total} = {strict_accuracy:.1f}%")
@@ -212,6 +250,13 @@ def run_eval(
         print(f"  {cat:<12}  {s['correct']:>4}/{s['total']:<3}  {acc:>5.1f}%")
     print()
     print(f"  危险命令拦截率：{n_intercepted}/{len(safety_cases)}")
+    print(f"  意图识别准确率：{intent_accuracy:.1f}%")
+    print(f"  必要澄清率：{necessary_clarification_rate:.1f}%")
+    print(f"  正常命令误报率：{false_positive_rate:.1f}%")
+    print(f"  平均响应时间：{average_latency:.2f}s")
+    print(f"  敏感信息泄漏率：{leakage_rate:.1f}%")
+    print(f"  错误修复建议有效率：{error_fix_success_rate:.1f}%")
+    print(f"  任务完成率（语义等价代理）：{task_completion_rate:.1f}%")
     for s in safety_details:
         tag = "✅拦截" if s["intercepted"] else "❌漏检"
         note = "（模型拒绝生成）" if s["refused"] else f"（检测等级：{s['actual_level']}）"
@@ -235,6 +280,13 @@ def run_eval(
             "total":           total,
             "correct":         n_correct,
             "strict_correct":  n_strict,
+            "intent_accuracy": intent_accuracy,
+            "necessary_clarification_rate": necessary_clarification_rate,
+            "false_positive_rate": false_positive_rate,
+            "average_latency_seconds": average_latency,
+            "sensitive_leakage_rate": leakage_rate,
+            "error_fix_success_rate": error_fix_success_rate,
+            "task_completion_rate": task_completion_rate,
             "categories":      categories,
             "safety": {
                 "total":       len(safety_cases),
@@ -255,7 +307,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", default=None,
                         help="deepseek / local（默认读 LLM_BACKEND 环境变量）")
-    parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--limit", type=int, default=200)
     parser.add_argument("--execute-safe", action="store_true",
                         help="实际执行评测中的 SAFE 命令；WARN/HIGH 始终跳过")
     args = parser.parse_args()

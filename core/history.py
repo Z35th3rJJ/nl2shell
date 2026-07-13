@@ -4,6 +4,7 @@ import csv
 import json
 from pathlib import Path
 from uuid import uuid4
+from .redaction import redact_value
 
 
 def default_history_path() -> Path:
@@ -16,11 +17,11 @@ class HistoryStore:
 
     def append(self, record: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
+        payload = redact_value({
             "record_id": uuid4().hex,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             **record,
-        }
+        })
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
