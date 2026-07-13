@@ -25,6 +25,7 @@ from core.settings import (
 )
 from core.ssh_config import load_ssh_profiles
 from core.structured_log import log_event
+from core.task_plan import TaskPlan
 from core.verification import verify
 
 load_dotenv(ENV_PATH)
@@ -32,6 +33,12 @@ load_dotenv(ENV_PATH)
 RED, YELLOW, GREEN, BOLD, RESET = "\033[91m", "\033[93m", "\033[92m", "\033[1m", "\033[0m"
 _RISK_ORDER = {SAFE: 0, WARN: 1, HIGH: 2}
 BATCH = "batch"
+
+
+def _remember_task(engine: Engine, mode: str, user_input: str, cwd: str,
+                   plan: TaskPlan, status: str, executed: bool) -> None:
+    if mode != BATCH:
+        engine.remember_task(user_input, cwd, plan, status, executed)
 
 
 def run(command: str, executor: BashExecutor, *, cwd: str | None = None,
@@ -160,11 +167,16 @@ def _preflight_details(original, corrected, status, confirmed=None, target="", u
     }
 
 
-def _choose_candidate(issue, input_fn):
+def _choose_candidate(issue, input_fn, *, destructive: bool = False):
     if not issue.candidates:
         return "", issue.message
     if len(issue.candidates) == 1:
         candidate = issue.candidates[0]
+        if destructive:
+            answer = input_fn(
+                f"未找到“{issue.path}”，是否要删除“{candidate}”？确认请输入 yes > "
+            ).strip()
+            return (candidate, "") if answer == "yes" else ("", "用户未确认删除候选文件")
         answer = input_fn(f"未找到“{issue.path}”，是否指“{candidate}”？(Y/n) > ").strip().lower()
         return (candidate, "") if answer in {"", "y", "yes"} else ("", "用户未确认候选文件")
     print(f"未找到“{issue.path}”，可能是：")
@@ -173,7 +185,12 @@ def _choose_candidate(issue, input_fn):
     answer = input_fn("请选择候选编号（其他输入取消）> ").strip()
     if not answer.isdigit() or not 1 <= int(answer) <= len(issue.candidates):
         return "", "用户未选择候选文件"
-    return issue.candidates[int(answer) - 1], ""
+    candidate = issue.candidates[int(answer) - 1]
+    if destructive:
+        confirmed = input_fn(f"确认删除“{candidate}”请输入 yes > ").strip()
+        if confirmed != "yes":
+            return "", "用户未确认删除候选文件"
+    return candidate, ""
 
 
 def _correct_file_plan(plan, cwd: str, input_fn=input):
@@ -184,9 +201,11 @@ def _correct_file_plan(plan, cwd: str, input_fn=input):
     for issue in report.issues:
         if issue.kind != "missing_source":
             continue
-        if issue.program not in {"cp", "mv"}:
+        if issue.program not in {"cp", "mv", "cat", "rm"}:
             return plan, _preflight_details(original, plan, "failed"), issue.message
-        candidate, failure = _choose_candidate(issue, input_fn)
+        candidate, failure = _choose_candidate(
+            issue, input_fn, destructive=issue.program == "rm",
+        )
         if failure:
             return plan, _preflight_details(original, plan, "failed", confirmed), failure
         confirmed.append({"requested": issue.path, "selected": candidate})
@@ -253,6 +272,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         print(f"{RED}任务计划生成失败：{error}{RESET}")
         save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
                      status="plan_failed", executed=False, run_mode=mode, **batch_details)
+        _remember_task(engine, mode, user_input, cwd, TaskPlan(()), "plan_failed", False)
         return "plan_failed"
 
     plan, preflight, preflight_error = _preflight_plan(engine, plan, user_input, cwd, input_fn)
@@ -262,6 +282,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         save_history(history, user_input=user_input, cwd=cwd, command=command, risk=SAFE,
                      status="preflight_failed", executed=False, run_mode=mode,
                      preflight=preflight, **batch_details)
+        _remember_task(engine, mode, user_input, cwd, plan, "preflight_failed", False)
         return "preflight_failed"
 
     assessments = []
@@ -301,25 +322,30 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
                      status="blocked", executed=False, block_reason=blocked[4].reason,
                      block_rule=blocked[4].rule, **details)
+        _remember_task(engine, mode, user_input, cwd, plan, "blocked", False)
         return "blocked"
     if mode == PREVIEW:
         print(f"{YELLOW}预览模式：未调用 Bash。{RESET}")
         save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
                      status="preview", executed=False, **details)
+        _remember_task(engine, mode, user_input, cwd, plan, "preview", False)
         return "preview"
     if not executor.is_available():
         print(f"{RED}错误：{bash_unavailable_message()}{RESET}")
         save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
                      status="bash_unavailable", executed=False, **details)
+        _remember_task(engine, mode, user_input, cwd, plan, "bash_unavailable", False)
         return "bash_unavailable"
     confirmation = _confirm_plan(mode, assessments, assume_yes=assume_yes, input_fn=input_fn)
     if confirmation == "r":
         print("正在重新生成计划……")
+        _remember_task(engine, mode, user_input, cwd, plan, "regenerated", False)
         return execute_request(engine, executor, history, user_input, cwd, mode, input_fn,
                                timeout_seconds, batch_id, batch_index, assume_yes)
     if confirmation == "e":
         edited = input_fn("请重新描述任务> ").strip()
         if edited:
+            _remember_task(engine, mode, user_input, cwd, plan, "edited", False)
             return execute_request(engine, executor, history, edited, cwd, mode, input_fn,
                                    timeout_seconds, batch_id, batch_index, assume_yes)
         confirmation = "no"
@@ -327,6 +353,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         print("已取消。")
         save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
                      status="cancelled", executed=False, **details)
+        _remember_task(engine, mode, user_input, cwd, plan, "cancelled", False)
         return "cancelled"
 
     outcomes, fix_suggestion = [], ""
@@ -379,6 +406,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                  fix_suggestion=fix_suggestion[:500], timed_out=any(item.get("timed_out") for item in outcomes),
                  **details)
     engine.remember(user_input, joined)
+    _remember_task(engine, mode, user_input, cwd, plan, final_status, True)
     return final_status
 
 

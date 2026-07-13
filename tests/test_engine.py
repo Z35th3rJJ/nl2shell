@@ -42,6 +42,46 @@ def test_remember_adds_short_term_context():
     assert engine._history == [("列文件", "ls")]
 
 
+def test_task_context_keeps_five_turns_and_includes_execution_state(monkeypatch):
+    from core.engine import Engine
+    from core.task_plan import TaskPlan, TaskStep
+
+    captured = {}
+
+    def fake_chat(messages, backend=None):
+        captured["messages"] = messages
+        return '{"steps":[{"command":"ls","explanation":"","expected":"","verification":""}]}'
+
+    monkeypatch.setattr("core.engine.chat", fake_chat)
+    engine = Engine(ssh_hosts=[])
+    for index in range(6):
+        plan = TaskPlan((TaskStep(f"touch file{index}", "", "", ""),))
+        engine.remember_task(f"任务{index}", f"/work/{index}", plan,
+                             "cancelled" if index == 5 else "verified", index != 5)
+
+    engine.generate_task_plan("删除file5", "/work/5")
+    assert len(engine._task_history) == 5
+    assert engine._task_history[0].user_input == "任务1"
+    prompt = captured["messages"][-1]["content"]
+    assert '"status": "cancelled"' in prompt
+    assert '"executed": false' in prompt
+    assert '"cwd": "/work/5"' in prompt
+
+
+def test_create_file_prompt_forbids_guessing_content(monkeypatch):
+    from core.engine import Engine
+
+    captured = {}
+    monkeypatch.setattr(
+        "core.engine.chat",
+        lambda messages, backend=None: captured.setdefault("messages", messages)
+        and '{"steps":[{"command":"touch admin.txt","explanation":"","expected":"","verification":""}]}',
+    )
+    Engine(ssh_hosts=[]).generate_task_plan("生成admin.txt文件", "/work")
+    assert "使用 touch" in captured["messages"][0]["content"]
+    assert "不得从文件名猜测内容" in captured["messages"][0]["content"]
+
+
 @pytest.mark.parametrize("user_input", ["删除", "清理一下", "请帮我移除"])
 def test_ambiguous_deletion_requires_clarification_without_calling_model(monkeypatch, user_input):
     from core.engine import Engine

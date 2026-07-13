@@ -10,6 +10,23 @@ DELETE_COMMANDS = {"rm", "rmdir"}
 NETWORK_COMMANDS = {"curl", "wget", "ping", "ssh", "scp", "rsync"}
 
 
+def _simple_file_write(command: str) -> "CommandImpact | None":
+    if any(character in command for character in "$`;|") or ">>" in command:
+        return None
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+    lexer.whitespace_split = True
+    try:
+        parts = list(lexer)
+    except ValueError:
+        return None
+    if len(parts) != 4 or parts[0] not in {"echo", "printf"} or parts[2] != ">":
+        return None
+    destination = parts[3]
+    if not destination or any(character in destination for character in "*?[]"):
+        return None
+    return CommandImpact(("write",), (), (destination,), True, "该命令将写入文件")
+
+
 @dataclass(frozen=True)
 class CommandImpact:
     tags: tuple[str, ...]
@@ -36,6 +53,9 @@ def _path_roles(program: str, arguments: list[str]) -> tuple[tuple[str, ...], tu
 
 def analyze(command: str) -> CommandImpact:
     """返回命令的保守影响标签，并区分读取路径与写入路径。"""
+    simple_write = _simple_file_write(command)
+    if simple_write is not None:
+        return simple_write
     try:
         parts = shlex.split(command)
     except ValueError:

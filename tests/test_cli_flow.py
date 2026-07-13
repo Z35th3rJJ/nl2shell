@@ -1,6 +1,6 @@
 from unittest.mock import Mock
 
-from cli import execute_request, json_result
+from cli import BATCH, execute_request, json_result
 from core.execution import ExecutionResult
 from core.settings import AUTO_SAFE, PREVIEW
 from core.task_plan import TaskPlan, TaskStep
@@ -27,6 +27,7 @@ def test_preview_never_calls_bash():
     execute_request(engine, executor, history, "查看文件", "/work", PREVIEW)
     executor.execute.assert_not_called()
     assert history.records[0]["status"] == "preview"
+    engine.remember_task.assert_called_once()
 
 
 def test_destructive_command_is_blocked_before_execution():
@@ -116,14 +117,59 @@ def test_rejected_candidate_blocks_without_second_model_call(tmp_path):
     assert history.records[0]["status"] == "preflight_failed"
 
 
-def test_cat_candidate_is_reported_but_not_automatically_rewritten(tmp_path):
+def test_delete_candidate_requires_full_yes_and_is_rechecked(tmp_path):
+    (tmp_path / "admin.txt").write_text("", encoding="utf-8")
+    engine = _engine(TaskStep("rm admin", "删除", "", ""))
+    executor, history = Mock(), History()
+    execute_request(engine, executor, history, "删除admin", str(tmp_path), PREVIEW,
+                    input_fn=lambda _: "yes")
+    record = history.records[0]
+    assert record["status"] == "preview"
+    assert record["preflight"]["corrected_commands"] == ["rm admin.txt"]
+    assert record["decisions"] == ["confirm"]
+    executor.execute.assert_not_called()
+
+
+def test_delete_candidate_rejects_short_confirmation(tmp_path):
+    (tmp_path / "admin.txt").write_text("", encoding="utf-8")
+    engine = _engine(TaskStep("rm admin", "删除", "", ""))
+    executor, history = Mock(), History()
+    execute_request(engine, executor, history, "删除admin", str(tmp_path), AUTO_SAFE,
+                    input_fn=lambda _: "y")
+    assert history.records[0]["status"] == "preflight_failed"
+    executor.execute.assert_not_called()
+
+
+def test_cancelled_plan_is_remembered_as_not_executed():
+    engine = _engine(TaskStep("mkdir admin", "创建目录", "", ""))
+    executor, history = Mock(), History()
+    executor.is_available.return_value = True
+    execute_request(engine, executor, history, "创建admin目录", "/work", "confirm",
+                    input_fn=lambda _: "n")
+    engine.remember_task.assert_called_once()
+    assert engine.remember_task.call_args.args[3:] == ("cancelled", False)
+
+
+def test_batch_task_does_not_add_conversation_context():
+    engine = _engine(TaskStep("ls", "", "", ""))
+    executor, history = Mock(), History()
+    executor.is_available.return_value = True
+    executor.execute.return_value = ExecutionResult(0, "", "", 0.1)
+    execute_request(engine, executor, history, "列文件", "/work", BATCH)
+    engine.remember_task.assert_not_called()
+
+
+def test_cat_candidate_can_be_explicitly_selected(tmp_path):
     (tmp_path / "README.md").write_text("", encoding="utf-8")
     (tmp_path / "README.txt").write_text("", encoding="utf-8")
     engine = _engine(TaskStep("cat readme", "查看", "", ""))
     executor, history = Mock(), History()
-    execute_request(engine, executor, history, "查看readme", str(tmp_path), PREVIEW)
+    answers = iter(["1"])
+    execute_request(engine, executor, history, "查看readme", str(tmp_path), PREVIEW,
+                    input_fn=lambda _: next(answers))
     assert engine.generate_task_plan.call_count == 1
-    assert history.records[0]["status"] == "preflight_failed"
+    assert history.records[0]["status"] == "preview"
+    assert history.records[0]["preflight"]["corrected_commands"] == ["cat README.md"]
 
 
 def test_existing_default_copy_name_uses_incremented_suffix(tmp_path):
