@@ -65,6 +65,14 @@ def analyze(command: str) -> CommandImpact:
     if program == "find" and "-delete" in parts:
         tags = ["delete", "write"]
     read_paths, write_paths = _path_roles(program, arguments)
+    if program == "find" and "-delete" in parts and arguments:
+        minimum_depth = None
+        if "-mindepth" in parts:
+            index = parts.index("-mindepth")
+            if index + 1 < len(parts) and parts[index + 1].isdigit():
+                minimum_depth = int(parts[index + 1])
+        target = str(Path(arguments[0]) / "*") if minimum_depth and minimum_depth >= 1 else arguments[0]
+        read_paths, write_paths = (), (target,)
     summary = "、".join({"read": "读取", "write": "写入", "delete": "删除", "network": "访问网络"}[tag] for tag in tags)
     return CommandImpact(tuple(tags), read_paths, write_paths, True, f"该命令将{summary}" if summary else "无可识别影响")
 
@@ -87,3 +95,23 @@ def paths_stay_in_workspace(impact: CommandImpact, cwd: str) -> bool:
 
 def reads_stay_in_workspace(impact: CommandImpact, cwd: str) -> bool:
     return all(_inside_workspace(path, cwd) for path in impact.read_paths)
+
+
+def deletion_covers_workspace(impact: CommandImpact, cwd: str) -> bool:
+    """删除目标等于工作区或包含工作区时返回 True。"""
+    if "delete" not in impact.tags:
+        return False
+    workspace = Path(cwd).expanduser().resolve(strict=False)
+    for value in impact.write_paths:
+        target = Path(value).expanduser()
+        if not target.is_absolute():
+            target = workspace / target
+        target = target.resolve(strict=False)
+        if target == workspace:
+            return True
+        try:
+            workspace.relative_to(target)
+            return True
+        except ValueError:
+            continue
+    return False

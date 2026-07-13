@@ -69,12 +69,30 @@ def json_result(record: dict, status: str) -> dict:
     return {
         "status": status,
         "risk_level": record.get("risk", SAFE),
-        "steps": verification or [{"status": status, "command": record.get("command", "")}],
+        "steps": verification or [{"status": status, "command": record.get("command", ""),
+                                     "detail": record.get("block_reason", ""),
+                                     "rule": record.get("block_rule", "")}],
         "verification": verification,
         "duration_seconds": sum(item.get("duration_seconds", 0) for item in verification),
         "error": next((item.get("detail", "") for item in verification
-                       if item.get("status") not in {"verified", "exit_code_only", "not_executed"}), ""),
+                       if item.get("status") not in {"verified", "exit_code_only", "not_executed"}),
+                      record.get("block_reason", "")),
     }
+
+
+def recover_working_directory(previous: str | None = None) -> tuple[str, str]:
+    """返回可用 cwd；当前目录失效时回退到最近存在的父目录。"""
+    try:
+        return os.getcwd(), ""
+    except FileNotFoundError:
+        candidate = Path(previous).expanduser() if previous else Path.home()
+        for path in (candidate, *candidate.parents):
+            if path.is_dir():
+                os.chdir(path)
+                return str(path), f"当前工作目录已不存在，已切换到：{path}"
+        home = Path.home()
+        os.chdir(home)
+        return str(home), f"当前工作目录已不存在，已切换到用户主目录：{home}"
 
 
 def print_diagnostics(executor: BashExecutor, *, only_failures: bool = False) -> bool:
@@ -281,7 +299,8 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     if blocked:
         print(f"{RED}计划已阻止：{blocked[4].reason}{RESET}")
         save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
-                     status="blocked", executed=False, **details)
+                     status="blocked", executed=False, block_reason=blocked[4].reason,
+                     block_rule=blocked[4].rule, **details)
         return "blocked"
     if mode == PREVIEW:
         print(f"{YELLOW}预览模式：未调用 Bash。{RESET}")
@@ -317,7 +336,8 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         current_decision = decide(current_impact, current_safety.level, cwd)
         if current_decision.level == BLOCK:
             outcomes.append({"command": step.command, "status": "blocked",
-                             "detail": current_decision.reason, "step": step_index})
+                             "detail": current_decision.reason, "rule": current_decision.rule,
+                             "step": step_index})
             print(f"{RED}第 {step_index} 步在执行前被阻止：{current_decision.reason}{RESET}")
             break
         try:
@@ -507,16 +527,19 @@ def main(input_session=None, args=None) -> None:
         return
 
     if args.task:
+        cwd, warning = recover_working_directory()
+        if warning and not args.json:
+            print(f"{YELLOW}{warning}{RESET}")
         mode = PREVIEW if args.preview else settings.run_mode
         if args.json:
             output = io.StringIO()
             with redirect_stdout(output):
-                status = execute_request(engine, executor, history, args.task, os.getcwd(), mode,
+                status = execute_request(engine, executor, history, args.task, cwd, mode,
                                          timeout_seconds=args.timeout, assume_yes=args.yes)
             record = history.query(1)[0]
             print(json.dumps(json_result(record, status), ensure_ascii=False))
         else:
-            execute_request(engine, executor, history, args.task, os.getcwd(), mode,
+            execute_request(engine, executor, history, args.task, cwd, mode,
                             timeout_seconds=args.timeout, assume_yes=args.yes)
         return
 
@@ -529,9 +552,13 @@ def main(input_session=None, args=None) -> None:
     print_diagnostics(executor, only_failures=True)
     input_session = input_session or create_input_session()
     print(f"{BOLD}智能 Shell 助手{RESET} | {mode_name(mode)} | 输入 /help 查看命令")
+    last_cwd, _ = recover_working_directory()
     while True:
         try:
-            cwd = os.getcwd()
+            cwd, warning = recover_working_directory(last_cwd)
+            last_cwd = cwd
+            if warning:
+                print(f"{YELLOW}{warning}{RESET}")
             user_input = input_session.prompt(f"\n[{cwd}]\n你想做什么？> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n再见！")
