@@ -1,4 +1,6 @@
 import argparse
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -8,19 +10,21 @@ from uuid import uuid4
 from dotenv import load_dotenv
 
 from core.decision import AUTO_ALLOW, BLOCK, STRONG_CONFIRM, decide
+from core.diagnostics import diagnose_environment
 from core.engine import Engine
 from core.execution import BashExecutor, bash_unavailable_message, try_change_directory
 from core.history import HistoryStore
 from core.impact import analyze
 from core.input_session import create_input_session
 from core.preflight import CommandEdit, apply_edits, default_target_for_step, inspect_plan
-from core.safety import HIGH, SAFE, WARN, check
+from core.safety import HIGH, SAFE, WARN, assess, check
 from core.settings import (
     AUTO_SAFE, ENV_PATH, PREVIEW, AppSettings,
     choose_mode, first_run_setup, load_settings, mode_description, mode_name,
     save_settings,
 )
 from core.ssh_config import load_ssh_profiles
+from core.structured_log import log_event
 from core.verification import verify
 
 load_dotenv(ENV_PATH)
@@ -57,6 +61,30 @@ def save_history(store: HistoryStore, *, user_input: str, cwd: str, command: str
                  risk: str, status: str, executed: bool, **details) -> None:
     store.append({"input": user_input, "cwd": cwd, "command": command, "risk": risk,
                   "status": status, "executed": executed, **details})
+    log_event("task_finished", status=status, risk=risk, executed=executed, cwd=cwd)
+
+
+def json_result(record: dict, status: str) -> dict:
+    verification = record.get("verification", [])
+    return {
+        "status": status,
+        "risk_level": record.get("risk", SAFE),
+        "steps": verification or [{"status": status, "command": record.get("command", "")}],
+        "verification": verification,
+        "duration_seconds": sum(item.get("duration_seconds", 0) for item in verification),
+        "error": next((item.get("detail", "") for item in verification
+                       if item.get("status") not in {"verified", "exit_code_only", "not_executed"}), ""),
+    }
+
+
+def print_diagnostics(executor: BashExecutor, *, only_failures: bool = False) -> bool:
+    diagnostics = diagnose_environment(executor)
+    selected = [item for item in diagnostics if not item.ok] if only_failures else diagnostics
+    if selected:
+        print("环境诊断：")
+        for item in selected:
+            print(f"  {'✓' if item.ok else '✗'} {item.name}：{item.message}")
+    return all(item.ok for item in diagnostics)
 
 
 def print_help() -> None:
@@ -65,6 +93,7 @@ def print_help() -> None:
         "  /mode             查看或临时切换运行方式\n"
         "  /config           修改并保存默认运行方式\n"
         "  /status           查看模型、目录、运行方式和 Bash 状态\n"
+        "  /doctor           检查模型、Bash 和当前目录\n"
         "  /history [数量] [--status 状态] [--batch 批次] [--since ISO时间]\n"
         "  /history export <jsonl|csv> <路径> [筛选条件]\n"
         "  /history replay <记录ID> | replay-batch <批次ID>\n"
@@ -87,16 +116,19 @@ def print_status(mode: str, executor: BashExecutor) -> None:
     )
 
 
-def _confirm_plan(mode: str, decisions) -> bool:
+def _confirm_plan(mode: str, decisions, *, assume_yes: bool = False, input_fn=input) -> str:
     if mode == BATCH:
-        return True
+        return "yes" if {item[4].level for item in decisions} == {AUTO_ALLOW} else "no"
     levels = {item[4].level for item in decisions}
     if mode == AUTO_SAFE and levels == {AUTO_ALLOW}:
         print(f"{GREEN}安全自动：计划全部满足自动执行条件。{RESET}")
-        return True
+        return "yes"
+    if assume_yes and levels == {AUTO_ALLOW}:
+        return "yes"
     if STRONG_CONFIRM in levels:
-        return input(f"{RED}计划包含 sudo、系统级或未知操作，确认执行请输入 yes > {RESET}").strip() == "yes"
-    return input("执行整个计划？(y/n) > ").strip().lower() == "y"
+        return "yes" if input_fn(f"{RED}计划包含 sudo、系统级或未知操作，确认执行请输入 yes > {RESET}").strip() == "yes" else "no"
+    answer = input_fn("执行整个计划？(y/n/r重新生成/e编辑任务) > ").strip().lower()
+    return answer if answer in {"y", "r", "e"} else "no"
 
 
 def _preflight_details(original, corrected, status, confirmed=None, target="", used_default=False):
@@ -195,7 +227,7 @@ def _preflight_plan(engine: Engine, plan, user_input: str, cwd: str, input_fn=in
 def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStore,
                     user_input: str, cwd: str, mode: str, input_fn=input,
                     timeout_seconds: float = 60, batch_id: str = "",
-                    batch_index: int | None = None) -> str:
+                    batch_index: int | None = None, assume_yes: bool = False) -> str:
     batch_details = {"batch_id": batch_id, "batch_index": batch_index} if batch_id else {}
     try:
         plan = engine.generate_task_plan(user_input, cwd)
@@ -238,6 +270,11 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         "impact_tags": [item[3].tags for item in assessments],
         "steps": len(assessments),
         "preflight": preflight,
+        "safety": [
+            {"level": result.level, "reason": result.reason,
+             "rule": result.rule, "fragment": result.fragment}
+            for result in (assess(item[0].command) for item in assessments)
+        ],
         **batch_details,
     }
     blocked = next((item for item in assessments if item[4].level == BLOCK), None)
@@ -256,14 +293,33 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
                      status="bash_unavailable", executed=False, **details)
         return "bash_unavailable"
-    if not _confirm_plan(mode, assessments):
+    confirmation = _confirm_plan(mode, assessments, assume_yes=assume_yes, input_fn=input_fn)
+    if confirmation == "r":
+        print("正在重新生成计划……")
+        return execute_request(engine, executor, history, user_input, cwd, mode, input_fn,
+                               timeout_seconds, batch_id, batch_index, assume_yes)
+    if confirmation == "e":
+        edited = input_fn("请重新描述任务> ").strip()
+        if edited:
+            return execute_request(engine, executor, history, edited, cwd, mode, input_fn,
+                                   timeout_seconds, batch_id, batch_index, assume_yes)
+        confirmation = "no"
+    if confirmation not in {"yes", "y"}:
         print("已取消。")
         save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
                      status="cancelled", executed=False, **details)
         return "cancelled"
 
     outcomes, fix_suggestion = [], ""
-    for step, _, _, _, _ in assessments:
+    for step_index, (step, _, _, _, _) in enumerate(assessments, 1):
+        current_safety = assess(step.command)
+        current_impact = analyze(step.command)
+        current_decision = decide(current_impact, current_safety.level, cwd)
+        if current_decision.level == BLOCK:
+            outcomes.append({"command": step.command, "status": "blocked",
+                             "detail": current_decision.reason, "step": step_index})
+            print(f"{RED}第 {step_index} 步在执行前被阻止：{current_decision.reason}{RESET}")
+            break
         try:
             result = run(step.command, executor, cwd=cwd, timeout_seconds=timeout_seconds,
                          persist_cwd=mode != BATCH)
@@ -275,9 +331,12 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             print(f"  验证结果：{verification.status} - {verification.detail}")
             outcomes.append({"command": step.command, "status": verification.status,
                              "detail": verification.detail, "timed_out": result.timed_out,
-                             "stdout": result.stdout[-2000:], "stderr": result.stderr[-2000:]})
+                             "stdout": result.stdout[-2000:], "stderr": result.stderr[-2000:],
+                             "output_truncated": result.output_truncated, "step": step_index,
+                             "duration_seconds": result.duration_seconds})
         except Exception as error:
-            outcomes.append({"command": step.command, "status": "execution_error", "detail": str(error)})
+            outcomes.append({"command": step.command, "status": "execution_error", "detail": str(error),
+                             "step": step_index})
             print(f"{RED}执行失败：{error}{RESET}")
             break
         if verification.status in {"command_failed", "verification_failed", "invalid_verifier"}:
@@ -287,7 +346,14 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                 fix_suggestion = f"修复建议生成失败：{error}"
             print(f"{YELLOW}修复建议（不会自动执行）：{fix_suggestion}{RESET}")
             break
-    final_status = outcomes[-1]["status"] if outcomes else "execution_error"
+    for index in range(len(outcomes) + 1, len(assessments) + 1):
+        outcomes.append({"command": assessments[index - 1][0].command, "status": "not_executed",
+                         "detail": "前序步骤未成功", "step": index})
+    completed = sum(item["status"] in {"verified", "exit_code_only"} for item in outcomes)
+    failed = next((item for item in outcomes if item["status"] not in {"verified", "exit_code_only", "not_executed"}), None)
+    print(f"任务结果：完成 {completed}/{len(assessments)} 步"
+          + (f"，第 {failed['step']} 步失败" if failed else "，全部成功"))
+    final_status = failed["status"] if failed else (outcomes[-1]["status"] if outcomes else "execution_error")
     save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
                  status=final_status, executed=True, verification=outcomes,
                  fix_suggestion=fix_suggestion[:500], timed_out=any(item.get("timed_out") for item in outcomes),
@@ -426,7 +492,7 @@ def test_ssh_profile(alias: str, executor: BashExecutor) -> None:
 
 
 def main(input_session=None, args=None) -> None:
-    args = args or argparse.Namespace(batch=None, timeout=60.0)
+    args = args or argparse.Namespace(batch=None, timeout=60.0, task=None, preview=False, yes=False, json=False)
     try:
         settings = load_settings()
     except ValueError as error:
@@ -440,12 +506,27 @@ def main(input_session=None, args=None) -> None:
             print(f"{RED}批量任务失败：{error}{RESET}")
         return
 
+    if args.task:
+        mode = PREVIEW if args.preview else settings.run_mode
+        if args.json:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                status = execute_request(engine, executor, history, args.task, os.getcwd(), mode,
+                                         timeout_seconds=args.timeout, assume_yes=args.yes)
+            record = history.query(1)[0]
+            print(json.dumps(json_result(record, status), ensure_ascii=False))
+        else:
+            execute_request(engine, executor, history, args.task, os.getcwd(), mode,
+                            timeout_seconds=args.timeout, assume_yes=args.yes)
+        return
+
     settings = first_run_setup(settings)
     if settings is None:
         print("已退出。")
         return
 
     mode = settings.run_mode
+    print_diagnostics(executor, only_failures=True)
     input_session = input_session or create_input_session()
     print(f"{BOLD}智能 Shell 助手{RESET} | {mode_name(mode)} | 输入 /help 查看命令")
     while True:
@@ -465,6 +546,9 @@ def main(input_session=None, args=None) -> None:
             continue
         if user_input == "/status":
             print_status(mode, executor)
+            continue
+        if user_input == "/doctor":
+            print_diagnostics(executor)
             continue
         if user_input == "/mode":
             selected = choose_mode(mode)
@@ -501,11 +585,19 @@ def main(input_session=None, args=None) -> None:
         execute_request(engine, executor, history, user_input, cwd, mode)
 
 
-if __name__ == "__main__":
+def entrypoint() -> None:
     parser = argparse.ArgumentParser(description="安全可控的自然语言 Shell 助手")
     parser.add_argument("--batch", help="JSONL 批量任务文件；失败后继续，HIGH 命令永久阻止")
     parser.add_argument("--timeout", type=float, default=60, help="批量主命令超时秒数（默认 60）")
+    parser.add_argument("task", nargs="?", help="直接执行一次自然语言任务")
+    parser.add_argument("--preview", action="store_true", help="仅生成并展示计划")
+    parser.add_argument("--yes", action="store_true", help="仅对 SAFE 计划跳过确认")
+    parser.add_argument("--json", action="store_true", help="输出稳定 JSON 结果（适合脚本调用）")
     parsed_args = parser.parse_args()
     if parsed_args.timeout <= 0:
         parser.error("--timeout 必须大于 0")
     main(args=parsed_args)
+
+
+if __name__ == "__main__":
+    entrypoint()

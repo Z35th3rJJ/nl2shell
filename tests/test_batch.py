@@ -21,7 +21,7 @@ def test_batch_runs_tasks_serially_and_saves_summary(tmp_path):
     executor.execute.return_value = ExecutionResult(0, "ok\n", "", 0.1)
     history = HistoryStore(tmp_path / "history.jsonl")
 
-    summary = run_batch(_engine("echo ok"), executor, history, tasks)
+    summary = run_batch(_engine("ls"), executor, history, tasks)
 
     assert summary["success"] == 1
     assert summary["failed"] == 0

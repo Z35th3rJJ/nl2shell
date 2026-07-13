@@ -1,6 +1,7 @@
 import os
+import time
 import httpx
-from openai import OpenAI
+from openai import APIConnectionError, APITimeoutError, OpenAI
 
 # 按后端缓存客户端，支持同进程内切换（对比实验用）
 _clients: dict[str, tuple[OpenAI, str]] = {}
@@ -44,8 +45,18 @@ def _get_client(backend: str | None = None) -> tuple[OpenAI, str]:
 
 def chat(messages: list[dict], backend: str | None = None) -> str:
     client, model = _get_client(backend)
-    return client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0,
-    ).choices[0].message.content.strip()
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model=model, messages=messages, temperature=0,
+            )
+            content = response.choices[0].message.content
+            if not content or not content.strip():
+                raise RuntimeError("模型返回了空响应，请重试")
+            return content.strip()
+        except (APIConnectionError, APITimeoutError) as error:
+            if attempt == 0:
+                time.sleep(0.2)
+                continue
+            raise RuntimeError(f"模型连接失败：{error}") from error
+    raise RuntimeError("模型请求失败")

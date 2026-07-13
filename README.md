@@ -2,6 +2,8 @@
 
 用中文描述任务，系统生成最多三步的 Bash 计划，完成影响分析、安全决策、受控执行、结果验证与历史审计。
 
+📖 [完整产品说明书](docs/USER_MANUAL.md)：安装配置、全部功能、命令参考、数据格式、安全说明与故障排查。
+
 ## 快速开始
 
 ```bash
@@ -22,6 +24,28 @@ cp .env.example .env
 # 4. 运行；首次启动会选择默认运行方式
 python3 cli.py
 ```
+
+也可以安装为命令行工具：
+
+```bash
+pip install -e .
+nl2shell
+```
+
+Windows 请安装 Git Bash，并在找不到 Bash 时设置 `BASH_PATH=C:\Program Files\Git\bin\bash.exe`；Linux 通常可直接使用系统 Bash。
+
+## 单次任务与脚本调用
+
+无需进入交互界面即可执行一次任务：
+
+```bash
+python cli.py "统计当前目录下的 Python 文件"
+python cli.py --preview "查找超过 10MB 的文件"
+python cli.py --yes "列出当前目录文件"
+python cli.py --json --preview "统计代码行数"
+```
+
+`--yes` 只会跳过 SAFE 操作的确认，WARN 仍需人工确认，HIGH 始终阻止。`--json` 固定输出 `status`、`risk_level`、`steps`、`verification`、`duration_seconds` 和 `error`。
 
 ## 使用示例
 
@@ -163,6 +187,7 @@ SSH_CONFIG_PATH=~/.ssh/config
 /mode             临时切换运行方式
 /config           修改并保存默认运行方式
 /status           查看模型、目录、运行方式和 Bash 状态
+/doctor           集中检查模型配置、Bash 和当前目录权限
 /history [数量]   查看审计历史
 /help             显示帮助
 /exit             退出
@@ -176,3 +201,20 @@ SETUP_COMPLETE=true
 ```
 
 旧版 `AGENT_MODE`、`EXECUTION_POLICY`、`DRY_RUN`、`AUTO_EXECUTE` 会在首次设置时迁移为新的运行方式。
+
+## 安全与诊断
+
+执行超时会终止对应的进程树；标准输出和错误输出过大时会保留头尾并标记截断。每一步执行前都会重新进行风险判断，验证命令仅允许已识别的只读操作。多步任务失败后不会继续执行剩余步骤，历史中会保存已完成、失败和未执行状态。
+
+交互模式启动时会显示环境问题，也可以随时输入 `/doctor`。模型网络连接失败会自动重试一次，随后返回可读错误，不会无限重试。
+
+需要机器可读的本地运行日志时，可设置 `NL2SHELL_LOG_JSON=~/.nl2shell/runtime.jsonl`；默认关闭，并且不会记录 API Key、完整环境变量或原始命令输出。
+
+## 开发与测试
+
+```bash
+pip install -e ".[dev]"
+pytest -q
+```
+
+GitHub Actions 会在 Windows、Ubuntu 以及 Python 3.10/3.12 上运行测试。版本变更记录见 `CHANGELOG.md`。
