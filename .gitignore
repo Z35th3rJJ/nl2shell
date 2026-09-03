@@ -30,3 +30,6 @@ AGENTS.md
 
 # 评测结果（本地生成，不入库）
 eval/eval_result*.json
+
+# 技能锁定清单（agent 工具产物，不入库）
+skills-lock.json

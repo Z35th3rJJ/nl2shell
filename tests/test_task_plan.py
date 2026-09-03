@@ -43,8 +43,37 @@ def test_legacy_two_line_output_falls_back_to_single_step():
 
 
 def test_invalid_json_is_not_treated_as_a_shell_command():
+    # 无风险提示的空 steps 仍视为格式错误
     with pytest.raises(ValueError):
         parse_task_plan('{"steps": []}')
+
+
+def test_refused_high_risk_empty_steps_is_not_an_error():
+    # 模型识别到危险操作时输出空 steps + 高风险，应识别为拒绝，而非格式错误
+    plan = parse_task_plan('{"risk_advisory":"HIGH","steps":[]}')
+    assert plan.steps == ()
+    assert plan.refused is True
+    assert plan.risk_advisory == "HIGH"
+
+
+def test_refused_warn_empty_steps():
+    plan = parse_task_plan('{"risk_advisory":"WARN","steps":[]}')
+    assert plan.refused is True
+    assert plan.risk_advisory == "WARN"
+
+
+def test_refused_high_risk_empty_command_step():
+    # 小模型的另一种拒绝表达：step 存在但 command 为空 + 高风险
+    plan = parse_task_plan('{"risk_advisory":"HIGH","steps":[{"command":"","explanation":"危险"}]}')
+    assert plan.refused is True
+    assert plan.steps == ()
+    assert plan.risk_advisory == "HIGH"
+
+
+def test_non_high_risk_empty_command_steps_is_error():
+    # 无高风险的完整空 command 仍视为格式错误
+    with pytest.raises(ValueError):
+        parse_task_plan('{"steps":[{"command":""}]}')
 
 
 def test_json_with_single_trailing_backtick_is_accepted():
