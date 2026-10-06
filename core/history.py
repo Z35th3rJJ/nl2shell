@@ -39,6 +39,8 @@ class HistoryStore:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(record, dict):
+                continue
             if status and record.get("status") != status:
                 continue
             if batch_id and record.get("batch_id") != batch_id:
@@ -59,14 +61,14 @@ class HistoryStore:
     def export(self, records: list[dict], fmt: str, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         if fmt == "jsonl":
-            with path.open("w", encoding="utf-8") as file:
+            with path.open("x", encoding="utf-8") as file:
                 for record in records:
                     file.write(json.dumps(record, ensure_ascii=False) + "\n")
             return
         if fmt != "csv":
             raise ValueError("导出格式只能是 jsonl 或 csv")
         fields = ("record_id", "timestamp", "input", "command", "cwd", "status", "risk", "executed", "run_mode", "batch_id", "batch_index", "timed_out")
-        with path.open("w", encoding="utf-8", newline="") as file:
+        with path.open("x", encoding="utf-8", newline="") as file:
             writer = csv.DictWriter(file, fieldnames=fields, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(records)

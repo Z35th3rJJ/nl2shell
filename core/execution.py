@@ -192,11 +192,13 @@ def create_executor(*, require_sandbox: bool = False) -> BashExecutor:
 
 def try_change_directory(command: str) -> ExecutionResult | None:
     """处理 cd，使目录切换作用于 CLI 进程；非 cd 命令返回 None。"""
+    if any(character in command for character in ";&|<>`$\n\r"):
+        return None
     try:
         parts = shlex.split(command)
     except ValueError:
         return None
-    if not parts or parts[0] != "cd":
+    if not parts or parts[0] != "cd" or len(parts) > 2 or (len(parts) == 2 and parts[1].startswith("-")):
         return None
 
     target = os.path.expanduser(parts[1] if len(parts) > 1 else "~")

@@ -171,7 +171,7 @@ def raise_risk(deterministic: str, advisory: str | None) -> str:
 
 
 def _parse_shell(command: str) -> _ParsedShell | None:
-    if any(character in command for character in "$;`"):
+    if any(character in command for character in "$;`\n\r"):
         return None
     lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
     lexer.whitespace_split = True
@@ -264,11 +264,21 @@ def _analyze_impact(command: str, parsed: _ParsedShell | None) -> CommandImpact:
     if not parts:
         return CommandImpact(("unknown",), (), (), False, "空命令无法分析")
     if any(token in {"|", "&&", "||", ";", ">", ">>", "<"} for token in parts) or any(
-        character in command for character in "|;&><`$"
+        character in command for character in "|;&><`$\n\r"
     ):
         return CommandImpact(("unknown",), (), (), False, "包含管道、重定向或 Shell 展开，无法可靠分析")
 
     program = parts[0]
+    # 名称为查询工具不代表其参数没有写入或执行副作用。
+    if program in {"awk", "sed"} or (program == "sort" and any(
+        item == "-o" or item.startswith(("-o", "--output")) for item in parts[1:]
+    )) or (program == "find" and any(
+        item.startswith(("-exec", "-ok", "-fprint", "-fprintf")) for item in parts[1:]
+    )) or (program == "ip" and not (
+        len(parts) >= 2 and parts[1] in {"addr", "address", "a"}
+        and (len(parts) == 2 or parts[2:] == ["show"])
+    )):
+        return CommandImpact(("unknown",), (), (), False, "参数可能写入文件或执行程序，不能作为只读操作")
     arguments = [item for item in parts[1:] if not item.startswith("-")]
     if program == "sudo":
         return CommandImpact(("privilege", "unknown"), (), (), False, "需要提权，自动执行已禁止")

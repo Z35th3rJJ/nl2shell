@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 from typing import Callable
+from .redaction import redact_text
 
 
 def default_input_history_path() -> Path:
@@ -37,7 +38,11 @@ def create_input_session(
         path.read_text(encoding="utf-8")
         if os.name != "nt":
             path.chmod(0o600)
-        return PromptSession(history=FileHistory(str(path)), enable_history_search=True)
+        class RedactedHistory(FileHistory):
+            def store_string(self, string):
+                super().store_string(redact_text(string))
+
+        return PromptSession(history=RedactedHistory(str(path)), enable_history_search=True)
     except (OSError, UnicodeError) as error:
         output_fn(f"提示：输入历史不可用（{error}），本次运行已回退到普通输入。")
         return BasicInputSession(input_fn)

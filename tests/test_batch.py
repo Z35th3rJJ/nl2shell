@@ -9,7 +9,7 @@ from core.task_plan import TaskPlan, TaskStep
 
 def _engine(command):
     engine = Mock()
-    engine.generate_task_plan.return_value = TaskPlan((TaskStep(command, "", "", ""),))
+    engine.generate_task_plan.return_value = TaskPlan((TaskStep(operation="find_files", parameters={"path": ".", "recursive": False}),)) if command == "ls" else TaskPlan((), refused=True, reason="禁止永久删除")
     return engine
 
 

@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by 0002-structured-operations
 ---
 
 # 统一命令审查

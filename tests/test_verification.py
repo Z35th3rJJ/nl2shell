@@ -19,3 +19,12 @@ def test_verification_rejects_write_command():
 def test_failed_main_command_skips_verifier():
     result = verify(Mock(), ExecutionResult(1, "", "error", 0.1), "test -e result.txt")
     assert result.status == "command_failed"
+
+
+def test_side_effect_queries_are_not_accepted_as_legacy_verifiers():
+    for command in ["sed -i 's/a/b/' file", "awk 'BEGIN {system(\"touch a\")}'",
+                    "find . -exec touch a +", "sort -o a file", "ip link set lo down", "ls\ntouch a"]:
+        executor = Mock()
+        result = verify(executor, ExecutionResult(0, "", "", 0.1), command)
+        assert result.status == "invalid_verifier", command
+        executor.execute.assert_not_called()

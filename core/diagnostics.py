@@ -15,10 +15,10 @@ class Diagnostic:
 
 def diagnose_environment(executor: BashExecutor, cwd: str | None = None) -> tuple[Diagnostic, ...]:
     cwd = cwd or os.getcwd()
-    backend = os.environ.get("LLM_BACKEND", "deepseek").lower()
+    backend = os.environ.get("LLM_BACKEND", "local").lower()
     if backend == "local":
         model_ok = bool(os.environ.get("LOCAL_BASE_URL", "http://localhost:11434/v1"))
-        model_message = "本地模型配置已就绪" if model_ok else "请设置 LOCAL_BASE_URL"
+        model_message = "本地模型地址已配置；尚未测试连接" if model_ok else "请设置 LOCAL_BASE_URL"
     else:
         model_ok = bool(os.environ.get("DEEPSEEK_API_KEY"))
         model_message = "DeepSeek 配置已就绪" if model_ok else "请在 .env 设置 DEEPSEEK_API_KEY"

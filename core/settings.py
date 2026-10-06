@@ -47,7 +47,7 @@ def mode_description(mode: str) -> str:
     return {
         PREVIEW: "只展示任务计划、风险和验证方案，永远不执行 Bash。",
         CONFIRM_MODE: "展示完整计划，确认后执行；敏感操作需要更严格确认。",
-        AUTO_SAFE: "安全操作自动执行；删除、网络等敏感操作会暂停确认，高危操作阻止。",
+        AUTO_SAFE: "兼容旧设置；第一版仍逐次确认，不支持的操作直接停止。",
     }[mode]
 
 
@@ -57,7 +57,7 @@ def choose_mode(current: str, input_fn: Callable[[str], str] = input,
         "运行方式：\n"
         "  1. 预览：只看计划和风险，不执行命令。\n"
         "  2. 确认执行（推荐）：确认整份计划后执行，并验证结果。\n"
-        "  3. 安全自动：安全操作自动执行，敏感操作仍会询问。\n"
+        "  3. 旧自动模式：第一版仍逐次确认。\n"
         "  0. 取消"
     )
     options = {"1": PREVIEW, "2": CONFIRM_MODE, "3": AUTO_SAFE}

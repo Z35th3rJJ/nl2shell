@@ -37,3 +37,9 @@ def test_structured_log_uses_same_redaction(tmp_path, monkeypatch):
     monkeypatch.setenv("NL2SHELL_LOG_JSON", str(path))
     log_event("test", detail="COOKIE=session-secret")
     assert "session-secret" not in path.read_text(encoding="utf-8")
+def test_quoted_secret_assignments_are_redacted():
+    from core.redaction import redact_text
+    for value in ["TOKEN='private value'", 'PASSWORD="secret text"']:
+        assert "private" not in redact_text(value)
+        assert "secret text" not in redact_text(value)
+        assert "<REDACTED>" in redact_text(value)

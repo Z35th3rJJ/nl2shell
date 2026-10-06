@@ -5,24 +5,23 @@ import json
 import os
 from pathlib import Path
 import shlex
+import time
+import math
+import sys
 from uuid import uuid4
 
 from dotenv import load_dotenv
 
-from core.command_review import (
-    AUTO_ALLOW, BLOCK, CONFIRM, HIGH, SAFE, STRONG_CONFIRM, WARN,
-    review_command,
-)
+from core.command_review import SAFE, WARN
 from core.diagnostics import diagnose_environment
 from core.engine import Engine
-from core.error_analysis import classify_error
+from core.llm import model_configuration
 from core.execution import (
-    BashExecutor, DockerExecutor, bash_unavailable_message, create_executor,
-    try_change_directory,
+    BashExecutor, DockerExecutor, create_executor,
 )
 from core.history import HistoryStore
+from core.redaction import redact_value
 from core.input_session import create_input_session
-from core.preflight import CommandEdit, apply_edits, default_target_for_step, inspect_plan
 from core.settings import (
     AUTO_SAFE, ENV_PATH, PREVIEW, AppSettings,
     choose_mode, first_run_setup, load_settings, mode_description, mode_name,
@@ -30,14 +29,12 @@ from core.settings import (
 )
 from core.ssh_config import load_ssh_profiles
 from core.structured_log import log_event
-from core.task_plan import TaskPlan
-from core.verification import verify
+from core.task_plan import TaskPlan, TaskStep, plan_payload
+from core.operations import prepare_plan, preview_details, preparation_changed, execute_action, workspace_path, unique_target
 
 load_dotenv(ENV_PATH)
 
 RED, YELLOW, GREEN, BOLD, RESET = "\033[91m", "\033[93m", "\033[92m", "\033[1m", "\033[0m"
-_RISK_ORDER = {SAFE: 0, WARN: 1, HIGH: 2}
-_DECISION_ORDER = {AUTO_ALLOW: 0, CONFIRM: 1, STRONG_CONFIRM: 2, BLOCK: 3}
 BATCH = "batch"
 
 
@@ -45,14 +42,6 @@ def _remember_task(engine: Engine, mode: str, user_input: str, cwd: str,
                    plan: TaskPlan, status: str, executed: bool) -> None:
     if mode != BATCH:
         engine.remember_task(user_input, cwd, plan, status, executed)
-
-
-def run(command: str, executor: BashExecutor, *, cwd: str | None = None,
-        timeout_seconds: float = 60, persist_cwd: bool = True):
-    cd_result = try_change_directory(command) if persist_cwd else None
-    return cd_result if cd_result is not None else executor.execute(
-        command, timeout_seconds=timeout_seconds, cwd=cwd,
-    )
 
 
 def print_history(store: HistoryStore, limit: int = 20, *, status: str | None = None,
@@ -72,9 +61,13 @@ def print_history(store: HistoryStore, limit: int = 20, *, status: str | None = 
 
 def save_history(store: HistoryStore, *, user_input: str, cwd: str, command: str,
                  risk: str, status: str, executed: bool, **details) -> None:
-    store.append({"input": user_input, "cwd": cwd, "command": command, "risk": risk,
-                  "status": status, "executed": executed, **details})
-    log_event("task_finished", status=status, risk=risk, executed=executed, cwd=cwd)
+    store.last_record = redact_value({"input": user_input, "cwd": cwd, "command": command, "risk": risk,
+                                     "status": status, "executed": executed, **details})
+    store.append(store.last_record)
+    try:
+        log_event("task_finished", status=status, risk=risk, executed=executed, cwd=cwd)
+    except OSError:
+        print("运行日志不可写；任务审计记录已保存。", file=sys.stderr)
 
 
 def json_result(record: dict, status: str) -> dict:
@@ -82,7 +75,7 @@ def json_result(record: dict, status: str) -> dict:
     return {
         "status": status,
         "risk_level": record.get("risk", SAFE),
-        "steps": verification or [{"status": status, "command": record.get("command", ""),
+        "steps": verification or record.get("preview") or [{"status": status, "command": record.get("command", ""),
                                      "detail": record.get("block_reason", ""),
                                      "rule": record.get("block_rule", "")}],
         "verification": verification,
@@ -129,344 +122,192 @@ def print_help() -> None:
         "  /history export <jsonl|csv> <路径> [筛选条件]\n"
         "  /history replay <记录ID> | replay-batch <批次ID>\n"
         "  /ssh              查看 OpenSSH 主机配置\n"
-        "  /ssh test <别名>  检查 SSH 连通性与认证\n"
+        "  /workspace <路径> 切换工作目录\n  /trash             查看回收区\n  /restore <编号>    恢复回收文件\n"
         "  /help             显示帮助\n"
         "  /exit             退出"
     )
 
 
 def print_status(mode: str, executor: BashExecutor) -> None:
-    backend = os.environ.get("LLM_BACKEND", "deepseek").lower()
-    model = os.environ.get("LOCAL_MODEL", "qwen2.5-coder:1.5b") if backend == "local" else os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    configuration = model_configuration()
+    backend, model = configuration["backend"], configuration["model"]
     print(
         f"运行状态：\n"
         f"  模型：{backend} / {model}\n"
         f"  工作目录：{os.getcwd()}\n"
         f"  运行方式：{mode_name(mode)} - {mode_description(mode)}\n"
-        f"  执行后端：{'Docker 沙箱' if isinstance(executor, DockerExecutor) else '本机 Bash'}"
+        f"  文件操作：Python 固定操作\n"
+        f"  系统查询后端：{'Docker 沙箱' if isinstance(executor, DockerExecutor) else '本机 Bash'}"
         f"（{'可用' if executor.is_available() else '不可用'}）"
     )
 
 
-def _confirm_plan(mode: str, decisions, *, assume_yes: bool = False, input_fn=input) -> str:
-    if mode == BATCH:
-        return "yes" if {item[1].decision.level for item in decisions} == {AUTO_ALLOW} else "no"
-    levels = {item[1].decision.level for item in decisions}
-    if mode == AUTO_SAFE and levels == {AUTO_ALLOW}:
-        print(f"{GREEN}安全自动：计划全部满足自动执行条件。{RESET}")
-        return "yes"
-    if assume_yes and levels == {AUTO_ALLOW}:
-        return "yes"
-    if STRONG_CONFIRM in levels:
-        return "yes" if input_fn(f"{RED}计划包含 sudo、系统级或未知操作，确认执行请输入 yes > {RESET}").strip() == "yes" else "no"
-    answer = input_fn("执行整个计划？(y/n/r重新生成/e编辑任务) > ").strip().lower()
-    return answer if answer in {"y", "r", "e"} else "no"
+_OPERATION_NAMES = {
+    "find_files": "查找文件", "count_files": "统计文件数量", "create_file": "创建空文件",
+    "create_directory": "创建目录", "copy_files": "复制文件", "move_files": "移动文件",
+    "rename": "重命名", "trash": "移入回收区", "restore": "恢复文件",
+    "list_trash": "查看回收区", "organize_files": "按文件类型整理", "system_info": "查询系统信息",
+}
+_STATUS_NAMES = {"verified": "已验证成功", "preview": "仅预览", "needs_clarification": "需要补充信息",
+                 "unsupported": "暂不支持", "blocked": "已停止", "cancelled": "已取消",
+                 "plan_failed": "无法生成计划", "execution_failed": "执行失败", "unverified": "尚未验证",
+                 "interrupted": "已中断", "audit_failed": "记录保存失败", "not_executed": "未执行"}
+_STATUS_NAMES.update(failed="执行失败", pending="未执行", executing="执行中")
 
 
-def _confirm_increased_risk(initial_review, current_review, mode: str, input_fn=input) -> bool:
-    if _DECISION_ORDER[current_review.decision.level] <= _DECISION_ORDER[initial_review.decision.level]:
-        return True
-    if mode == BATCH:
-        return False
-    reason = current_review.decision.reason
-    if current_review.decision.level == STRONG_CONFIRM:
-        return input_fn(f"执行前风险已提高：{reason}，继续执行请输入 yes > ").strip() == "yes"
-    return input_fn(f"执行前风险已提高：{reason}，是否继续？(y/n) > ").strip().lower() in {"y", "yes"}
+def show_preview(prepared):
+    print(f"工作目录：{prepared['cwd']}")
+    for action in prepared["actions"]:
+        print(f"第 {action['step']} 步：{_OPERATION_NAMES[action['operation']]}")
+        if action["explanation"]:
+            print(f"说明：{action['explanation']}")
+        if "path" in action["parameters"]:
+            print(f"范围：{action['parameters']['path']}；" +
+                  ("包含子目录" if action["parameters"].get("recursive") else "当前层"))
+        if action["files"]:
+            print(f"找到 {len(action['files'])} 个文件：")
+            for name in action["files"]:
+                print(f"  {name}")
+        for item in action["items"]:
+            print(f"  {item.get('source', '新建')} → {item['destination']}")
+        if action["operation"] == "system_info":
+            print("查询：" + {"disk": "磁盘空间", "memory": "内存使用", "system": "系统信息"}[action["parameters"]["query"]])
+        if not action["items"] and action["operation"] not in {"system_info", "list_trash"}:
+            print("本步骤不修改文件。")
 
 
-def _preflight_details(original, corrected, status, confirmed=None, target="", used_default=False):
-    return {
-        "status": status,
-        "original_commands": [step.command for step in original.steps],
-        "corrected_commands": [step.command for step in corrected.steps],
-        "confirmed_candidates": confirmed or [],
-        "selected_target": target,
-        "used_default_target": used_default,
-    }
-
-
-def _review_history_details(reviews):
-    return {
-        "decisions": [review.decision.level for review in reviews],
-        "impact_tags": [review.impact.tags for review in reviews],
-        "safety": [{"level": review.safety.level, "reason": review.safety.reason,
-                    "rule": review.safety.rule, "fragment": review.safety.fragment}
-                   for review in reviews],
-        "safety_findings": [[{"level": finding.level, "reason": finding.reason,
-                              "rule": finding.rule, "fragment": finding.fragment}
-                             for finding in review.findings]
-                            for review in reviews],
-        "overwrite_paths": [review.overwrite_paths for review in reviews],
-        "path_findings": [[{"kind": finding.kind, "path": finding.path,
-                            "message": finding.message}
-                           for finding in review.path_findings]
-                          for review in reviews],
-    }
-
-
-def _choose_candidate(issue, input_fn, *, destructive: bool = False):
-    if not issue.candidates:
-        return "", issue.message
-    if len(issue.candidates) == 1:
-        candidate = issue.candidates[0]
-        if destructive:
-            answer = input_fn(
-                f"未找到“{issue.path}”，是否要删除“{candidate}”？确认请输入 yes > "
-            ).strip()
-            return (candidate, "") if answer == "yes" else ("", "用户未确认删除候选文件")
-        answer = input_fn(f"未找到“{issue.path}”，是否指“{candidate}”？(Y/n) > ").strip().lower()
-        return (candidate, "") if answer in {"", "y", "yes"} else ("", "用户未确认候选文件")
-    print(f"未找到“{issue.path}”，可能是：")
-    for index, item in enumerate(issue.candidates, 1):
-        print(f"  {index}. {item}")
-    answer = input_fn("请选择候选编号（其他输入取消）> ").strip()
-    if not answer.isdigit() or not 1 <= int(answer) <= len(issue.candidates):
-        return "", "用户未选择候选文件"
-    candidate = issue.candidates[int(answer) - 1]
-    if destructive:
-        confirmed = input_fn(f"确认删除“{candidate}”请输入 yes > ").strip()
-        if confirmed != "yes":
-            return "", "用户未确认删除候选文件"
-    return candidate, ""
-
-
-def _correct_file_plan(plan, cwd: str, input_fn=input):
-    original = plan
-    confirmed, selected_target, used_default = [], "", False
-    report = inspect_plan(plan, cwd)
-    source_edits = []
-    for issue in report.issues:
-        if issue.kind != "missing_source":
-            continue
-        if issue.program not in {"cp", "mv", "cat", "rm"}:
-            return plan, _preflight_details(original, plan, "failed"), issue.message
-        candidate, failure = _choose_candidate(
-            issue, input_fn, destructive=issue.program == "rm",
-        )
-        if failure:
-            return plan, _preflight_details(original, plan, "failed", confirmed), failure
-        confirmed.append({"requested": issue.path, "selected": candidate})
-        source_edits.append(CommandEdit(
-            issue.step, issue.argument_index, candidate, issue.segment,
-        ))
-    if source_edits:
-        plan = apply_edits(plan, source_edits)
-
-    report = inspect_plan(plan, cwd)
-    remaining_source = next((issue for issue in report.issues if issue.kind == "missing_source"), None)
-    if remaining_source:
-        return plan, _preflight_details(original, plan, "failed", confirmed), remaining_source.message
-
-    target_edits = []
-    handled_steps = set()
-    for issue in report.issues:
-        issue_location = (issue.step, issue.segment)
-        if issue.kind not in {"missing_target", "same_source_target"} or issue_location in handled_steps:
-            continue
-        handled_steps.add(issue_location)
-        default_target = default_target_for_step(plan, issue.step, cwd) if issue.segment == 0 else None
-        if default_target:
-            target = input_fn(f"请输入目标路径/新文件名（回车使用 {default_target}）> ").strip()
-            if not target:
-                target, used_default = default_target, True
-        else:
-            target = input_fn("请输入目标路径/新文件名> ").strip()
-        if not target:
-            return plan, _preflight_details(original, plan, "failed", confirmed), "未提供有效目标路径"
-        selected_target = target
-        target_edits.append(CommandEdit(
-            issue.step, issue.argument_index, target, issue.segment,
-        ))
-    if target_edits:
-        plan = apply_edits(plan, target_edits)
-
-    final_report = inspect_plan(plan, cwd)
-    if not final_report.ok:
-        return plan, _preflight_details(original, plan, "failed", confirmed, selected_target, used_default), final_report.issues[0].message
-    return plan, _preflight_details(original, plan, "passed", confirmed, selected_target, used_default), ""
-
-
-def _preflight_plan(engine: Engine, plan, user_input: str, cwd: str, input_fn=input):
-    if plan.clarification:
-        answer = input_fn(f"需要确认：{plan.clarification}\n你的回答> ").strip()
-        if not answer:
-            return plan, _preflight_details(plan, plan, "failed"), "未提供计划所需的补充信息"
-        try:
-            plan = engine.generate_task_plan(
-                user_input, cwd,
-                clarifications=[f"{plan.clarification} 用户回答：{answer}"],
-            )
-        except Exception as error:
-            return plan, _preflight_details(plan, plan, "failed"), f"澄清后重新生成计划失败：{error}"
-        if plan.clarification:
-            return plan, _preflight_details(plan, plan, "failed"), f"澄清后计划仍不完整：{plan.clarification}"
-    return _correct_file_plan(plan, cwd, input_fn)
+def show_outcome(outcome):
+    print(f"第 {outcome['step']} 步：{_STATUS_NAMES.get(outcome['status'], outcome['status'])}，{outcome['detail']}")
+    if "count" in outcome:
+        print(f"文件数量：{outcome['count']}")
+    if outcome.get("stdout"):
+        print(outcome["stdout"].rstrip())
+    for entry in outcome.get("entries", []):
+        print(f"{entry['id']} | {entry['original']} | {entry.get('timestamp', '')}")
+    if outcome["operation"] == "list_trash" and not outcome.get("entries"):
+        print("回收区为空。")
+    for item in outcome.get("items", []):
+        print(f"  {item.get('source', '新建')} → {item['destination']}：{_STATUS_NAMES.get(item['status'], item['status'])}")
+        if "trash_id" in item:
+            print(f"  恢复编号：{item['trash_id']}")
 
 
 def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStore,
                     user_input: str, cwd: str, mode: str, input_fn=input,
                     timeout_seconds: float = 60, batch_id: str = "",
                     batch_index: int | None = None, assume_yes: bool = False) -> str:
-    batch_details = {"batch_id": batch_id, "batch_index": batch_index} if batch_id else {}
-    try:
-        plan = engine.generate_task_plan(user_input, cwd)
-    except Exception as error:
-        print(f"{RED}任务计划生成失败：{error}{RESET}")
-        save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
-                     status="plan_failed", executed=False, run_mode=mode, **batch_details)
-        _remember_task(engine, mode, user_input, cwd, TaskPlan(()), "plan_failed", False)
-        return "plan_failed"
+    plan = TaskPlan(())
+    prepared, outcomes = None, []
+    audit_path = getattr(history, "path", None)
+    excluded = [audit_path] if isinstance(audit_path, (str, os.PathLike)) else []
+    if os.environ.get("NL2SHELL_LOG_JSON"):
+        excluded.append(Path(os.environ["NL2SHELL_LOG_JSON"]).expanduser())
 
-    plan, preflight, preflight_error = _preflight_plan(engine, plan, user_input, cwd, input_fn)
-    if preflight_error:
-        command = " && ".join(step.command for step in plan.steps)
-        print(f"{RED}执行前检查未通过：{preflight_error}{RESET}")
-        save_history(history, user_input=user_input, cwd=cwd, command=command, risk=SAFE,
-                     status="preflight_failed", executed=False, run_mode=mode,
-                     preflight=preflight, **batch_details)
-        _remember_task(engine, mode, user_input, cwd, plan, "preflight_failed", False)
-        return "preflight_failed"
-
-    assessments = []
-    print(f"\n{BOLD}任务计划（{len(plan.steps)} 步）{RESET}")
-    print(f"意图：{plan.intent} / {plan.operation or '未细分'} | 实体：{plan.entities or '无'}")
-    for index, step in enumerate(plan.steps, 1):
-        review = review_command(step.command, cwd, plan.risk_advisory)
-        assessments.append((step, review))
-        print(
-            f"{index}. {GREEN}{step.command}{RESET}\n"
-            f"   说明：{step.explanation}\n"
-            f"   预期：{step.expected or '按退出码判断'}\n"
-            f"   验证：{step.verification or '仅检查退出码'}\n"
-            f"   影响：{review.impact.summary}（{', '.join(review.impact.tags)}）\n"
-            f"   覆盖：{', '.join(review.overwrite_paths) if review.overwrite_paths else '无'}\n"
-            f"   决策：{review.decision.level} - {review.decision.reason}"
-        )
-
-    joined = " && ".join(step.command for step, _ in assessments)
-    max_risk = max((review.effective_risk for _, review in assessments), key=_RISK_ORDER.get)
-    details = {
-        "run_mode": mode,
-        "steps": len(assessments),
-        "preflight": preflight,
-        "intent": plan.intent,
-        "operation": plan.operation,
-        "entities": plan.entities,
-        "risk_advisory": plan.risk_advisory,
-        **_review_history_details([review for _, review in assessments]),
-        **batch_details,
-    }
-    blocked = next((item for item in assessments if item[1].decision.level == BLOCK), None)
-    if blocked:
-        print(f"{RED}计划已阻止：{blocked[1].decision.reason}{RESET}")
-        save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
-                     status="blocked", executed=False, block_reason=blocked[1].decision.reason,
-                     block_rule=blocked[1].decision.rule, **details)
-        _remember_task(engine, mode, user_input, cwd, plan, "blocked", False)
-        return "blocked"
-    if mode == PREVIEW:
-        print(f"{YELLOW}预览模式：未调用 Bash。{RESET}")
-        save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
-                     status="preview", executed=False, **details)
-        _remember_task(engine, mode, user_input, cwd, plan, "preview", False)
-        return "preview"
-    if not executor.is_available():
-        unavailable = ("Docker 沙箱不可用；请安装并启动 Docker，程序不会降级到本机执行"
-                       if isinstance(executor, DockerExecutor) else bash_unavailable_message())
-        print(f"{RED}错误：{unavailable}{RESET}")
-        save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
-                     status="bash_unavailable", executed=False, **details)
-        _remember_task(engine, mode, user_input, cwd, plan, "bash_unavailable", False)
-        return "bash_unavailable"
-    confirmation = _confirm_plan(mode, assessments, assume_yes=assume_yes, input_fn=input_fn)
-    if confirmation == "r":
-        print("正在重新生成计划……")
-        _remember_task(engine, mode, user_input, cwd, plan, "regenerated", False)
-        return execute_request(engine, executor, history, user_input, cwd, mode, input_fn,
-                               timeout_seconds, batch_id, batch_index, assume_yes)
-    if confirmation == "e":
-        edited = input_fn("请重新描述任务> ").strip()
-        if edited:
-            _remember_task(engine, mode, user_input, cwd, plan, "edited", False)
-            return execute_request(engine, executor, history, edited, cwd, mode, input_fn,
-                                   timeout_seconds, batch_id, batch_index, assume_yes)
-        confirmation = "no"
-    if confirmation not in {"yes", "y"}:
-        print("已取消。")
-        save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
-                     status="cancelled", executed=False, **details)
-        _remember_task(engine, mode, user_input, cwd, plan, "cancelled", False)
-        return "cancelled"
-
-    outcomes, fix_suggestion, executed_any = [], "", False
-    final_reviews = [review for _, review in assessments]
-    for step_index, (step, initial_review) in enumerate(assessments, 1):
-        current = review_command(step.command, cwd, plan.risk_advisory)
-        final_reviews[step_index - 1] = current
-        if current.decision.level == BLOCK:
-            outcomes.append({"command": step.command, "status": "blocked",
-                             "detail": current.decision.reason, "rule": current.decision.rule,
-                             "step": step_index})
-            print(f"{RED}第 {step_index} 步在执行前被阻止：{current.decision.reason}{RESET}")
-            break
-        if not _confirm_increased_risk(initial_review, current, mode, input_fn):
-            outcomes.append({"command": step.command, "status": "blocked_before_execution",
-                             "detail": current.decision.reason, "rule": "review_changed",
-                             "step": step_index})
-            print(f"{RED}第 {step_index} 步因执行前风险提高且未获新授权，已停止。{RESET}")
-            break
+    def ask(message):
         try:
-            executed_any = True
-            result = run(step.command, executor, cwd=cwd, timeout_seconds=timeout_seconds,
-                         persist_cwd=mode != BATCH)
-            if result.stdout:
-                print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-            if result.stderr:
-                print(f"{RED}{result.stderr}{RESET}", end="" if result.stderr.endswith("\n") else "\n")
-            verification = verify(executor, result, step.verification, cwd=cwd)
-            error_analysis = classify_error(result)
-            print(f"  验证结果：{verification.status} - {verification.detail}")
-            outcomes.append({"command": step.command, "status": verification.status,
-                             "detail": verification.detail, "timed_out": result.timed_out,
-                             "stdout": result.stdout[-2000:], "stderr": result.stderr[-2000:],
-                             "output_truncated": result.output_truncated, "step": step_index,
-                             "duration_seconds": result.duration_seconds,
-                             "error_category": error_analysis.category if error_analysis else "",
-                             "suggested_checks": error_analysis.checks if error_analysis else ()})
-        except Exception as error:
-            outcomes.append({"command": step.command, "status": "execution_error", "detail": str(error),
-                             "step": step_index})
-            print(f"{RED}执行失败：{error}{RESET}")
+            return input_fn(message).strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+
+    def finish(status, detail=""):
+        executed = any(item.get("executed") for item in outcomes)
+        payload = plan_payload(plan)
+        try:
+            save_history(history, user_input=user_input, cwd=cwd,
+                         command=json.dumps(payload, ensure_ascii=False),
+                         risk=SAFE if prepared and prepared["read_only"] else WARN,
+                         status=status, executed=executed, run_mode=mode, plan=payload,
+                         preview=preview_details(prepared) if prepared else [],
+                         verification=outcomes, block_reason=detail,
+                         timed_out=any(item.get("timed_out") for item in outcomes),
+                         **({"batch_id": batch_id, "batch_index": batch_index} if batch_id else {}))
+        except OSError as error:
+            status = "audit_failed"
+            detail = f"历史记录保存失败；请保留本次输出：{error}"
+            history.last_record.update(status=status, block_reason=detail)
+        _remember_task(engine, mode, user_input, cwd, plan, status, executed)
+        print(f"任务结果：{_STATUS_NAMES.get(status, status)}" + (f"，{detail}" if detail else ""))
+        return status
+
+    try:
+        if user_input.startswith("/restore "):
+            plan = TaskPlan((TaskStep(operation="restore", parameters={"trash_id": user_input.split(maxsplit=1)[1]}),))
+        elif user_input == "/trash":
+            plan = TaskPlan((TaskStep(operation="list_trash"),))
+        else:
+            plan = engine.generate_task_plan(user_input, cwd)
+        clarifications = []
+        for _ in range(3):
+            if not plan.clarification:
+                break
+            if mode in {BATCH, PREVIEW}:
+                return finish("needs_clarification", plan.clarification)
+            answer = ask(f"{plan.clarification}\n你的回答> ")
+            if not answer:
+                return finish("needs_clarification", plan.clarification)
+            clarifications.append(f"问题：{plan.clarification}；用户回答：{answer}")
+            plan = engine.generate_task_plan(user_input, cwd, clarifications=clarifications)
+        if plan.clarification:
+            return finish("needs_clarification", plan.clarification)
+    except (ValueError, TypeError, RuntimeError, OSError) as error:
+        return finish("plan_failed", str(error))
+    if plan.refused:
+        return finish("unsupported", plan.reason or "暂不支持这项操作")
+    try:
+        prepared = prepare_plan(plan, cwd, timeout_seconds=timeout_seconds, excluded_paths=excluded)
+    except (ValueError, OSError) as error:
+        return finish("blocked", str(error))
+    print("任务预览：")
+    show_preview(prepared)
+    if mode == PREVIEW:
+        return finish("preview")
+    if isinstance(executor, DockerExecutor) and not prepared["read_only"]:
+        return finish("blocked", "固定文件操作在本机执行；Docker 后端不执行本机写入")
+    if mode == BATCH and not prepared["read_only"]:
+        return finish("cancelled", "批处理只支持只读任务，文件修改需要人工确认")
+    automatic = prepared["read_only"] and (mode == BATCH or assume_yes)
+    for _ in range(3):
+        if not automatic:
+            if ask("是否执行以上操作？请输入 yes 确认 > ").lower() != "yes":
+                return finish("cancelled")
+        try:
+            current = prepare_plan(plan, cwd, now=prepared["now"], timeout_seconds=timeout_seconds, excluded_paths=excluded)
+        except (ValueError, OSError) as error:
+            return finish("blocked", str(error))
+        if not preparation_changed(prepared, current):
+            prepared = current
             break
-        if verification.status in {"command_failed", "verification_failed", "invalid_verifier"}:
-            try:
-                diagnostic = verification.detail
-                if result.stderr:
-                    diagnostic += f"\nstderr：{result.stderr[-2000:]}"
-                if error_analysis:
-                    diagnostic += f"\n错误类别：{error_analysis.category}\n建议检查：{'；'.join(error_analysis.checks)}"
-                fix_suggestion = engine.suggest_fix(step.command, diagnostic)
-            except Exception as error:
-                fix_suggestion = f"修复建议生成失败：{error}"
-            print(f"{YELLOW}修复建议（不会自动执行）：{fix_suggestion}{RESET}")
+        prepared = current
+        automatic = False
+        if mode == BATCH:
+            return finish("blocked", "文件清单已变化，批处理不能重新确认")
+        print("文件或目标名称已变化，请重新确认：")
+        show_preview(prepared)
+    else:
+        return finish("blocked", "文件持续变化，请稍后重试")
+
+    # 先记录授权。审计不可写时，不开始文件修改。
+    try:
+        save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
+                     status="confirmed", executed=False, plan=plan_payload(plan),
+                     preview=preview_details(prepared), run_mode=mode)
+    except OSError as error:
+        history.last_record.update(status="audit_failed", block_reason=str(error))
+        print(f"无法保存执行记录，操作已停止：{error}")
+        return "audit_failed"
+    deadline = time.monotonic() + timeout_seconds
+    for action in prepared["actions"]:
+        remaining = deadline - time.monotonic()
+        outcome = execute_action(prepared, action, executor, timeout_seconds=max(0, remaining))
+        outcomes.append(outcome)
+        show_outcome(outcome)
+        if outcome["status"] != "verified":
             break
-    for index in range(len(outcomes) + 1, len(assessments) + 1):
-        outcomes.append({"command": assessments[index - 1][0].command, "status": "not_executed",
-                         "detail": "前序步骤未成功", "step": index})
-    completed = sum(item["status"] in {"verified", "exit_code_only"} for item in outcomes)
-    failed = next((item for item in outcomes if item["status"] not in {"verified", "exit_code_only", "not_executed"}), None)
-    print(f"任务结果：完成 {completed}/{len(assessments)} 步"
-          + (f"，第 {failed['step']} 步失败" if failed else "，全部成功"))
-    final_status = failed["status"] if failed else (outcomes[-1]["status"] if outcomes else "execution_error")
-    details.update(_review_history_details(final_reviews))
-    save_history(history, user_input=user_input, cwd=cwd, command=joined, risk=max_risk,
-                 status=final_status, executed=executed_any, verification=outcomes,
-                 fix_suggestion=fix_suggestion[:500], timed_out=any(item.get("timed_out") for item in outcomes),
-                 **details)
-    if executed_any:
-        engine.remember(user_input, joined)
-    _remember_task(engine, mode, user_input, cwd, plan, final_status, executed_any)
-    return final_status
+    for action in prepared["actions"][len(outcomes):]:
+        outcomes.append({"step": action["step"], "operation": action["operation"],
+                         "status": "not_executed", "detail": "前序步骤未成功", "executed": False})
+    failed = next((item for item in outcomes if item["status"] not in {"verified", "not_executed"}), None)
+    return finish(failed["status"] if failed else "verified", failed["detail"] if failed else "")
 
 
 def _batch_tasks(path: Path, default_cwd: str) -> list[dict]:
@@ -501,11 +342,11 @@ def run_batch(engine: Engine, executor: BashExecutor, history: HistoryStore, tas
                                      input_fn=lambda _: "", timeout_seconds=timeout_seconds,
                                      batch_id=batch_id, batch_index=index)
             summary["results"].append({"index": index, "input": task["input"], "status": status})
-            if status in {"verified", "exit_code_only"}:
+            if status == "verified":
                 summary["success"] += 1
-            elif status in {"blocked", "blocked_before_execution"}:
+            elif status in {"blocked", "unsupported"}:
                 summary["blocked"] += 1
-            elif status == "command_failed" and history.query(1, batch_id=batch_id)[0].get("timed_out"):
+            elif status == "execution_failed" and history.query(1, batch_id=batch_id)[0].get("timed_out"):
                 summary["timed_out"] += 1
                 summary["failed"] += 1
             else:
@@ -514,7 +355,7 @@ def run_batch(engine: Engine, executor: BashExecutor, history: HistoryStore, tas
         summary["interrupted"] = True
         print("\n批量任务已中断，已完成结果已保留。")
     summary_path = history.path.parent / f"batch_{batch_id}.json"
-    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary_path.write_text(json.dumps(redact_value(summary), ensure_ascii=False, indent=2), encoding="utf-8")
     history.append({"input": "批量任务摘要", "cwd": os.getcwd(), "command": "", "risk": SAFE,
                     "status": "batch_summary", "executed": False, "run_mode": BATCH,
                     "batch_id": batch_id, "source": str(task_path), "summary": summary})
@@ -547,7 +388,8 @@ def handle_history_command(command: str, store: HistoryStore, engine: Engine, ex
         print_history(store)
         return
     if arguments[0] == "export" and len(arguments) >= 3:
-        fmt, destination = arguments[1], Path(arguments[2])
+        fmt = arguments[1]
+        destination = unique_target(workspace_path(Path.cwd().resolve(), arguments[2]), set())
         _, filters = _history_options(arguments[3:])
         records = store.query(limit=None, **filters)
         store.export(records, fmt, destination)
@@ -584,20 +426,6 @@ def print_ssh_profiles() -> None:
         print(f"{profile.alias}: {user}{target}{port} | 私钥：{key}")
 
 
-def test_ssh_profile(alias: str, executor: BashExecutor) -> None:
-    if alias not in {profile.alias for profile in load_ssh_profiles()}:
-        print(f"未知 SSH 别名：{alias}")
-        return
-    result = executor.execute(f"ssh -o BatchMode=yes -o ConnectTimeout=10 {shlex.quote(alias)} exit",
-                              timeout_seconds=15)
-    if result.exit_code == 0:
-        print(f"SSH {alias} 连通且认证成功。")
-    elif result.timed_out:
-        print(f"SSH {alias} 连接超时。")
-    else:
-        print(f"SSH {alias} 检查失败：{result.stderr.strip() or '未知错误'}")
-
-
 def main(input_session=None, args=None) -> None:
     args = args or argparse.Namespace(batch=None, timeout=60.0, task=None, preview=False, yes=False, json=False)
     try:
@@ -627,8 +455,8 @@ def main(input_session=None, args=None) -> None:
             output = io.StringIO()
             with redirect_stdout(output):
                 status = execute_request(engine, executor, history, args.task, cwd, mode,
-                                         timeout_seconds=args.timeout, assume_yes=args.yes)
-            record = history.query(1)[0]
+                                         timeout_seconds=args.timeout, assume_yes=args.yes, input_fn=lambda _: "")
+            record = history.last_record
             print(json.dumps(json_result(record, status), ensure_ascii=False))
         else:
             execute_request(engine, executor, history, args.task, cwd, mode,
@@ -688,8 +516,25 @@ def main(input_session=None, args=None) -> None:
         if user_input == "/history" or user_input.startswith("/history "):
             try:
                 handle_history_command(user_input, history, engine, executor, mode)
-            except ValueError:
-                print("/history 参数无效。")
+            except (ValueError, OSError) as error:
+                print(f"历史操作失败：{error}")
+            continue
+        if user_input == "/workspace":
+            print(f"工作目录：{cwd}")
+            continue
+        if user_input.startswith("/workspace "):
+            target = Path(user_input.split(maxsplit=1)[1]).expanduser()
+            try:
+                if not target.is_dir():
+                    raise ValueError("目标必须是已有目录")
+                os.chdir(target.resolve(strict=True))
+                engine._task_history.clear()
+                print(f"工作目录已切换：{os.getcwd()}")
+            except (OSError, ValueError) as error:
+                print(f"切换失败：{error}")
+            continue
+        if user_input == "/trash" or user_input.startswith("/restore "):
+            execute_request(engine, executor, history, user_input, cwd, mode)
             continue
         if user_input == "/ssh":
             print_ssh_profiles()
@@ -697,7 +542,7 @@ def main(input_session=None, args=None) -> None:
         if user_input.startswith("/ssh test "):
             alias = user_input.split(maxsplit=2)[2].strip()
             if alias:
-                test_ssh_profile(alias, executor)
+                print("第一版暂不支持远程执行。")
             else:
                 print("请输入 SSH 别名。")
             continue
@@ -706,15 +551,15 @@ def main(input_session=None, args=None) -> None:
 
 def entrypoint() -> None:
     parser = argparse.ArgumentParser(description="安全可控的自然语言 Shell 助手")
-    parser.add_argument("--batch", help="JSONL 批量任务文件；失败后继续，HIGH 命令永久阻止")
+    parser.add_argument("--batch", help="JSONL 只读任务文件；需要确认的文件修改不执行")
     parser.add_argument("--timeout", type=float, default=60, help="批量主命令超时秒数（默认 60）")
     parser.add_argument("task", nargs="?", help="直接执行一次自然语言任务")
     parser.add_argument("--preview", action="store_true", help="仅生成并展示计划")
-    parser.add_argument("--yes", action="store_true", help="仅对 SAFE 计划跳过确认")
+    parser.add_argument("--yes", action="store_true", help="仅对受支持的只读任务跳过确认")
     parser.add_argument("--json", action="store_true", help="输出稳定 JSON 结果（适合脚本调用）")
     parsed_args = parser.parse_args()
-    if parsed_args.timeout <= 0:
-        parser.error("--timeout 必须大于 0")
+    if not math.isfinite(parsed_args.timeout) or parsed_args.timeout <= 0:
+        parser.error("--timeout 必须是有限正数")
     main(args=parsed_args)
 
 
