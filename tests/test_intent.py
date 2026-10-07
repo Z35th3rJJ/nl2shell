@@ -53,3 +53,12 @@ def test_plan_cannot_add_unrequested_write(monkeypatch, tmp_path):
         {"operation": "trash", "parameters": {"sources": ["note.txt"]}}]}))
     with pytest.raises(ValueError, match="未要求的写操作"):
         Engine(ssh_hosts=[]).generate_task_plan("只看文件，不要删除", str(tmp_path))
+
+
+def test_unsupported_intent_is_reviewed_without_reading_plan(monkeypatch):
+    replies = iter([json.dumps({"status": "unsupported", "reason": "不支持删除"}),
+                    json.dumps({"status": "ready", "operations": ["trash"]})])
+    monkeypatch.setattr("core.intent.chat", lambda *args, **kwargs: next(replies))
+    attempts = []
+    assert analyze_request("放进回收站，允许恢复", [], "local", attempts)["operations"] == ["trash"]
+    assert attempts[0]["review_requested"] and len(attempts) == 2

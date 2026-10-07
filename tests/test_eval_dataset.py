@@ -136,3 +136,20 @@ def test_current_layer_structure_flag_is_equivalent_but_recursive_scope_is_not(t
     assert matches_expected(plan, case, tmp_path)
     payload["steps"][0]["parameters"]["recursive"] = True
     assert not matches_expected(parse_operation_plan(json.dumps(payload)), case, tmp_path)
+
+
+def test_selected_source_and_direct_source_have_same_write_effects(tmp_path):
+    from core.operations import prepare_plan, execute_action
+    create_fixture(tmp_path)
+    before = tree_state(tmp_path)
+    case = next(case for case in load_testcases() if case["input"] == "备份 note.txt 到 backup")
+    payload = {"status": "ready", "steps": [
+        {"operation": "find_files", "parameters": {"path": ".", "recursive": False, "pattern": "note.txt"}},
+        {"operation": "copy_files", "parameters": {"source_step": 1, "destination": "backup"}}]}
+    plan = parse_operation_plan(json.dumps(payload))
+    assert not matches_expected(plan, case, tmp_path)
+    assert execution_allowed(plan, case, tmp_path)
+    prepared = prepare_plan(plan, str(tmp_path))
+    assert check_result(case, [execute_action(prepared, action) for action in prepared["actions"]], tmp_path, before)
+    payload["steps"][1]["parameters"]["destination"] = "unexpected"
+    assert not execution_allowed(parse_operation_plan(json.dumps(payload)), case, tmp_path)

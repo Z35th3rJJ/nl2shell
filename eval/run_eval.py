@@ -19,7 +19,7 @@ from core.execution import BashExecutor
 from core.llm import model_configuration
 from core.operations import execute_action, prepare_plan, workspace_path
 from core.redaction import redact_value
-from core.task_plan import plan_payload, parse_operation_plan
+from core.task_plan import READ_OPERATIONS, plan_payload, parse_operation_plan
 from eval.operation_cases import load_cases
 
 load_dotenv()
@@ -91,10 +91,24 @@ def execution_allowed(plan, case, root):
     if steps == expected:
         return True
     extra = len(steps) - len(expected)
-    # ponytail: only independent leading file queries; other equivalent plans remain unmeasured.
-    return (extra > 0 and steps[extra:] == expected
+    if (extra > 0 and steps[extra:] == expected
             and all(step["operation"] in {"find_files", "count_files"} for step in steps[:extra])
-            and not any("source_step" in step["parameters"] for step in steps))
+            and not any("source_step" in step["parameters"] for step in steps)):
+        return True
+    # ponytail: equivalent writes require identical prepared source/target pairs, then the independent result oracle.
+    def effects(prepared):
+        return [(action["operation"], sorted((item.get("source", ""),
+                 "<trash>" if action["operation"] == "trash" else item["destination"])
+                for item in action["items"])) for action in prepared["actions"]
+                if action["operation"] not in READ_OPERATIONS]
+    try:
+        actual = prepare_plan(plan, str(root), timeout_seconds=10)
+        reference = prepare_plan(parse_operation_plan(json.dumps({"status": "ready", "steps": case["expected_steps"]})),
+                                 str(root), now=actual["now"], timeout_seconds=10)
+        wanted = effects(reference)
+        return bool(wanted) and effects(actual) == wanted
+    except (ValueError, OSError, TimeoutError):
+        return False
 
 
 def check_result(case, outcomes, root, before):
@@ -211,7 +225,7 @@ def run_eval(limit=200, delay=0, backend=None, execute_safe=False, output_dir=No
     for path in sorted([repo / "cli.py", *repo.glob("core/*.py"), *repo.glob("eval/*.py")]):
         source.update(path.relative_to(repo).as_posix().encode() + b"\0" + path.read_bytes())
     report = {**model_configuration(backend), "timestamp": datetime.now(timezone.utc).isoformat(),
-              "evaluation_version": 3,
+              "evaluation_version": 4,
               "code_revision": revision, "working_tree_dirty": dirty,
               "source_version": source.hexdigest(),
               "dataset_version": hashlib.sha256(json.dumps(load_testcases(), ensure_ascii=False,
