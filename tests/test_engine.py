@@ -162,30 +162,30 @@ def test_planning_checks_absolute_paths_and_allows_new_inside_target(monkeypatch
     assert not (tmp_path / "new.txt").exists()
 
 
-@pytest.mark.parametrize("request,destination", [
+@pytest.mark.parametrize("user_input,destination", [
     ("给 note.txt 拷贝一份", "."),
     ("给 note.txt 做个副本", "."),
     ("note.txt 备份一下", "backup"),
 ])
-def test_copy_without_explicit_destination_always_asks(monkeypatch, tmp_path, request, destination):
+def test_copy_without_explicit_destination_always_asks(monkeypatch, tmp_path, user_input, destination):
     from core.engine import Engine
     monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
                         reply("copy_files", sources=["note.txt"], destination=destination))
-    plan = Engine(ssh_hosts=[]).generate_task_plan(request, str(tmp_path))
+    plan = Engine(ssh_hosts=[]).generate_task_plan(user_input, str(tmp_path))
     assert plan.status == "need_clarification" and not plan.steps
 
 
-@pytest.mark.parametrize("request,days", [
+@pytest.mark.parametrize("user_input,days", [
     ("查找当前目录最近修改的文件", 7),
     ("找出当前目录这几天修改的文件", 3),
     ("查找当前目录文件", 7),
     ("查找当前目录最近七天修改的文件", 3),
 ])
-def test_unconfirmed_time_window_always_asks(monkeypatch, tmp_path, request, days):
+def test_unconfirmed_time_window_always_asks(monkeypatch, tmp_path, user_input, days):
     from core.engine import Engine
     monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
                         reply(path=".", recursive=False, modified_within_days=days))
-    plan = Engine(ssh_hosts=[]).generate_task_plan(request, str(tmp_path))
+    plan = Engine(ssh_hosts=[]).generate_task_plan(user_input, str(tmp_path))
     assert plan.status == "need_clarification" and not plan.steps
 
 
