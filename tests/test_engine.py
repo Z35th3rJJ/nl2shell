@@ -296,3 +296,35 @@ def test_negated_copy_request_does_not_require_a_copy_step(monkeypatch, tmp_path
     monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: reply(path=".", recursive=False))
     plan = Engine(ssh_hosts=[]).generate_task_plan("列出当前目录文件，不要复制", str(tmp_path))
     assert plan.status == "ready"
+
+
+@pytest.mark.parametrize("user_input,operation,parameters", [
+    ("把 note.txt 改名为 memo.txt", "rename", {"source": "note.txt", "destination": "memo.txt"}),
+    ("删除 note.txt，保留恢复能力", "trash", {"sources": ["note.txt"]}),
+    ("创建空文件 empty.txt", "create_file", {"path": "empty.txt"}),
+    ("创建 reports 目录", "create_directory", {"path": "reports"}),
+    ("新建一个文件夹 reports", "create_directory", {"path": "reports"}),
+    ("按文件类型整理当前目录", "organize_files", {"path": ".", "recursive": False, "group_by": "extension"}),
+    ("查看系统信息", "system_info", {"query": "system"}),
+])
+def test_required_core_action_is_checked_and_can_be_corrected(monkeypatch, tmp_path, user_input, operation, parameters):
+    from core.engine import Engine
+    query = reply(path=".", recursive=False)
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: query)
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match=operation):
+        engine.generate_task_plan(user_input, str(tmp_path))
+    assert len(engine.plan_attempts) == 2
+    assert list(tmp_path.iterdir()) == []
+    responses = iter([query, reply(operation, **parameters)])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(responses))
+    plan = engine.generate_task_plan(user_input, str(tmp_path))
+    assert plan.status == "ready" and plan.steps[0].operation == operation
+
+
+@pytest.mark.parametrize("forbidden", ["删除", "改名", "创建文件", "创建目录", "整理", "查看系统信息"])
+def test_negated_core_actions_do_not_require_steps(monkeypatch, tmp_path, forbidden):
+    from core.engine import Engine
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: reply(path=".", recursive=False))
+    plan = Engine(ssh_hosts=[]).generate_task_plan(f"列出当前目录文件，不要{forbidden}", str(tmp_path))
+    assert plan.status == "ready"

@@ -170,11 +170,19 @@ def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str) -> list[str]:
     if plan.clarification or plan.refused:
         return []
     errors = []
-    requested = re.sub(r"(?:不要|无需|不必|不需要|别)\s*(?:复制|拷贝|备份|移动|移进|移到)", "", user_input)
+    requested = re.sub(r"(?:不要|无需|不必|不需要|不用|别)\s*(?:复制|拷贝|备份|移动|移进|移到|重命名|改名|删除|移除|清理|创建|新建|建立|整理|查看|显示|查询)", "", user_input)
     operations = {step.operation for step in plan.steps}
+    required = set()
     for pattern, operation in [(r"复制|拷贝|备份|做(?:个|一份)?副本", "copy_files"),
-                               (r"移动|移进|移到|搬进|搬到", "move_files")]:
-        if re.search(pattern, requested) and operation not in operations:
+                               (r"移动|移进|移到|搬进|搬到", "move_files"),
+                               (r"重命名|改名", "rename"), (r"删除|移除|清理", "trash"),
+                               (r"整理", "organize_files"),
+                               (r"(?:查看|显示|查询)[^，。；\n]*?(?:系统信息|内存|磁盘空间)", "system_info")]:
+        if re.search(pattern, requested):
+            required.add(operation)
+    for match in re.finditer(r"(?:创建|新建|建立)[^，。；\n]*?(文件夹|目录|文件)", requested):
+        required.add("create_file" if match.group(1) == "文件" else "create_directory")
+    for operation in sorted(required - operations):
             errors.append(f"用户要求的操作未出现在计划中：{operation}")
     if "文件" in user_input and any(word in user_input for word in _FILE_COUNT_WORDS) and not any(
         word in user_input for word in _NON_FILE_COUNT_WORDS
