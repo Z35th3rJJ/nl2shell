@@ -302,6 +302,8 @@ def test_negated_copy_request_does_not_require_a_copy_step(monkeypatch, tmp_path
     ("把 note.txt 改名为 memo.txt", "rename", {"source": "note.txt", "destination": "memo.txt"}),
     ("删除 note.txt，保留恢复能力", "trash", {"sources": ["note.txt"]}),
     ("创建空文件 empty.txt", "create_file", {"path": "empty.txt"}),
+    ("创建工作目录内的文件 empty.txt", "create_file", {"path": "empty.txt"}),
+    ("新建 empty.txt", "create_file", {"path": "empty.txt"}),
     ("创建 reports 目录", "create_directory", {"path": "reports"}),
     ("新建一个文件夹 reports", "create_directory", {"path": "reports"}),
     ("按文件类型整理当前目录", "organize_files", {"path": ".", "recursive": False, "group_by": "extension"}),

@@ -180,10 +180,14 @@ def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str) -> list[str]:
                                (r"(?:查看|显示|查询)[^，。；\n]*?(?:系统信息|内存|磁盘空间)", "system_info")]:
         if re.search(pattern, requested):
             required.add(operation)
-    for match in re.finditer(r"(?:创建|新建|建立)[^，。；\n]*?(文件夹|目录|文件)", requested):
+    creation = re.sub(r"(?:工作|当前|本|此|这个)?目录(?:内|下|中)(?:的)?", "", requested)
+    for match in re.finditer(r"(?:创建|新建|建立)[^，。；\n]*?(文件夹|目录|文件)", creation):
         required.add("create_file" if match.group(1) == "文件" else "create_directory")
+    if (re.search(r"创建|新建|建立", creation) and not required & {"create_file", "create_directory"}
+            and not operations & {"create_file", "create_directory"}):
+        errors.append("用户要求创建对象，但计划缺少 create_file 或 create_directory")
     for operation in sorted(required - operations):
-            errors.append(f"用户要求的操作未出现在计划中：{operation}")
+        errors.append(f"用户要求的操作未出现在计划中：{operation}")
     if "文件" in user_input and any(word in user_input for word in _FILE_COUNT_WORDS) and not any(
         word in user_input for word in _NON_FILE_COUNT_WORDS
     ):
