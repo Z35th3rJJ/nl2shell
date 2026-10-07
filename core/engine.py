@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from .llm import chat
 from .ssh_config import load_ssh_hosts
-from .task_plan import TaskPlan, parse_operation_plan
+from .task_plan import TaskPlan, TaskStep, parse_operation_plan, plan_payload
 from .redaction import redact_value
 from .operations import workspace_path
 
@@ -182,6 +182,38 @@ def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str) -> list[str]:
     return errors
 
 
+def _complete_copy_plan(plan, errors, user_input, cwd, answers):
+    # ponytail: recover only one valid current-directory query plus one explicit copy target.
+    if (errors != ["用户要求的操作未出现在计划中：copy_files"] or len(plan.steps) != 1
+            or plan.steps[0].operation != "find_files" or plan.steps[0].parameters["path"] != "."):
+        return None
+    text = "\n".join([user_input, *answers])
+    if not re.search(r"当前目录|这里|本目录|此目录|这个目录", text):
+        return None
+    days = _explicit_days(text)
+    if days and (len(days) != 1 or plan.steps[0].parameters.get("modified_within_days") not in days):
+        return None
+    matches = re.findall(r'''(?:备份|复制|拷贝)(?:到|进|入|至)\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''', text)
+    targets = {next(value for value in match if value) for match in matches}
+    if len(targets) != 1:
+        return None
+    destination = targets.pop()
+    if destination in {"当前目录", "这里", "本目录", "此目录", "这个目录"}:
+        destination = "."
+    parameters = {"source_step": 1, "destination": destination}
+    if re.search(r"保留.*(?:目录结构|目录层次)|目录(?:层次|结构)保持不变", text):
+        parameters["preserve_structure"] = True
+    candidate = replace(plan, steps=(*plan.steps, TaskStep(operation="copy_files", parameters=parameters,
+                                                         explanation="将查找结果复制到用户指定目录")))
+    try:
+        candidate = _normalize_paths(parse_operation_plan(json.dumps(plan_payload(candidate))), cwd)
+        if _missing_conditions(candidate, user_input, cwd, answers) or _task_plan_errors(candidate, user_input, cwd):
+            return None
+    except (ValueError, OSError):
+        return None
+    return candidate
+
+
 class Engine:
     def __init__(self, backend: str | None = None, ssh_hosts: list[str] | None = None):
         self._history: list[tuple[str, str]] = []
@@ -281,6 +313,7 @@ class Engine:
                 record["request_error"] = redact_value(str(error))
                 raise
             record["raw_output"] = redact_value(raw)
+            plan = None
             try:
                 plan = parse_operation_plan(raw)
                 if plan.status == "ready":
@@ -295,6 +328,12 @@ class Engine:
             record["validation_errors"] = redact_value(errors)
             if not errors:
                 return plan
+            if attempt == 1 and plan is not None:
+                recovered = _complete_copy_plan(plan, errors, user_input, cwd, answers)
+                if recovered is not None:
+                    record["recovery"] = {"operation": "copy_files", "reason": "补齐用户明确要求的复制步骤",
+                                          "plan": plan_payload(recovered)}
+                    return recovered
             if attempt == 0:
                 messages.extend([
                     {"role": "assistant", "content": raw},

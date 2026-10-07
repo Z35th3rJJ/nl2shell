@@ -230,16 +230,46 @@ def test_explicit_target_with_jin_does_not_ask(monkeypatch, tmp_path, user_input
     ("把当前目录过去两周修改的文件备份到 archive", 14),
     ("把当前目录24小时内修改的文件复制到 backup", 1),
 ])
-def test_query_only_plan_cannot_satisfy_copy_request(monkeypatch, tmp_path, user_input, days):
+def test_query_only_plan_recovers_copy_and_executes_selected_files(monkeypatch, tmp_path, user_input, days):
+    import os
+    import time
     from core.engine import Engine
+    from core.operations import prepare_plan, execute_action
+    (tmp_path / "recent.txt").write_bytes(b"recent")
+    old = tmp_path / "old.txt"
+    old.write_bytes(b"old")
+    modified = time.time() - (days + 1) * 86400
+    os.utime(old, (modified, modified))
     monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
                         reply(path=".", recursive=False, modified_within_days=days))
     engine = Engine(ssh_hosts=[])
-    with pytest.raises(ValueError, match="copy_files"):
-        engine.generate_task_plan(user_input, str(tmp_path))
+    plan = engine.generate_task_plan(user_input, str(tmp_path))
     assert len(engine.plan_attempts) == 2
     assert all(any("copy_files" in error for error in attempt["validation_errors"])
                for attempt in engine.plan_attempts)
+    assert engine.plan_attempts[-1]["recovery"]["operation"] == "copy_files"
+    assert plan.steps[1].parameters["source_step"] == 1
+    destination = "archive" if days == 14 else "backup"
+    assert not (tmp_path / destination).exists()
+    prepared = prepare_plan(plan, str(tmp_path))
+    for action in prepared["actions"]:
+        assert execute_action(prepared, action)["status"] == "verified"
+    assert (tmp_path / destination / "recent.txt").read_bytes() == b"recent"
+    assert not (tmp_path / destination / "old.txt").exists()
+
+
+@pytest.mark.parametrize("user_input,parameters", [
+    ("把当前目录过去两周修改的文件备份到 ../archive", {"path": ".", "recursive": False, "modified_within_days": 14}),
+    ("把当前目录过去两周修改的文件备份到 archive", {"path": ".", "recursive": False}),
+    ("把当前目录过去两周修改的文件备份到 archive", {"path": ".", "recursive": True, "modified_within_days": 14}),
+    ("把当前目录文件复制到 backup 或复制到 archive", {"path": ".", "recursive": False}),
+])
+def test_recovery_never_guesses_target_time_or_scope(monkeypatch, tmp_path, user_input, parameters):
+    from core.engine import Engine
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: reply(**parameters))
+    with pytest.raises(ValueError):
+        Engine(ssh_hosts=[]).generate_task_plan(user_input, str(tmp_path))
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_missing_copy_step_is_retried_and_correct_plan_is_accepted(monkeypatch, tmp_path):
