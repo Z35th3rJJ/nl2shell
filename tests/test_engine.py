@@ -160,3 +160,54 @@ def test_planning_checks_absolute_paths_and_allows_new_inside_target(monkeypatch
     assert engine.plan_attempts[0]["validation_errors"] == ["路径位于工作目录之外"]
     assert plan.status == "ready"
     assert not (tmp_path / "new.txt").exists()
+
+
+@pytest.mark.parametrize("request,destination", [
+    ("给 note.txt 拷贝一份", "."),
+    ("给 note.txt 做个副本", "."),
+    ("note.txt 备份一下", "backup"),
+])
+def test_copy_without_explicit_destination_always_asks(monkeypatch, tmp_path, request, destination):
+    from core.engine import Engine
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
+                        reply("copy_files", sources=["note.txt"], destination=destination))
+    plan = Engine(ssh_hosts=[]).generate_task_plan(request, str(tmp_path))
+    assert plan.status == "need_clarification" and not plan.steps
+
+
+@pytest.mark.parametrize("request,days", [
+    ("查找当前目录最近修改的文件", 7),
+    ("找出当前目录这几天修改的文件", 3),
+    ("查找当前目录文件", 7),
+    ("查找当前目录最近七天修改的文件", 3),
+])
+def test_unconfirmed_time_window_always_asks(monkeypatch, tmp_path, request, days):
+    from core.engine import Engine
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
+                        reply(path=".", recursive=False, modified_within_days=days))
+    plan = Engine(ssh_hosts=[]).generate_task_plan(request, str(tmp_path))
+    assert plan.status == "need_clarification" and not plan.steps
+
+
+def test_absolute_paths_are_normalized_and_user_answers_allow_execution_plan(monkeypatch, tmp_path):
+    from core.engine import Engine
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
+                        reply("copy_files", sources=[str(tmp_path / "note.txt")], destination=str(tmp_path / "backup")))
+    engine = Engine(ssh_hosts=[])
+    # Assistant questions must not count as user confirmation.
+    plan = engine.generate_task_plan("做个副本", str(tmp_path), ["问题：复制到 backup？；用户回答：不知道"])
+    assert plan.status == "need_clarification"
+    plan = engine.generate_task_plan("做个副本", str(tmp_path), ["问题：复制到哪里？；用户回答：backup"])
+    assert plan.steps[0].parameters == {"sources": ["note.txt"], "destination": "backup"}
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
+                        reply(path=str(tmp_path), recursive=False, modified_within_days=7))
+    plan = engine.generate_task_plan("查找当前目录最近修改的文件", str(tmp_path), ["最近七天"])
+    assert plan.status == "ready" and plan.steps[0].parameters["path"] == "."
+
+
+def test_copy_to_explicit_current_directory_is_allowed(monkeypatch, tmp_path):
+    from core.engine import Engine
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
+                        reply("copy_files", sources=["note.txt"], destination=str(tmp_path)))
+    plan = Engine(ssh_hosts=[]).generate_task_plan("把 note.txt 复制到当前目录", str(tmp_path))
+    assert plan.status == "ready" and plan.steps[0].parameters["destination"] == "."

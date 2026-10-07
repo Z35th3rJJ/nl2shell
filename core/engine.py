@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 from .llm import chat
@@ -14,6 +14,66 @@ CLARIFY_PREFIX         = "CLARIFY:"
 _AMBIGUOUS_DELETION = re.compile(r"^(?:请)?(?:帮我)?(?:删除|清理|移除)(?:一下)?[。！!\s]*$")
 _FILE_COUNT_WORDS = ("统计", "多少", "数量", "个数")
 _NON_FILE_COUNT_WORDS = ("行数", "大小", "占用", "类型", "分布")
+
+
+def _normalize_paths(plan: TaskPlan, cwd: str) -> TaskPlan:
+    root = Path(cwd).resolve()
+    steps = []
+    for step in plan.steps:
+        parameters = dict(step.parameters)
+        for key in ("path", "source", "destination"):
+            if key in parameters:
+                parameters[key] = workspace_path(root, parameters[key]).relative_to(root).as_posix()
+        if "sources" in parameters:
+            parameters["sources"] = [workspace_path(root, path).relative_to(root).as_posix()
+                                     for path in parameters["sources"]]
+        steps.append(replace(step, parameters=parameters))
+    return replace(plan, steps=tuple(steps))
+
+
+def _explicit_days(text: str) -> set[float]:
+    days = set()
+    digits = {char: number for number, char in enumerate("零一二三四五六七八九")}
+    digits.update({"〇": 0, "两": 2})
+    for number, unit in re.findall(r"(\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百]+)\s*(天|日|周|星期|小时)", text):
+        if number[0].isdigit():
+            value = float(number)
+        else:
+            value, current = 0, 0
+            for char in number:
+                if char in {"十", "百"}:
+                    value += (current or 1) * (10 if char == "十" else 100)
+                    current = 0
+                else:
+                    current = digits[char]
+            value += current
+        days.add(value * (7 if unit in {"周", "星期"} else 1 / 24 if unit == "小时" else 1))
+    return days
+
+
+def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list[str]) -> str:
+    text = "\n".join([user_input, *answers])
+    days = _explicit_days(text)
+    for step in plan.steps:
+        parameters = step.parameters
+        if step.operation in {"find_files", "count_files"}:
+            if ("modified_within_days" in parameters and parameters["modified_within_days"] not in days
+                    or not days and re.search(r"最近|这几天|近期|近日|近来", text)):
+                return "请明确时间范围，例如最近多少天？"
+        if step.operation in {"copy_files", "move_files"}:
+            destination = parameters["destination"]
+            names = [destination, str(Path(cwd).resolve() / destination)]
+            if destination == ".":
+                names = [str(Path(cwd).resolve()), "当前目录", "这里", "本目录", "此目录", "这个目录", "."]
+            target = "(?:" + "|".join(re.escape(name) for name in names) + ")"
+            explicit = re.search(r"(?:到|至|放在|存放在|保存在|目标目录(?:为|是|[:：]))\s*[\"'`]?" +
+                                 target + r"(?:目录)?(?![\w./-])", text)
+            answered = any(re.fullmatch(r"\s*[\"'`]?" + target + r"[\"'`]?\s*(?:目录)?[。]?\s*", answer)
+                           for answer in answers)
+            # ponytail: conservative explicit target phrases; unfamiliar expressions ask rather than infer.
+            if not explicit and not answered:
+                return "请明确复制或移动到哪个目录？"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -104,15 +164,6 @@ def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str) -> list[str]:
     if plan.clarification or plan.refused:
         return []
     errors = []
-    for step in plan.steps:
-        parameters = step.parameters
-        paths = [parameters[key] for key in ("path", "source", "destination") if key in parameters]
-        paths.extend(parameters.get("sources", []))
-        for path in paths:
-            try:
-                workspace_path(Path(cwd), path)
-            except (ValueError, OSError) as error:
-                errors.append(str(error))
     if "文件" in user_input and any(word in user_input for word in _FILE_COUNT_WORDS) and not any(
         word in user_input for word in _NON_FILE_COUNT_WORDS
     ):
@@ -187,6 +238,7 @@ class Engine:
     def generate_task_plan(self, user_input: str, cwd: str, clarifications: list[str] | None = None) -> TaskPlan:
         """只生成固定操作计划，最多修正一次非法输出。"""
         self.plan_attempts = []
+        answers = [answer.split("用户回答：", 1)[-1].strip() for answer in clarifications or []]
         if not clarifications and _AMBIGUOUS_DELETION.fullmatch(user_input.strip()):
             return TaskPlan((), "请明确要删除或清理的具体文件、目录或匹配范围",
                             "FILE_MODIFY", "delete", status="need_clarification")
@@ -225,8 +277,14 @@ class Engine:
             record["raw_output"] = redact_value(raw)
             try:
                 plan = parse_operation_plan(raw)
+                if plan.status == "ready":
+                    plan = _normalize_paths(plan, cwd)
+                    missing = _missing_conditions(plan, user_input, cwd, answers)
+                    if missing:
+                        record["validation_errors"] = [missing]
+                        return TaskPlan((), clarification=missing, status="need_clarification")
                 errors = _task_plan_errors(plan, user_input, cwd)
-            except (ValueError, TypeError) as error:
+            except (ValueError, TypeError, OSError) as error:
                 errors = [str(error)]
             record["validation_errors"] = redact_value(errors)
             if not errors:
