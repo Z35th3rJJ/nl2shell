@@ -117,3 +117,19 @@ def test_extra_read_step_can_complete_task_without_matching_plan(tmp_path, monke
     extra_write = parse_operation_plan(json.dumps({"status": "ready", "steps": [
         {"operation": "create_file", "parameters": {"path": "unexpected"}}, *case["expected_steps"]]}))
     assert not execution_allowed(extra_write, case, tmp_path)
+
+
+def test_current_layer_structure_flag_is_equivalent_but_recursive_scope_is_not(tmp_path):
+    from core.operations import prepare_plan, execute_action
+    case = next(case for case in load_testcases() if case["input"] == "把当前目录过去两周修改的文件备份到 archive")
+    payload = {"status": "ready", "steps": json.loads(json.dumps(case["expected_steps"]))}
+    payload["steps"][1]["parameters"]["preserve_structure"] = True
+    plan = parse_operation_plan(json.dumps(payload))
+    assert matches_expected(plan, case, tmp_path)
+    create_fixture(tmp_path)
+    before = tree_state(tmp_path)
+    prepared = prepare_plan(plan, str(tmp_path))
+    outcomes = [execute_action(prepared, action) for action in prepared["actions"]]
+    assert check_result(case, outcomes, tmp_path, before)
+    payload["steps"][0]["parameters"]["recursive"] = True
+    assert not matches_expected(parse_operation_plan(json.dumps(payload)), case, tmp_path)

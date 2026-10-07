@@ -61,6 +61,10 @@ def normalized_steps(plan, root=None):
                                          for path in parameters["sources"]]
         if step["operation"] == "copy_files" and parameters.get("preserve_structure") is False:
             parameters.pop("preserve_structure")
+        if step["operation"] == "copy_files" and parameters.get("preserve_structure") is True:
+            source_step = parameters.get("source_step")
+            if source_step is not None and steps[source_step - 1]["parameters"].get("recursive") is False:
+                parameters.pop("preserve_structure")
         if step["operation"] in {"find_files", "count_files"} and parameters.get("pattern") == "*":
             parameters.pop("pattern")
     return steps
@@ -201,7 +205,7 @@ def run_eval(limit=200, delay=0, backend=None, execute_safe=False, output_dir=No
     for path in sorted([repo / "cli.py", *repo.glob("core/*.py"), *repo.glob("eval/*.py")]):
         source.update(path.relative_to(repo).as_posix().encode() + b"\0" + path.read_bytes())
     report = {**model_configuration(backend), "timestamp": datetime.now(timezone.utc).isoformat(),
-              "evaluation_version": 2,
+              "evaluation_version": 3,
               "code_revision": revision, "working_tree_dirty": dirty,
               "source_version": source.hexdigest(),
               "dataset_version": hashlib.sha256(json.dumps(load_testcases(), ensure_ascii=False,
