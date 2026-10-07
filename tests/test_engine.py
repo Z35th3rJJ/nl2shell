@@ -59,7 +59,7 @@ def test_model_attempts_preserve_failure_and_redact_secrets(monkeypatch):
     assert engine.plan_attempts[1]["validation_errors"] == []
 
 
-def test_context_keeps_five_turns_and_does_not_claim_cancelled_execution(monkeypatch):
+def test_context_keeps_five_turns_and_does_not_claim_cancelled_execution(monkeypatch, tmp_path):
     from core.engine import Engine
     from core.task_plan import TaskPlan, TaskStep
     captured = []
@@ -67,18 +67,18 @@ def test_context_keeps_five_turns_and_does_not_claim_cancelled_execution(monkeyp
     engine = Engine(ssh_hosts=[])
     for index in range(6):
         engine.remember_task(f"任务{index}", "/work", TaskPlan((TaskStep(operation="create_file", parameters={"path": str(index)}),)), "cancelled", False)
-    engine.generate_task_plan("查找当前目录文件", "/work")
+    engine.generate_task_plan("查找当前目录文件", str(tmp_path))
     assert len(engine._task_history) == 5
     assert '"executed": false' in captured[0][-1]["content"]
     assert '"status": "cancelled"' in captured[0][-1]["content"]
 
 
-def test_file_count_retries_wrong_operation(monkeypatch):
+def test_file_count_retries_wrong_operation(monkeypatch, tmp_path):
     from core.engine import Engine
     responses = iter([reply(path=".", recursive=False), reply("count_files", path=".", recursive=False, pattern="*.py")])
     calls = []
     monkeypatch.setattr("core.engine.chat", lambda messages, backend=None: calls.append(messages.copy()) or next(responses))
-    plan = Engine(ssh_hosts=[]).generate_task_plan("统计当前目录下的 Python 文件", "/work")
+    plan = Engine(ssh_hosts=[]).generate_task_plan("统计当前目录下的 Python 文件", str(tmp_path))
     assert len(calls) == 2
     assert plan.steps[0].operation == "count_files"
     assert "count_files" in calls[1][-1]["content"]
@@ -104,11 +104,11 @@ def test_clarification_and_refusal_are_valid_model_outputs(monkeypatch):
     assert engine.generate_task_plan("安装软件", "/work").refused
 
 
-def test_prompt_requires_real_parameters_and_no_shell(monkeypatch):
+def test_prompt_requires_real_parameters_and_no_shell(monkeypatch, tmp_path):
     from core.engine import Engine
     captured = []
     monkeypatch.setattr("core.engine.chat", lambda messages, backend=None: captured.append(messages) or reply("create_file", path="admin.txt"))
-    Engine(ssh_hosts=[]).generate_task_plan("创建 admin.txt", "/work")
+    Engine(ssh_hosts=[]).generate_task_plan("创建 admin.txt", str(tmp_path))
     system = captured[0][0]["content"]
     assert "只能创建空文件" in system
     assert "不得输出 command" in system
@@ -130,3 +130,33 @@ def test_ambiguous_deletion_asks_before_any_execution(monkeypatch, user_input):
     monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: pytest.fail("不应调用模型"))
     plan = Engine(ssh_hosts=[]).generate_task_plan(user_input, "/work")
     assert plan.clarification and not plan.steps
+
+
+@pytest.mark.parametrize("operation,parameters", [
+    ("move_files", {"sources": ["note.txt"], "destination": "../backup"}),
+    ("copy_files", {"sources": ["../note.txt"], "destination": "backup"}),
+    ("rename", {"source": "../note.txt", "destination": "memo.txt"}),
+    ("create_file", {"path": "../new.txt"}),
+    ("trash", {"sources": ["../note.txt"]}),
+])
+def test_planning_rejects_outside_paths_before_ready(monkeypatch, tmp_path, operation, parameters):
+    from core.engine import Engine
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: reply(operation, **parameters))
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="路径位于工作目录之外"):
+        engine.generate_task_plan("处理指定文件", str(tmp_path))
+    assert len(engine.plan_attempts) == 2
+    assert all("路径位于工作目录之外" in attempt["validation_errors"] for attempt in engine.plan_attempts)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_planning_checks_absolute_paths_and_allows_new_inside_target(monkeypatch, tmp_path):
+    from core.engine import Engine
+    responses = iter([reply("create_file", path=str(tmp_path.parent / "outside.txt")),
+                      reply("create_file", path=str(tmp_path / "new.txt"))])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(responses))
+    engine = Engine(ssh_hosts=[])
+    plan = engine.generate_task_plan("创建工作目录内的文件", str(tmp_path))
+    assert engine.plan_attempts[0]["validation_errors"] == ["路径位于工作目录之外"]
+    assert plan.status == "ready"
+    assert not (tmp_path / "new.txt").exists()

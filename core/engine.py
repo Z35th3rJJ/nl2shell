@@ -1,10 +1,12 @@
 import re
 from dataclasses import dataclass
 import json
+from pathlib import Path
 from .llm import chat
 from .ssh_config import load_ssh_hosts
 from .task_plan import TaskPlan, parse_operation_plan
 from .redaction import redact_value
+from .operations import workspace_path
 
 # 模型输出前缀常量（供 cli 和测试复用）
 CANNOT_GENERATE_PREFIX = "CANNOT_GENERATE:"
@@ -102,6 +104,15 @@ def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str) -> list[str]:
     if plan.clarification or plan.refused:
         return []
     errors = []
+    for step in plan.steps:
+        parameters = step.parameters
+        paths = [parameters[key] for key in ("path", "source", "destination") if key in parameters]
+        paths.extend(parameters.get("sources", []))
+        for path in paths:
+            try:
+                workspace_path(Path(cwd), path)
+            except (ValueError, OSError) as error:
+                errors.append(str(error))
     if "文件" in user_input and any(word in user_input for word in _FILE_COUNT_WORDS) and not any(
         word in user_input for word in _NON_FILE_COUNT_WORDS
     ):
