@@ -104,3 +104,14 @@ def test_named_source_must_come_from_user(monkeypatch):
         "status": "ready", "operations": ["copy_files"], "named_sources": ["invented.txt"], "selection_required": False}))
     with pytest.raises(ValueError, match="结构化意图"):
         analyze_request("复制 note.txt 到 backup", [], "local", [])
+
+
+def test_review_question_does_not_replace_permanent_delete_reason(monkeypatch, tmp_path):
+    replies = iter([json.dumps({"status": "unsupported", "reason_code": "permanent_delete"}),
+                    json.dumps({"status": "need_clarification", "clarification": "您想执行什么动作？"})])
+    monkeypatch.setattr("core.intent.chat", lambda *args, **kwargs: next(replies))
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: pytest.fail("拒绝后不生成计划"))
+    engine = Engine(ssh_hosts=[])
+    plan = engine.generate_task_plan("永久删除 note.txt", str(tmp_path))
+    assert plan.refused and "永久删除" in plan.reason
+    assert engine.request_intent["reason_code"] == "permanent_delete"

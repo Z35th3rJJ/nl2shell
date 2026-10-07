@@ -69,6 +69,7 @@ organize_files：按文件类型归类。system_info：查询系统、磁盘或�
 def analyze_request(user_input, answers, backend, attempts):
     messages = [{"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": json.dumps({"request": user_input, "answers": answers}, ensure_ascii=False)}]
+    rejected = None
     for attempt in range(2):
         raw = chat(messages, backend=backend)
         record = {"attempt": attempt + 1, "raw_output": redact_value(raw)}
@@ -108,6 +109,13 @@ def analyze_request(user_input, answers, backend, attempts):
                         or not isinstance(result.get(key), str) or not result[key].strip()):
                     raise ValueError("意图不明确或不支持时必须给出说明")
             record["validation_errors"] = []
+            if status == "unsupported":
+                rejected = result
+            if status == "need_clarification":
+                if rejected is not None:
+                    record["resolution"] = "复核仅提出泛泛追问，保留已有明确拒绝类别"
+                    return rejected
+                return result
             if attempt == 0:
                 record["review_requested"] = True
                 messages.extend([{"role": "assistant", "content": raw},
