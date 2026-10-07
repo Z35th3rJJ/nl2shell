@@ -58,4 +58,20 @@ def load_cases():
     add("必要追问", ["给 note.txt 拷贝一份", "给 note.txt 做个副本", "note.txt 备份一下",
                       "查找当前目录最近修改的文件", "找出当前目录这几天修改的文件"],
         status="need_clarification")
+    add("文件操作", ["把 note.txt 复制进 backup"],
+        [step("copy_files", sources=["note.txt"], destination="backup")], changes={"backup/note.txt": "note.txt"})
+    add("文件操作", ["把 note.txt 移进 archive"],
+        [step("move_files", sources=["note.txt"], destination="archive")],
+        changes={"note.txt": "absent", "archive": "directory", "archive/note.txt": "note.txt"})
+    selected = ["main.py", "note.txt", "report.pdf", "small.pdf"]
+    for text, days, destination in [
+        ("把当前目录过去两周修改的文件备份到 archive", 14, "archive"),
+        ("把当前目录24小时内修改的文件复制到 backup", 1, "backup"),
+    ]:
+        changes = {f"{destination}/{name}": name for name in selected}
+        if destination == "archive":
+            changes["archive"] = "directory"
+        add("多步规划", [text],
+            [step("find_files", path=".", recursive=False, modified_within_days=days),
+             step("copy_files", source_step=1, destination=destination)], changes=changes, selected=selected)
     return cases

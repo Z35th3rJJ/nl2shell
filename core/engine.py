@@ -66,7 +66,7 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
             if destination == ".":
                 names = [str(Path(cwd).resolve()), "当前目录", "这里", "本目录", "此目录", "这个目录", "."]
             target = "(?:" + "|".join(re.escape(name) for name in names) + ")"
-            explicit = re.search(r"(?:到|至|放在|存放在|保存在|目标目录(?:为|是|[:：]))\s*[\"'`]?" +
+            explicit = re.search(r"(?:到|进|入|至|放在|存放在|保存在|目标目录(?:为|是|[:：]))\s*[\"'`]?" +
                                  target + r"(?:目录)?(?![\w./-])", text)
             answered = any(re.fullmatch(r"\s*[\"'`]?" + target + r"[\"'`]?\s*(?:目录)?[。]?\s*", answer)
                            for answer in answers)
@@ -164,6 +164,12 @@ def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str) -> list[str]:
     if plan.clarification or plan.refused:
         return []
     errors = []
+    requested = re.sub(r"(?:不要|无需|不必|不需要|别)\s*(?:复制|拷贝|备份|移动|移进|移到)", "", user_input)
+    operations = {step.operation for step in plan.steps}
+    for pattern, operation in [(r"复制|拷贝|备份|做(?:个|一份)?副本", "copy_files"),
+                               (r"移动|移进|移到|搬进|搬到", "move_files")]:
+        if re.search(pattern, requested) and operation not in operations:
+            errors.append(f"用户要求的操作未出现在计划中：{operation}")
     if "文件" in user_input and any(word in user_input for word in _FILE_COUNT_WORDS) and not any(
         word in user_input for word in _NON_FILE_COUNT_WORDS
     ):

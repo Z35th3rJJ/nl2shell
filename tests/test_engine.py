@@ -211,3 +211,51 @@ def test_copy_to_explicit_current_directory_is_allowed(monkeypatch, tmp_path):
                         reply("copy_files", sources=["note.txt"], destination=str(tmp_path)))
     plan = Engine(ssh_hosts=[]).generate_task_plan("把 note.txt 复制到当前目录", str(tmp_path))
     assert plan.status == "ready" and plan.steps[0].parameters["destination"] == "."
+
+
+@pytest.mark.parametrize("user_input,operation,destination", [
+    ("把 note.txt 复制进 backup", "copy_files", "backup"),
+    ("把 note.txt 移进 archive", "move_files", "archive"),
+])
+def test_explicit_target_with_jin_does_not_ask(monkeypatch, tmp_path, user_input, operation, destination):
+    from core.engine import Engine
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
+                        reply(operation, sources=["note.txt"], destination=destination))
+    plan = Engine(ssh_hosts=[]).generate_task_plan(user_input, str(tmp_path))
+    assert plan.status == "ready"
+    assert plan.steps[0].parameters["destination"] == destination
+
+
+@pytest.mark.parametrize("user_input,days", [
+    ("把当前目录过去两周修改的文件备份到 archive", 14),
+    ("把当前目录24小时内修改的文件复制到 backup", 1),
+])
+def test_query_only_plan_cannot_satisfy_copy_request(monkeypatch, tmp_path, user_input, days):
+    from core.engine import Engine
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
+                        reply(path=".", recursive=False, modified_within_days=days))
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="copy_files"):
+        engine.generate_task_plan(user_input, str(tmp_path))
+    assert len(engine.plan_attempts) == 2
+    assert all(any("copy_files" in error for error in attempt["validation_errors"])
+               for attempt in engine.plan_attempts)
+
+
+def test_missing_copy_step_is_retried_and_correct_plan_is_accepted(monkeypatch, tmp_path):
+    import json
+    from core.engine import Engine
+    query = {"operation": "find_files", "parameters": {"path": ".", "recursive": False, "modified_within_days": 1}}
+    responses = iter([json.dumps({"status": "ready", "steps": [query]}),
+                      json.dumps({"status": "ready", "steps": [query,
+                          {"operation": "copy_files", "parameters": {"source_step": 1, "destination": "backup"}}]})])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(responses))
+    plan = Engine(ssh_hosts=[]).generate_task_plan("把当前目录24小时内修改的文件复制到 backup", str(tmp_path))
+    assert plan.status == "ready" and plan.steps[1].operation == "copy_files"
+
+
+def test_negated_copy_request_does_not_require_a_copy_step(monkeypatch, tmp_path):
+    from core.engine import Engine
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: reply(path=".", recursive=False))
+    plan = Engine(ssh_hosts=[]).generate_task_plan("列出当前目录文件，不要复制", str(tmp_path))
+    assert plan.status == "ready"
