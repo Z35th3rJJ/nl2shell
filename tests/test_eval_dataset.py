@@ -131,5 +131,8 @@ def test_current_layer_structure_flag_is_equivalent_but_recursive_scope_is_not(t
     prepared = prepare_plan(plan, str(tmp_path))
     outcomes = [execute_action(prepared, action) for action in prepared["actions"]]
     assert check_result(case, outcomes, tmp_path, before)
+    case = json.loads(json.dumps(case))
+    case["expected_steps"][1]["parameters"]["preserve_structure"] = True
+    assert matches_expected(plan, case, tmp_path)
     payload["steps"][0]["parameters"]["recursive"] = True
     assert not matches_expected(parse_operation_plan(json.dumps(payload)), case, tmp_path)

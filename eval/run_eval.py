@@ -19,7 +19,7 @@ from core.execution import BashExecutor
 from core.llm import model_configuration
 from core.operations import execute_action, prepare_plan, workspace_path
 from core.redaction import redact_value
-from core.task_plan import plan_payload
+from core.task_plan import plan_payload, parse_operation_plan
 from eval.operation_cases import load_cases
 
 load_dotenv()
@@ -70,20 +70,24 @@ def normalized_steps(plan, root=None):
     return steps
 
 
+def expected_steps(case):
+    return normalized_steps(parse_operation_plan(json.dumps({"status": "ready", "steps": case["expected_steps"]})))
+
+
 def matches_expected(plan, case, root=None):
     payload = plan_payload(plan)
     if payload["status"] != case["expected_status"]:
         return False
     if payload["status"] != "ready":
         return bool(payload.get("clarification") or payload.get("reason"))
-    return normalized_steps(plan, root) == case["expected_steps"]
+    return normalized_steps(plan, root) == expected_steps(case)
 
 
 def execution_allowed(plan, case, root):
     if case["expected_status"] != "ready" or plan_payload(plan)["status"] != "ready":
         return False
     steps = normalized_steps(plan, root)
-    expected = case["expected_steps"]
+    expected = expected_steps(case)
     if steps == expected:
         return True
     extra = len(steps) - len(expected)
