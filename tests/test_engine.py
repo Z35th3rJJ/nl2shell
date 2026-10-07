@@ -229,6 +229,10 @@ def test_explicit_target_with_jin_does_not_ask(monkeypatch, tmp_path, user_input
 @pytest.mark.parametrize("user_input,days", [
     ("把当前目录过去两周修改的文件备份到 archive", 14),
     ("把当前目录24小时内修改的文件复制到 backup", 1),
+    ("把当前目录过去两周修改的文件备份一份到 archive", 14),
+    ("把当前目录过去两周修改的文件做个备份，放到 archive", 14),
+    ("把当前目录过去两周修改的文件复制一份到 archive", 14),
+    ("把当前目录过去两周修改的文件存到 archive 作为备份", 14),
 ])
 def test_query_only_plan_recovers_copy_and_executes_selected_files(monkeypatch, tmp_path, user_input, days):
     import os
@@ -263,6 +267,9 @@ def test_query_only_plan_recovers_copy_and_executes_selected_files(monkeypatch, 
     ("把当前目录过去两周修改的文件备份到 archive", {"path": ".", "recursive": False}),
     ("把当前目录过去两周修改的文件备份到 archive", {"path": ".", "recursive": True, "modified_within_days": 14}),
     ("把当前目录文件复制到 backup 或复制到 archive", {"path": ".", "recursive": False}),
+    ("把当前目录过去两周修改的文件备份一份", {"path": ".", "recursive": False, "modified_within_days": 14}),
+    ("把当前目录过去两周修改的文件做个备份，放到 ../archive", {"path": ".", "recursive": False, "modified_within_days": 14}),
+    ("把当前目录文件做个备份，放到 archive 或放到 backup", {"path": ".", "recursive": False}),
 ])
 def test_recovery_never_guesses_target_time_or_scope(monkeypatch, tmp_path, user_input, parameters):
     from core.engine import Engine

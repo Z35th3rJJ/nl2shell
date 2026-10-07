@@ -14,6 +14,7 @@ CLARIFY_PREFIX         = "CLARIFY:"
 _AMBIGUOUS_DELETION = re.compile(r"^(?:请)?(?:帮我)?(?:删除|清理|移除)(?:一下)?[。！!\s]*$")
 _FILE_COUNT_WORDS = ("统计", "多少", "数量", "个数")
 _NON_FILE_COUNT_WORDS = ("行数", "大小", "占用", "类型", "分布")
+_TARGET_MARKER = r"(?:到|进|入|至|放在|存放在|保存在|目标目录(?:为|是|[:：]))"
 
 
 def _normalize_paths(plan: TaskPlan, cwd: str) -> TaskPlan:
@@ -51,6 +52,11 @@ def _explicit_days(text: str) -> set[float]:
     return days
 
 
+def _explicit_targets(text: str) -> set[str]:
+    matches = re.findall(_TARGET_MARKER + r'''\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''', text)
+    return {next(value for value in match if value) for match in matches}
+
+
 def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list[str]) -> str:
     text = "\n".join([user_input, *answers])
     days = _explicit_days(text)
@@ -66,7 +72,7 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
             if destination == ".":
                 names = [str(Path(cwd).resolve()), "当前目录", "这里", "本目录", "此目录", "这个目录", "."]
             target = "(?:" + "|".join(re.escape(name) for name in names) + ")"
-            explicit = re.search(r"(?:到|进|入|至|放在|存放在|保存在|目标目录(?:为|是|[:：]))\s*[\"'`]?" +
+            explicit = re.search(_TARGET_MARKER + r"\s*[\"'`]?" +
                                  target + r"(?:目录)?(?![\w./-])", text)
             answered = any(re.fullmatch(r"\s*[\"'`]?" + target + r"[\"'`]?\s*(?:目录)?[。]?\s*", answer)
                            for answer in answers)
@@ -193,8 +199,7 @@ def _complete_copy_plan(plan, errors, user_input, cwd, answers):
     days = _explicit_days(text)
     if days and (len(days) != 1 or plan.steps[0].parameters.get("modified_within_days") not in days):
         return None
-    matches = re.findall(r'''(?:备份|复制|拷贝)(?:到|进|入|至)\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''', text)
-    targets = {next(value for value in match if value) for match in matches}
+    targets = _explicit_targets(text)
     if len(targets) != 1:
         return None
     destination = targets.pop()

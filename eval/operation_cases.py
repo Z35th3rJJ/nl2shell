@@ -67,6 +67,10 @@ def load_cases():
     for text, days, destination in [
         ("把当前目录过去两周修改的文件备份到 archive", 14, "archive"),
         ("把当前目录24小时内修改的文件复制到 backup", 1, "backup"),
+        ("把当前目录过去两周修改的文件备份一份到 archive", 14, "archive"),
+        ("把当前目录过去两周修改的文件做个备份，放到 archive", 14, "archive"),
+        ("把当前目录过去两周修改的文件复制一份到 archive", 14, "archive"),
+        ("把当前目录过去两周修改的文件存到 archive 作为备份", 14, "archive"),
     ]:
         changes = {f"{destination}/{name}": name for name in selected}
         if destination == "archive":
