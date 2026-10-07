@@ -47,6 +47,18 @@ def reply(operation="find_files", **parameters):
     return json.dumps({"status": "ready", "steps": [{"operation": operation, "parameters": parameters}]})
 
 
+def test_model_attempts_preserve_failure_and_redact_secrets(monkeypatch):
+    from core.engine import Engine
+    responses = iter(['{"token":"secret-value"}', reply("system_info", query="system")])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(responses))
+    engine = Engine(ssh_hosts=[])
+    engine.generate_task_plan("查看系统信息", "/work")
+    assert len(engine.plan_attempts) == 2
+    assert engine.plan_attempts[0]["validation_errors"]
+    assert "secret-value" not in engine.plan_attempts[0]["raw_output"]
+    assert engine.plan_attempts[1]["validation_errors"] == []
+
+
 def test_context_keeps_five_turns_and_does_not_claim_cancelled_execution(monkeypatch):
     from core.engine import Engine
     from core.task_plan import TaskPlan, TaskStep

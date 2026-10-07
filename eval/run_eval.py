@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from core.engine import Engine
 from core.execution import BashExecutor
 from core.llm import model_configuration
-from core.operations import execute_action, prepare_plan
+from core.operations import execute_action, prepare_plan, workspace_path
 from core.redaction import redact_value
 from core.task_plan import plan_payload
 from eval.operation_cases import load_cases
@@ -47,19 +47,46 @@ def tree_state(root):
             else hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*")}
 
 
-def matches_expected(plan, case):
+def normalized_steps(plan, root=None):
+    steps = [{"operation": s.operation, "parameters": dict(s.parameters)} for s in plan.steps]
+    for step in steps:
+        parameters = step["parameters"]
+        if root is not None:
+            root = Path(root).resolve(strict=True)
+            for key in ("path", "source", "destination"):
+                if key in parameters:
+                    parameters[key] = workspace_path(root, parameters[key]).relative_to(root).as_posix()
+            if "sources" in parameters:
+                parameters["sources"] = [workspace_path(root, path).relative_to(root).as_posix()
+                                         for path in parameters["sources"]]
+        if step["operation"] == "copy_files" and parameters.get("preserve_structure") is False:
+            parameters.pop("preserve_structure")
+        if step["operation"] in {"find_files", "count_files"} and parameters.get("pattern") == "*":
+            parameters.pop("pattern")
+    return steps
+
+
+def matches_expected(plan, case, root=None):
     payload = plan_payload(plan)
     if payload["status"] != case["expected_status"]:
         return False
     if payload["status"] != "ready":
         return bool(payload.get("clarification") or payload.get("reason"))
-    steps = [{"operation": s.operation, "parameters": dict(s.parameters)} for s in plan.steps]
-    for step in steps:
-        if step["operation"] == "copy_files" and step["parameters"].get("preserve_structure") is False:
-            step["parameters"].pop("preserve_structure")
-        if step["operation"] in {"find_files", "count_files"} and step["parameters"].get("pattern") == "*":
-            step["parameters"].pop("pattern")
-    return steps == case["expected_steps"]
+    return normalized_steps(plan, root) == case["expected_steps"]
+
+
+def execution_allowed(plan, case, root):
+    if case["expected_status"] != "ready" or plan_payload(plan)["status"] != "ready":
+        return False
+    steps = normalized_steps(plan, root)
+    expected = case["expected_steps"]
+    if steps == expected:
+        return True
+    extra = len(steps) - len(expected)
+    # ponytail: only independent leading file queries; other equivalent plans remain unmeasured.
+    return (extra > 0 and steps[extra:] == expected
+            and all(step["operation"] in {"find_files", "count_files"} for step in steps[:extra])
+            and not any("source_step" in step["parameters"] for step in steps))
 
 
 def check_result(case, outcomes, root, before):
@@ -122,13 +149,16 @@ def run_eval(limit=200, delay=0, backend=None, execute_safe=False, output_dir=No
             root = Path(directory)
             create_fixture(root)
             before = tree_state(root)
+            engine = None
             try:
-                plan = Engine(backend=backend, ssh_hosts=[]).generate_task_plan(case["input"], str(root))
+                engine = Engine(backend=backend, ssh_hosts=[])
+                plan = engine.generate_task_plan(case["input"], str(root))
                 result["generated"] = plan_payload(plan)
-                result["planning_correct"] = matches_expected(plan, case)
+                result["planning_correct"] = matches_expected(plan, case, root)
                 if execute_safe and case["expected_status"] == "ready":
                     result["task_completed"] = False
-                    if result["planning_correct"]:
+                    result["execution_allowed"] = execution_allowed(plan, case, root)
+                    if result["execution_allowed"]:
                         prepared = prepare_plan(plan, str(root), timeout_seconds=10)
                         outcomes = []
                         for action in prepared["actions"]:
@@ -138,10 +168,14 @@ def run_eval(limit=200, delay=0, backend=None, execute_safe=False, output_dir=No
                                 break
                         result.update(executed=any(item["executed"] for item in outcomes), outcomes=outcomes,
                                       task_completed=check_result(case, outcomes, root, before))
+                    else:
+                        result["execution_block_reason"] = "计划超出本用例允许执行的操作或参数"
             except (ValueError, RuntimeError, OSError) as error:
                 result["error"] = str(error)
                 if execute_safe and case["expected_status"] == "ready":
                     result["task_completed"] = False
+            finally:
+                result["model_attempts"] = getattr(engine, "plan_attempts", [])
         result["duration_seconds"] = time.monotonic() - started
         results.append(result)
         print(f"{case['id']}: {'正确' if result['planning_correct'] else '错误'} | {case['input']}")
@@ -167,6 +201,7 @@ def run_eval(limit=200, delay=0, backend=None, execute_safe=False, output_dir=No
     for path in sorted([repo / "cli.py", *repo.glob("core/*.py"), *repo.glob("eval/*.py")]):
         source.update(path.relative_to(repo).as_posix().encode() + b"\0" + path.read_bytes())
     report = {**model_configuration(backend), "timestamp": datetime.now(timezone.utc).isoformat(),
+              "evaluation_version": 2,
               "code_revision": revision, "working_tree_dirty": dirty,
               "source_version": source.hexdigest(),
               "dataset_version": hashlib.sha256(json.dumps(load_testcases(), ensure_ascii=False,

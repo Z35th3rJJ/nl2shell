@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 from core.task_plan import parse_operation_plan
-from eval.run_eval import load_testcases, create_fixture, tree_state, check_result, run_eval
+from eval.run_eval import load_testcases, create_fixture, tree_state, check_result, run_eval, matches_expected, execution_allowed
 
 
 def test_dataset_has_unique_inputs_and_covers_model_roles():
@@ -81,10 +81,39 @@ def test_unmeasured_completion_is_null_and_results_do_not_overwrite(tmp_path, mo
 def test_mismatched_plan_cannot_execute_and_counts_as_incomplete(tmp_path, monkeypatch):
     import eval.run_eval as runner
     from core.task_plan import TaskPlan, TaskStep
-    engine = Mock()
+    engine = Mock(plan_attempts=[])
     engine.generate_task_plan.return_value = TaskPlan((TaskStep(operation="create_file", parameters={"path": "unexpected"}),))
     monkeypatch.setattr(runner, "Engine", lambda **kwargs: engine)
     monkeypatch.setattr(runner, "execute_action", lambda *args, **kwargs: pytest.fail("错误计划不得执行"))
     report = run_eval(limit=1, execute_safe=True, output_dir=tmp_path)
     assert report["task_completion_rate"] == 0
     assert not report["details"][0]["executed"]
+
+
+def test_equivalent_paths_match_but_outside_paths_fail(tmp_path):
+    case = load_testcases()[0]
+    plan = parse_operation_plan(json.dumps({"status": "ready", "steps": [{
+        "operation": "find_files", "parameters": {"path": str(tmp_path), "recursive": False, "pattern": "*.py"}}]}))
+    assert matches_expected(plan, case, tmp_path)
+    plan = parse_operation_plan(json.dumps({"status": "ready", "steps": [{
+        "operation": "find_files", "parameters": {"path": "../outside", "recursive": False, "pattern": "*.py"}}]}))
+    with pytest.raises(ValueError, match="之外"):
+        matches_expected(plan, case, tmp_path)
+
+
+def test_extra_read_step_can_complete_task_without_matching_plan(tmp_path, monkeypatch):
+    import eval.run_eval as runner
+    case = next(case for case in load_testcases() if case["input"] == "备份 note.txt 到 backup")
+    monkeypatch.setattr(runner, "load_testcases", lambda: [case])
+    plan = parse_operation_plan(json.dumps({"status": "ready", "steps": [
+        {"operation": "find_files", "parameters": {"path": ".", "recursive": False, "pattern": "note.txt"}},
+        *case["expected_steps"]]}))
+    engine = Mock(plan_attempts=[])
+    engine.generate_task_plan.return_value = plan
+    monkeypatch.setattr(runner, "Engine", lambda **kwargs: engine)
+    report = run_eval(execute_safe=True, output_dir=tmp_path)
+    assert report["planning_accuracy"] == 0
+    assert report["task_completion_rate"] == 100
+    extra_write = parse_operation_plan(json.dumps({"status": "ready", "steps": [
+        {"operation": "create_file", "parameters": {"path": "unexpected"}}, *case["expected_steps"]]}))
+    assert not execution_allowed(extra_write, case, tmp_path)

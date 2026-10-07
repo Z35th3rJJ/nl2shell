@@ -9,6 +9,8 @@ def compare(first: Path, second: Path):
     if reports[0]["dataset_version"] != reports[1]["dataset_version"] or reports[0]["total"] != reports[1]["total"]:
         raise ValueError("用例版本或数量不同，不能直接比较")
     print("模型：", *[report["model"] for report in reports], sep=" | ")
+    if reports[0].get("evaluation_version", 1) != reports[1].get("evaluation_version", 1):
+        print("注意：判分或执行规则不同，分数变化不能直接解释为模型能力提升。")
     for key, name in [("condition_understanding_accuracy", "条件理解正确率"),
                       ("planning_accuracy", "计划正确率"), ("necessary_clarification_rate", "必要追问率"),
                       ("unsupported_refusal_rate", "范围拒绝率"), ("task_completion_rate", "实际任务完成率")]:
