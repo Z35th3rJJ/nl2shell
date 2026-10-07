@@ -170,7 +170,7 @@ def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str) -> list[str]:
     if plan.clarification or plan.refused:
         return []
     errors = []
-    requested = re.sub(r"(?:不要|无需|不必|不需要|不用|别)\s*(?:复制|拷贝|备份|移动|移进|移到|重命名|改名|删除|移除|清理|创建|新建|建立|整理|查看|显示|查询)", "", user_input)
+    requested = re.sub(r"(?:不要|无需|不必|不需要|不用|不得|不是|别|不)\s*(?:复制|拷贝|备份|移动|移进|移到|重命名|改名|删除|移除|清理|创建|新建|建立|整理|查看|显示|查询)", "", user_input)
     operations = {step.operation for step in plan.steps}
     required = set()
     for pattern, operation in [(r"复制|拷贝|备份|做(?:个|一份)?副本", "copy_files"),

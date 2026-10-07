@@ -328,5 +328,6 @@ def test_required_core_action_is_checked_and_can_be_corrected(monkeypatch, tmp_p
 def test_negated_core_actions_do_not_require_steps(monkeypatch, tmp_path, forbidden):
     from core.engine import Engine
     monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: reply(path=".", recursive=False))
-    plan = Engine(ssh_hosts=[]).generate_task_plan(f"列出当前目录文件，不要{forbidden}", str(tmp_path))
-    assert plan.status == "ready"
+    for prefix in ("不要", "不"):
+        plan = Engine(ssh_hosts=[]).generate_task_plan(f"列出当前目录文件，{prefix}{forbidden}", str(tmp_path))
+        assert plan.status == "ready"
