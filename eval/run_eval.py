@@ -184,6 +184,8 @@ def run_eval(limit=200, delay=0, backend=None, execute_safe=False, output_dir=No
                     result["task_completed"] = False
             finally:
                 result["model_attempts"] = getattr(engine, "plan_attempts", [])
+                result["request_intent"] = getattr(engine, "request_intent", {})
+                result["intent_attempts"] = getattr(engine, "intent_attempts", [])
         result["duration_seconds"] = time.monotonic() - started
         results.append(result)
         print(f"{case['id']}: {'正确' if result['planning_correct'] else '错误'} | {case['input']}")

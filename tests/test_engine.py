@@ -6,6 +6,16 @@ import pytest
 from core.engine import classify_output, CLARIFY_PREFIX, CANNOT_GENERATE_PREFIX
 
 
+@pytest.fixture(autouse=True)
+def intent_contract(monkeypatch):
+    """隔离规划测试；动作完整性用例显式提供独立的需求契约。"""
+    def set_operations(*operations):
+        monkeypatch.setattr("core.engine.analyze_request", lambda *args:
+                            {"status": "ready", "operations": list(operations)})
+    set_operations()
+    return set_operations
+
+
 # ── classify_output：三类前缀正确分类 ────────────────────────
 @pytest.mark.parametrize("text, expected", [
     # 正常命令
@@ -73,7 +83,8 @@ def test_context_keeps_five_turns_and_does_not_claim_cancelled_execution(monkeyp
     assert '"status": "cancelled"' in captured[0][-1]["content"]
 
 
-def test_file_count_retries_wrong_operation(monkeypatch, tmp_path):
+def test_file_count_retries_wrong_operation(monkeypatch, tmp_path, intent_contract):
+    intent_contract("count_files")
     from core.engine import Engine
     responses = iter([reply(path=".", recursive=False), reply("count_files", path=".", recursive=False, pattern="*.py")])
     calls = []
@@ -234,7 +245,8 @@ def test_explicit_target_with_jin_does_not_ask(monkeypatch, tmp_path, user_input
     ("把当前目录过去两周修改的文件复制一份到 archive", 14),
     ("把当前目录过去两周修改的文件存到 archive 作为备份", 14),
 ])
-def test_query_only_plan_recovers_copy_and_executes_selected_files(monkeypatch, tmp_path, user_input, days):
+def test_query_only_plan_recovers_copy_and_executes_selected_files(monkeypatch, tmp_path, user_input, days, intent_contract):
+    intent_contract("copy_files")
     import os
     import time
     from core.engine import Engine
@@ -271,7 +283,8 @@ def test_query_only_plan_recovers_copy_and_executes_selected_files(monkeypatch, 
     ("把当前目录过去两周修改的文件做个备份，放到 ../archive", {"path": ".", "recursive": False, "modified_within_days": 14}),
     ("把当前目录文件做个备份，放到 archive 或放到 backup", {"path": ".", "recursive": False}),
 ])
-def test_recovery_never_guesses_target_time_or_scope(monkeypatch, tmp_path, user_input, parameters):
+def test_recovery_never_guesses_target_time_or_scope(monkeypatch, tmp_path, user_input, parameters, intent_contract):
+    intent_contract("copy_files")
     from core.engine import Engine
     monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: reply(**parameters))
     with pytest.raises(ValueError):
@@ -279,7 +292,8 @@ def test_recovery_never_guesses_target_time_or_scope(monkeypatch, tmp_path, user
     assert list(tmp_path.iterdir()) == []
 
 
-def test_missing_copy_step_is_retried_and_correct_plan_is_accepted(monkeypatch, tmp_path):
+def test_missing_copy_step_is_retried_and_correct_plan_is_accepted(monkeypatch, tmp_path, intent_contract):
+    intent_contract("copy_files")
     import json
     from core.engine import Engine
     query = {"operation": "find_files", "parameters": {"path": ".", "recursive": False, "modified_within_days": 1}}
@@ -309,7 +323,8 @@ def test_negated_copy_request_does_not_require_a_copy_step(monkeypatch, tmp_path
     ("按文件类型整理当前目录", "organize_files", {"path": ".", "recursive": False, "group_by": "extension"}),
     ("查看系统信息", "system_info", {"query": "system"}),
 ])
-def test_required_core_action_is_checked_and_can_be_corrected(monkeypatch, tmp_path, user_input, operation, parameters):
+def test_required_core_action_is_checked_and_can_be_corrected(monkeypatch, tmp_path, user_input, operation, parameters, intent_contract):
+    intent_contract(operation)
     from core.engine import Engine
     query = reply(path=".", recursive=False)
     monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: query)

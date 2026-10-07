@@ -78,4 +78,7 @@ def load_cases():
         add("多步规划", [text],
             [step("find_files", path=".", recursive=False, modified_within_days=days),
              step("copy_files", source_step=1, destination=destination)], changes=changes, selected=selected)
+    add("文件操作", ["把 note.txt 丢到回收区", "把 note.txt 放进回收区", "把 note.txt 扔进回收站",
+                      "把 note.txt 移到垃圾箱", "把 note.txt 删掉但保留恢复能力"],
+        [step("trash", sources=["note.txt"])], changes={"note.txt": "absent"}, trashed=["note.txt"])
     return cases

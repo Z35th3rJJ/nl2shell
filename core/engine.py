@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 from .llm import chat
 from .ssh_config import load_ssh_hosts
-from .task_plan import TaskPlan, TaskStep, parse_operation_plan, plan_payload
+from .task_plan import TaskPlan, TaskStep, READ_OPERATIONS, parse_operation_plan, plan_payload
+from .intent import analyze_request
 from .redaction import redact_value
 from .operations import workspace_path
 
@@ -12,8 +13,6 @@ from .operations import workspace_path
 CANNOT_GENERATE_PREFIX = "CANNOT_GENERATE:"
 CLARIFY_PREFIX         = "CLARIFY:"
 _AMBIGUOUS_DELETION = re.compile(r"^(?:请)?(?:帮我)?(?:删除|清理|移除)(?:一下)?[。！!\s]*$")
-_FILE_COUNT_WORDS = ("统计", "多少", "数量", "个数")
-_NON_FILE_COUNT_WORDS = ("行数", "大小", "占用", "类型", "分布")
 _TARGET_MARKER = r"(?:到|进|入|至|放在|存放在|保存在|目标目录(?:为|是|[:：]))"
 
 
@@ -166,33 +165,16 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 """
 
 
-def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str) -> list[str]:
+def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str, required) -> list[str]:
     if plan.clarification or plan.refused:
         return []
     errors = []
-    requested = re.sub(r"(?:不要|无需|不必|不需要|不用|不得|不是|别|不)\s*(?:复制|拷贝|备份|移动|移进|移到|重命名|改名|删除|移除|清理|创建|新建|建立|整理|查看|显示|查询)", "", user_input)
     operations = {step.operation for step in plan.steps}
-    required = set()
-    for pattern, operation in [(r"复制|拷贝|备份|做(?:个|一份)?副本", "copy_files"),
-                               (r"移动|移进|移到|搬进|搬到", "move_files"),
-                               (r"重命名|改名", "rename"), (r"删除|移除|清理", "trash"),
-                               (r"整理", "organize_files"),
-                               (r"(?:查看|显示|查询)[^，。；\n]*?(?:系统信息|内存|磁盘空间)", "system_info")]:
-        if re.search(pattern, requested):
-            required.add(operation)
-    creation = re.sub(r"(?:工作|当前|本|此|这个)?目录(?:内|下|中)(?:的)?", "", requested)
-    for match in re.finditer(r"(?:创建|新建|建立)[^，。；\n]*?(文件夹|目录|文件)", creation):
-        required.add("create_file" if match.group(1) == "文件" else "create_directory")
-    if (re.search(r"创建|新建|建立", creation) and not required & {"create_file", "create_directory"}
-            and not operations & {"create_file", "create_directory"}):
-        errors.append("用户要求创建对象，但计划缺少 create_file 或 create_directory")
-    for operation in sorted(required - operations):
+    for operation in sorted(set(required) - operations):
         errors.append(f"用户要求的操作未出现在计划中：{operation}")
-    if "文件" in user_input and any(word in user_input for word in _FILE_COUNT_WORDS) and not any(
-        word in user_input for word in _NON_FILE_COUNT_WORDS
-    ):
-        if not any(step.operation == "count_files" for step in plan.steps):
-            errors.append("文件数量统计必须使用 count_files")
+    if required:
+        for operation in sorted(operations - set(required) - READ_OPERATIONS):
+            errors.append(f"计划包含用户未要求的写操作：{operation}")
     if "当前目录" in user_input and not any(word in user_input for word in ("子目录", "递归")):
         if any(step.operation in {"find_files", "count_files"} and
                step.parameters.get("recursive") is not False for step in plan.steps):
@@ -200,7 +182,7 @@ def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str) -> list[str]:
     return errors
 
 
-def _complete_copy_plan(plan, errors, user_input, cwd, answers):
+def _complete_copy_plan(plan, errors, user_input, cwd, answers, required):
     # ponytail: recover only one valid current-directory query plus one explicit copy target.
     if (errors != ["用户要求的操作未出现在计划中：copy_files"] or len(plan.steps) != 1
             or plan.steps[0].operation != "find_files" or plan.steps[0].parameters["path"] != "."):
@@ -224,7 +206,7 @@ def _complete_copy_plan(plan, errors, user_input, cwd, answers):
                                                          explanation="将查找结果复制到用户指定目录")))
     try:
         candidate = _normalize_paths(parse_operation_plan(json.dumps(plan_payload(candidate))), cwd)
-        if _missing_conditions(candidate, user_input, cwd, answers) or _task_plan_errors(candidate, user_input, cwd):
+        if _missing_conditions(candidate, user_input, cwd, answers) or _task_plan_errors(candidate, user_input, cwd, required):
             return None
     except (ValueError, OSError):
         return None
@@ -238,6 +220,8 @@ class Engine:
         self._backend = backend  # None 表示读环境变量
         self._ssh_hosts = load_ssh_hosts() if ssh_hosts is None else ssh_hosts
         self.plan_attempts: list[dict] = []
+        self.intent_attempts: list[dict] = []
+        self.request_intent: dict = {}
 
     def remember(self, user_input: str, command: str) -> None:
         """把已完成生成的命令加入短期模型上下文。"""
@@ -293,11 +277,17 @@ class Engine:
     def generate_task_plan(self, user_input: str, cwd: str, clarifications: list[str] | None = None) -> TaskPlan:
         """只生成固定操作计划，最多修正一次非法输出。"""
         self.plan_attempts = []
+        self.intent_attempts = []
+        self.request_intent = {}
         answers = [answer.split("用户回答：", 1)[-1].strip() for answer in clarifications or []]
         if not clarifications and _AMBIGUOUS_DELETION.fullmatch(user_input.strip()):
             return TaskPlan((), "请明确要删除或清理的具体文件、目录或匹配范围",
                             "FILE_MODIFY", "delete", status="need_clarification")
-        system = _AGENT_SYSTEM
+        self.request_intent = analyze_request(user_input, answers, self._backend, self.intent_attempts)
+        if self.request_intent["status"] != "ready":
+            return parse_operation_plan(json.dumps(self.request_intent))
+        required = self.request_intent["operations"]
+        system = _AGENT_SYSTEM + "\n独立识别的必要操作必须全部出现在计划中：" + json.dumps(required)
         prompt = f"当前目录：{cwd}\n{user_input}"
         if self._task_history:
             context = [
@@ -339,14 +329,14 @@ class Engine:
                     if missing:
                         record["validation_errors"] = [missing]
                         return TaskPlan((), clarification=missing, status="need_clarification")
-                errors = _task_plan_errors(plan, user_input, cwd)
+                errors = _task_plan_errors(plan, user_input, cwd, required)
             except (ValueError, TypeError, OSError) as error:
                 errors = [str(error)]
             record["validation_errors"] = redact_value(errors)
             if not errors:
                 return plan
             if attempt == 1 and plan is not None:
-                recovered = _complete_copy_plan(plan, errors, user_input, cwd, answers)
+                recovered = _complete_copy_plan(plan, errors, user_input, cwd, answers, required)
                 if recovered is not None:
                     record["recovery"] = {"operation": "copy_files", "reason": "补齐用户明确要求的复制步骤",
                                           "plan": plan_payload(recovered)}

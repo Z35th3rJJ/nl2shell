@@ -81,7 +81,7 @@ def test_unmeasured_completion_is_null_and_results_do_not_overwrite(tmp_path, mo
 def test_mismatched_plan_cannot_execute_and_counts_as_incomplete(tmp_path, monkeypatch):
     import eval.run_eval as runner
     from core.task_plan import TaskPlan, TaskStep
-    engine = Mock(plan_attempts=[])
+    engine = Mock(plan_attempts=[], request_intent={}, intent_attempts=[])
     engine.generate_task_plan.return_value = TaskPlan((TaskStep(operation="create_file", parameters={"path": "unexpected"}),))
     monkeypatch.setattr(runner, "Engine", lambda **kwargs: engine)
     monkeypatch.setattr(runner, "execute_action", lambda *args, **kwargs: pytest.fail("错误计划不得执行"))
@@ -108,7 +108,7 @@ def test_extra_read_step_can_complete_task_without_matching_plan(tmp_path, monke
     plan = parse_operation_plan(json.dumps({"status": "ready", "steps": [
         {"operation": "find_files", "parameters": {"path": ".", "recursive": False, "pattern": "note.txt"}},
         *case["expected_steps"]]}))
-    engine = Mock(plan_attempts=[])
+    engine = Mock(plan_attempts=[], request_intent={}, intent_attempts=[])
     engine.generate_task_plan.return_value = plan
     monkeypatch.setattr(runner, "Engine", lambda **kwargs: engine)
     report = run_eval(execute_safe=True, output_dir=tmp_path)
