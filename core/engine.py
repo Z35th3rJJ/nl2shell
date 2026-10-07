@@ -31,6 +31,29 @@ def _normalize_paths(plan: TaskPlan, cwd: str) -> TaskPlan:
     return replace(plan, steps=tuple(steps))
 
 
+def _direct_named_copy(plan, intent, cwd):
+    names = intent.get("named_sources", [])
+    if (intent.get("selection_required") is not False or len(names) != 1
+            or intent.get("operations") != ["copy_files"]
+            or not any(step.operation in READ_OPERATIONS for step in plan.steps)):
+        return plan
+    if len(plan.steps) != 2:
+        raise ValueError("源文件已明确且无需筛选，计划应直接复制")
+    query, copy = plan.steps
+    source = workspace_path(Path(cwd), names[0]).relative_to(Path(cwd).resolve()).as_posix()
+    if (query.operation != "find_files" or copy.operation != "copy_files" or "/" in source
+            or query.parameters != {"path": ".", "recursive": False, "pattern": source}):
+        raise ValueError("额外查找不是明确命名文件的等价查找，计划应直接复制")
+    parameters = dict(copy.parameters)
+    if parameters.get("source_step") == 1:
+        parameters.pop("source_step")
+        parameters["sources"] = [source]
+    elif parameters.get("sources") != [source]:
+        raise ValueError("复制源与用户明确命名文件不一致")
+    return replace(plan, steps=(replace(copy, parameters=parameters,
+                                       explanation="将明确指定的文件复制到目标目录"),))
+
+
 def _explicit_days(text: str) -> set[float]:
     days = set()
     digits = {char: number for number, char in enumerate("零一二三四五六七八九")}
@@ -285,9 +308,12 @@ class Engine:
                             "FILE_MODIFY", "delete", status="need_clarification")
         self.request_intent = analyze_request(user_input, answers, self._backend, self.intent_attempts)
         if self.request_intent["status"] != "ready":
-            return parse_operation_plan(json.dumps(self.request_intent))
+            return parse_operation_plan(json.dumps({key: value for key, value in self.request_intent.items()
+                                                    if key in {"status", "reason", "clarification"}}))
         required = self.request_intent["operations"]
         system = _AGENT_SYSTEM + "\n独立识别的必要操作必须全部出现在计划中：" + json.dumps(required)
+        if self.request_intent.get("named_sources") and self.request_intent.get("selection_required") is False:
+            system += "\n源文件已明确且无需筛选，直接使用 sources，不要先查找：" + json.dumps(self.request_intent["named_sources"])
         prompt = f"当前目录：{cwd}\n{user_input}"
         if self._task_history:
             context = [
@@ -325,6 +351,10 @@ class Engine:
                 plan = parse_operation_plan(raw)
                 if plan.status == "ready":
                     plan = _normalize_paths(plan, cwd)
+                    direct = _direct_named_copy(plan, self.request_intent, cwd)
+                    if direct != plan:
+                        record["normalization"] = "明确命名文件无需查找，改为直接复制"
+                        plan = direct
                     missing = _missing_conditions(plan, user_input, cwd, answers)
                     if missing:
                         record["validation_errors"] = [missing]
