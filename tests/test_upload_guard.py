@@ -44,6 +44,23 @@ class UploadGuardTest(unittest.TestCase):
             text = "=".join(["PASSWORD", repr(value)])
             self.assertTrue(inspect_blob(".env.example", "100644", text.encode()))
 
+    def test_rejects_large_blob_without_reading_content(self):
+        calls = []
+
+        def fake_git(*args):
+            calls.append(args)
+            if args[0] == "ls-files":
+                return b"100644 abc 0\tcore/example.py\0"
+            if args == ("cat-file", "-s", "abc"):
+                return str(1024 * 1024 + 1).encode()
+            raise AssertionError("Large blob content must not be read")
+
+        with patch("scripts.check_upload.git", side_effect=fake_git):
+            failures, count = check("tracked")
+        self.assertEqual(count, 1)
+        self.assertIn("oversized file", failures[0])
+        self.assertNotIn(("cat-file", "blob", "abc"), calls)
+
     def test_reads_staged_blob_and_deleted_files(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

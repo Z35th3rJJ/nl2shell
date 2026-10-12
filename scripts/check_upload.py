@@ -139,6 +139,12 @@ def check(mode="staged", revisions=None):
         if (name, oid) in seen:
             continue
         seen.add((name, oid))
+        if not allowed_path(name) or file_mode not in {"100644", "100755"}:
+            failures.extend(f"{name}: {reason}" for reason in inspect_blob(name, file_mode, b""))
+            continue
+        if int(git("cat-file", "-s", oid)) > 1024 * 1024:
+            failures.append(f"{name}: oversized file")
+            continue
         failures.extend(f"{name}: {reason}" for reason in
                         inspect_blob(name, file_mode, git("cat-file", "blob", oid)))
     return failures, len(seen)
