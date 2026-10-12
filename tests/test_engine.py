@@ -58,6 +58,7 @@ def reply(operation="find_files", **parameters):
 
 
 def test_model_attempts_preserve_failure_and_redact_secrets(monkeypatch):
+    import json
     from core.engine import Engine
     responses = iter([json.dumps({"token": "test-placeholder"}), reply("system_info", query="system")])
     monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(responses))
