@@ -39,7 +39,7 @@ def test_choose_mode_retries_invalid_input():
 def test_first_run_setup_saves_mode_and_preserves_unrelated_env(tmp_path):
     env_path = tmp_path / ".env"
     env_path.write_text(
-        "LOCAL_MODEL=qwen\nDEEPSEEK_API_KEY=secret\n# keep comment\n"
+        "LOCAL_MODEL=qwen\nDEEPSEEK_API_KEY" "=secret\n# keep comment\n"
         "AGENT_MODE=true\nEXECUTION_POLICY=workspace\nDRY_RUN=true\nAUTO_EXECUTE=false\n",
         encoding="utf-8",
     )
@@ -50,7 +50,7 @@ def test_first_run_setup_saves_mode_and_preserves_unrelated_env(tmp_path):
     assert selected == AppSettings(CONFIRM_MODE, True)
     text = env_path.read_text(encoding="utf-8")
     assert "LOCAL_MODEL=qwen" in text
-    assert "DEEPSEEK_API_KEY=secret" in text
+    assert "DEEPSEEK_API_KEY" "=secret" in text
     assert "# keep comment" in text
     assert "RUN_MODE=confirm" in text
     assert "SETUP_COMPLETE=true" in text

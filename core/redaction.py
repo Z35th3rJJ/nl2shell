@@ -7,7 +7,8 @@ _ASSIGNMENT = re.compile(
     r"[\"']?\s*([=:])\s*(?:\"[^\"]*\"|'[^']*'|[^\s,'\"}]+)"
 )
 _BEARER = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]+")
-_COMMON_TOKEN = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,})\b")
+_COMMON_TOKEN = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b")
+_URL_CREDENTIALS = re.compile(r"(https?://)[^/\s:@]+:[^/\s@]+@", re.IGNORECASE)
 _PRIVATE_KEY = re.compile(
     r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
     re.DOTALL,
@@ -18,6 +19,7 @@ def redact_text(text: str) -> str:
     text = _PRIVATE_KEY.sub("<REDACTED_PRIVATE_KEY>", text)
     text = _ASSIGNMENT.sub(lambda match: f"{match.group(1)}{match.group(2)}<REDACTED>", text)
     text = _BEARER.sub(r"\1<REDACTED>", text)
+    text = _URL_CREDENTIALS.sub(r"\1<REDACTED>@", text)
     return _COMMON_TOKEN.sub("<REDACTED_TOKEN>", text)
 
 

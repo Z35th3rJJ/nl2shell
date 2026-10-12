@@ -88,4 +88,12 @@ python eval/compare.py eval/第一次结果.json eval/第二次结果.json
 
 这些指标测量模型与程序检查共同组成的规划流程，不是裸模型成绩。评测集新增了缺少复制目标和模糊时间的不同表达；不同数据集版本不能直接比较总分。
 
-[使用说明](docs/USER_MANUAL.md) · [操作计划设计](docs/adr/0002-structured-operations.md)
+## 提交和推送前检查
+
+克隆后运行一次 `git config core.hooksPath .githooks`。WSL 还需执行 `chmod +x .githooks/pre-commit .githooks/pre-push`。
+
+提交检查读取暂存区，推送检查读取每个新增提交。也可以手动运行 `python scripts/check_upload.py`；检查全部跟踪文件使用 `python scripts/check_upload.py --tracked`。
+
+仓库只接受源码、测试、合成测试数据、依赖、CI、示例配置和本安装说明。论文、文献、计划、真实结果、日志和个人配置留在仓库外。示例配置只填占位值。检查失败时不提交、不推送。
+
+自动检查不能识别所有敏感信息。仍需按文件名暂存并人工检查改动；不能用跳过钩子的方式绕过检查。

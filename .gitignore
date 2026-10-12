@@ -1,11 +1,17 @@
 # 环境变量（含 API Key，绝对不能上传）
 .env
+.env.*
+!.env.example
 
 # Python 虚拟环境
 .venv/
+venv/
 
 # Python 编译缓存
 __pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
 *.pyc
 *.pyo
 *.egg-info/
@@ -33,3 +39,27 @@ eval/eval_result*.json
 
 # 技能锁定清单（agent 工具产物，不入库）
 skills-lock.json
+
+# Only code, dependencies and synthetic test data belong in this repository.
+*.md
+!/README.md
+*.tex
+*.bib
+*.pdf
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.png
+*.jpg
+*.jpeg
+*.zip
+*.log
+*.jsonl
+*.csv
+*.json
+!/eval/testcases.json
+*.pem
+*.key
+*.txt
+!/requirements.txt

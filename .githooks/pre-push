@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+if command -v python >/dev/null 2>&1; then
+    interpreter=python
+else
+    interpreter=python3
+fi
+while read -r local_ref local_sha remote_ref remote_sha; do
+    case "$local_sha" in 0000000000000000000000000000000000000000) continue ;; esac
+    if [ "$remote_sha" = 0000000000000000000000000000000000000000 ]; then
+        "$interpreter" scripts/check_upload.py --commits "$local_sha"
+    else
+        "$interpreter" scripts/check_upload.py --commits "$remote_sha..$local_sha"
+    fi
+done

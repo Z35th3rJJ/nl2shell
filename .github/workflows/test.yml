@@ -18,6 +18,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: python -m pip install -e ".[dev]"
+      - run: python scripts/check_upload.py --tracked
       - run: python -m pytest -q
 
   docker-sandbox:
