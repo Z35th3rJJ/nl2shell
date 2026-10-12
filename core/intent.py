@@ -119,7 +119,7 @@ def analyze_request(user_input, answers, backend, attempts):
             if attempt == 0:
                 record["review_requested"] = True
                 messages.extend([{"role": "assistant", "content": raw},
-                                 {"role": "user", "content": "复核原请求：是否明确给出了动作？只有文件名或处理一下必须追问。排除否定动作；已明确单个文件而无需筛选，不要求查找，并提供 named_sources 和 selection_required=false。永久删除必须使用 permanent_delete，不能说成脚本。确认所有支持操作后，仅输出最终意图 JSON。"}])
+                                 {"role": "user", "content": "请复核上一条意图是否准确表达原始需求。只根据下面的原始需求及用户补充判断，不把复核说明当成需求，不添加未要求的动作。按系统规则输出最终意图 JSON。\n" + messages[1]["content"]}])
                 continue
             return result
         except (ValueError, TypeError) as error:

@@ -84,7 +84,7 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
     days = _explicit_days(text)
     for step in plan.steps:
         parameters = step.parameters
-        if step.operation in {"find_files", "count_files"}:
+        if step.operation in {"find_files", "count_files", "copy_files", "move_files", "trash", "organize_files"}:
             if ("modified_within_days" in parameters and parameters["modified_within_days"] not in days
                     or not days and re.search(r"最近|这几天|近期|近日|近来", text)):
                 return "请明确时间范围，例如最近多少天？"

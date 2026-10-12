@@ -313,6 +313,25 @@ def test_negated_copy_request_does_not_require_a_copy_step(monkeypatch, tmp_path
     assert plan.status == "ready"
 
 
+@pytest.mark.parametrize("time_phrase", ["最近", "这几天"])
+@pytest.mark.parametrize("operation,parameters,suffix", [
+    ("copy_files", {"sources": ["."], "destination": "archive"}, "备份到 archive"),
+    ("move_files", {"sources": ["."], "destination": "archive"}, "移到 archive"),
+    ("trash", {"sources": ["."]}, "丢到回收区"),
+    ("organize_files", {"path": ".", "recursive": False, "group_by": "extension"}, "按类型整理"),
+])
+def test_file_operation_cannot_bypass_ambiguous_time(monkeypatch, tmp_path, time_phrase,
+                                                   operation, parameters, suffix, intent_contract):
+    intent_contract(operation)
+    from core.engine import Engine
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
+                        reply(operation, **parameters))
+    plan = Engine(ssh_hosts=[]).generate_task_plan(
+        f"把当前目录{time_phrase}修改的文件{suffix}", str(tmp_path))
+    assert plan.status == "need_clarification" and "时间范围" in plan.clarification
+    assert not plan.steps and list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize("user_input,operation,parameters", [
     ("把 note.txt 改名为 memo.txt", "rename", {"source": "note.txt", "destination": "memo.txt"}),
     ("删除 note.txt，保留恢复能力", "trash", {"sources": ["note.txt"]}),

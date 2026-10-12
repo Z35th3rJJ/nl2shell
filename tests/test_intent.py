@@ -115,3 +115,22 @@ def test_review_question_does_not_replace_permanent_delete_reason(monkeypatch, t
     plan = engine.generate_task_plan("永久删除 note.txt", str(tmp_path))
     assert plan.refused and "永久删除" in plan.reason
     assert engine.request_intent["reason_code"] == "permanent_delete"
+
+
+@pytest.mark.parametrize("user_input,operations,answers", [
+    ("把当前目录过去两周修改的文件备份到 archive", ["find_files", "copy_files"], []),
+    ("只列出当前目录文件，不要删除或移动", ["find_files"], []),
+    ("找出 . 当前这一层的 txt 文件", ["find_files"], ["仅当前层"]),
+])
+def test_intent_review_repeats_original_request(monkeypatch, user_input, operations, answers):
+    original = json.dumps({"request": user_input, "answers": answers}, ensure_ascii=False)
+    seen = []
+    def reply(messages, backend=None):
+        if seen:
+            # Keep the actual request last so review examples cannot become a new task.
+            assert messages[-1]["content"].endswith(original)
+        seen.append(messages[-1]["content"])
+        return json.dumps({"status": "ready", "operations": operations})
+    monkeypatch.setattr("core.intent.chat", reply)
+    assert analyze_request(user_input, answers, "local", [])["operations"] == operations
+    assert len(seen) == 2
