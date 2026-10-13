@@ -16,7 +16,7 @@ class ErrorAnalysis:
 
 
 def classify_error(result: ExecutionResult, *, status="execution_failed", operation="",
-                   error_type="", error_number=None) -> ErrorAnalysis | None:
+                   error_type="", error_number=None, execution_state="") -> ErrorAnalysis | None:
     if status in {"verified", "no_matches", "cancelled"}:
         return None
     if status in {"blocked", "unsupported"}:
@@ -27,6 +27,8 @@ def classify_error(result: ExecutionResult, *, status="execution_failed", operat
         return ErrorAnalysis("interrupted", "用户中断，执行状态不作成功推断", ("核对已完成操作", "不要重放任务"))
     if result.timed_out:
         return ErrorAnalysis("timeout", "命令执行超时", ("检查命令是否等待输入或持续运行", "检查网络、锁和资源占用"))
+    if execution_state == "unknown":
+        return ErrorAnalysis("state_unknown", "执行证据不完整，无法确定命令是否完成", ("保留错误和当前文件状态", "不要重放任务"))
     if result.exit_code == 0:
         return None
     if operation == "search_text" and result.exit_code == 1 and not result.stderr and not result.stdout:
@@ -109,7 +111,8 @@ def assess_failure(outcome, prepared):
                              outcome.get("duration_seconds", 0), outcome.get("timed_out", False),
                              outcome.get("output_truncated", False))
     analysis = classify_error(result, status=outcome["status"], operation=outcome.get("operation", ""),
-                              error_type=outcome.get("error_type", ""), error_number=outcome.get("error_number"))
+                              error_type=outcome.get("error_type", ""), error_number=outcome.get("error_number"),
+                              execution_state=outcome.get("execution_state", ""))
     if analysis is None:
         return None
     files = inspect_failure_files(prepared, outcome)
@@ -125,6 +128,8 @@ def assess_failure(outcome, prepared):
 
 
 def safe_advice(text, diagnosis):
+    if isinstance(text, str) and diagnosis.get("category") == "resource_limit" and re.search("磁盘|空间", text):
+        return "；".join(diagnosis["checks"])
     if (not isinstance(text, str) or not text.strip() or re.search(
             r"\b(?:sudo|chmod|chown|apt|yum|dnf|pip|rm|curl|wget|bash|sh)\b|修改权限|安装|删除|覆盖|脚本|已修复|已成功|已经完成", text, re.I)):
         return "；".join(diagnosis["checks"])

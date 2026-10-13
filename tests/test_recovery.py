@@ -273,3 +273,13 @@ def test_error_data_cannot_escape_its_message_role(monkeypatch):
     assert Engine(ssh_hosts=[]).suggest_fix("pwd", injected) == "检查原路径"
     assert [message["role"] for message in captured] == ["system", "user"]
     assert json.loads(captured[1]["content"])["evidence_untrusted"] == injected
+
+
+def test_unknown_state_does_not_claim_command_failure():
+    value = classify_error(ExecutionResult(None, "", "capture failed", 0), execution_state="unknown")
+    assert value.category == "state_unknown" and "无法确定" in value.summary
+
+
+def test_file_size_limit_advice_cannot_become_disk_cleanup_advice():
+    diagnosis = {"category": "resource_limit", "checks": ["检查资源限制和已有目标文件", "不重放写操作"]}
+    assert safe_advice("请确保磁盘空间充足", diagnosis) == "检查资源限制和已有目标文件；不重放写操作"

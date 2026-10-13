@@ -267,7 +267,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             for key in ("stdout", "stderr", "detail"):
                 if isinstance(evidence.get(key), str):
                     evidence[key] = evidence[key][:4000]
-            detail = {"classification": diagnosis["category"], "checks": diagnosis["checks"],
+            detail = {"classification": diagnosis["category"], "summary": diagnosis["summary"], "checks": diagnosis["checks"],
                       "file_state": {"state": diagnosis["file_state"]["state"], "paths": diagnosis["file_state"]["paths"][:30]},
                       "evidence_untrusted": evidence}
             try:
