@@ -354,10 +354,14 @@ def test_model_calls_use_remaining_total_timeout_without_sdk_retries(tmp_path, m
     client.with_options.return_value = client
     client.chat.completions.create.return_value = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok":true}'))])
     monkeypatch.setattr("core.llm._get_client", lambda backend: (client, "model"))
+    clock = [1000.0]
+    monkeypatch.setattr("core.llm.time.monotonic", lambda: clock[0])
     token = request_deadline.set(time.monotonic() + 10)
+    clock[0] += 0.25
     try:
         assert chat([{"role": "user", "content": "JSON"}], json_mode=True) == '{"ok":true}'
         assert 0 < client.with_options.call_args.kwargs["timeout"] <= 10
+        assert client.with_options.call_args.kwargs["timeout"] == 9.75
         assert client.with_options.call_args.kwargs["max_retries"] == 0
     finally:
         request_deadline.reset(token)
