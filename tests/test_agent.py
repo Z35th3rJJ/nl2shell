@@ -404,3 +404,45 @@ def test_json_agent_result_exposes_actual_trace_and_limits(tmp_path):
     result = json_result(history.last_record, "verified")
     assert result["completion_verified"] and result["tool_executions"] == 1
     assert result["agent_trace"][0]["observation"]["executed"]
+
+
+def test_authorized_selection_reference_binds_verified_files_without_guessing(tmp_path):
+    (tmp_path / "a.txt").write_text("a")
+    rules = selection_rules()
+    def decide(goal, contract, observations):
+        if not observations:
+            return action(rules[0], observations)
+        if len(observations) == 1:
+            return {"status": "act", "rule": "a2", "step": rules[1]["step"], "basis": ["a1"]}
+        return {"status": "finish", "basis": ["a1", "a2"]}
+    engine, executor, history = setup_agent(tmp_path, rules, decide)
+    assert run(tmp_path, engine, executor, history) == "verified"
+    row = history.last_record["agent_trace"][1]
+    assert "sources" not in row["decision"]["step"]["parameters"]
+    assert row["selection_binding"] == {"observation": "a1", "sources": ["a.txt"]}
+    assert (tmp_path / "backup/a.txt").read_text() == "a"
+
+
+def test_missing_named_sources_cannot_be_recovered_without_selection_authorization(tmp_path):
+    (tmp_path / "a.txt").write_text("a")
+    rules = [rule(1, "copy_files", {"sources": ["a.txt"], "destination": "backup"})]
+    engine, executor, history = setup_agent(tmp_path, rules)
+    engine.agent_decide.side_effect = [{"status": "act", "rule": "a1", "basis": [],
+        "step": {"operation": "copy_files", "parameters": {"destination": "backup"}}}]
+    assert run(tmp_path, engine, executor, history) == "blocked"
+    assert not (tmp_path / "backup").exists()
+
+
+def test_equivalent_default_parameter_is_still_no_progress(tmp_path):
+    rules = [rule(1, "count_files", {"path": ".", "recursive": False}),
+             rule(2, "count_files", {"path": ".", "recursive": False, "pattern": "*"})]
+    engine, executor, history = setup_agent(tmp_path, rules)
+    assert run(tmp_path, engine, executor, history) == "blocked"
+    assert executor.execute_query.call_count == 1
+
+
+def test_finish_cannot_ignore_verified_observation_basis(tmp_path):
+    rules = [rule(1, "working_directory", {})]
+    engine, executor, history = setup_agent(tmp_path, rules)
+    engine.agent_decide.side_effect = [action(rules[0], []), {"status": "finish", "basis": []}]
+    assert run(tmp_path, engine, executor, history) == "blocked"
