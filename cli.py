@@ -170,8 +170,21 @@ def show_preview(prepared):
         else:
             print("执行方式：受保护的 Python 工具")
         if "path" in action["parameters"]:
-            print(f"范围：{action['parameters']['path']}；" +
-                  ("包含子目录" if action["parameters"].get("recursive") else "当前层"))
+            scope = f"范围：{action['parameters']['path']}"
+            if "recursive" in action["parameters"]:
+                scope += "；" + ("包含子目录" if action["parameters"]["recursive"] else "当前层")
+            print(scope)
+        p = action["parameters"]
+        if "pattern" in p:
+            print(f"匹配条件：{p['pattern']}")
+        if "modified_within_days" in p:
+            print(f"修改时间：最近 {p['modified_within_days']} 天")
+        if "size_gt_bytes" in p:
+            print(f"大小条件：大于 {p['size_gt_bytes']} 字节")
+        if action["operation"] == "read_text":
+            print(f"查看范围：{'前' if p['end'] == 'head' else '后'} {p['lines']} 行")
+        if action["operation"] == "text_stats":
+            print("统计内容：" + {"lines": "行数", "words": "单词数", "bytes": "字节数"}[p["metric"]])
         if action["files"]:
             print(f"找到 {len(action['files'])} 个文件：")
             for name in action["files"]:

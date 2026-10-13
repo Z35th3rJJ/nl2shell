@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from cli import execute_request, run_batch
+from cli import execute_request, run_batch, show_preview
 from core.history import HistoryStore
 from core.bash_queries import (prepare_queries, review_commands, execute_query, query_preview,
                                same_query_plan, COMMANDS)
@@ -298,3 +298,30 @@ def test_json_mode_is_only_requested_for_structured_calls(monkeypatch, enabled):
     assert ("response_format" in sent) is enabled
     if enabled:
         assert sent["response_format"] == {"type": "json_object"}
+
+
+def test_negative_epoch_bounds_keep_the_fraction_sign():
+    from core.bash_queries import _timestamp
+    assert _timestamp(-1) == "@-0.000000001"
+    assert _timestamp(-1000000001) == "@-1.000000001"
+    assert _timestamp(1000000001) == "@1.000000001"
+
+
+@pytest.mark.parametrize("value", [
+    TaskPlan((TaskStep(operation="working_directory"),) * 4),
+    TaskPlan((TaskStep(operation="working_directory"),), refused=True),
+    TaskPlan((TaskStep(operation="working_directory"),), clarification="缺少条件"),
+])
+def test_query_preparation_keeps_original_plan_boundaries(tmp_path, value):
+    with pytest.raises(ValueError, match="完整"):
+        prepare_queries(value, str(tmp_path))
+
+
+def test_preview_displays_program_checked_conditions(tmp_path, capsys):
+    prepared = prepare_queries(plan("find_files", path=".", recursive=False, pattern="*.txt",
+                                    modified_within_days=7, size_gt_bytes=10), str(tmp_path))
+    review_commands(prepared, candidates(prepared))
+    show_preview(prepared)
+    output = capsys.readouterr().out
+    assert "最近 7 天" in output and "大于 10 字节" in output and "*.txt" in output
+    assert "候选命令" in output and "模型命令" in output

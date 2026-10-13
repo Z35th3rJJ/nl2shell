@@ -76,7 +76,8 @@ def _time_bounds(p, now):
 
 
 def _timestamp(value):
-    return f"@{value // 10**9}.{value % 10**9:09d}"
+    magnitude = abs(value)
+    return f"@{'-' if value < 0 else ''}{magnitude // 10**9}.{magnitude % 10**9:09d}"
 
 
 def required_argv(operation, p, now, excluded=()):
@@ -116,7 +117,8 @@ def required_argv(operation, p, now, excluded=()):
 
 
 def prepare_queries(plan, cwd, *, now=None, timeout_seconds=60, excluded_paths=()):
-    if not uses_bash(plan) or plan.status != "ready":
+    if (not uses_bash(plan) or plan.status != "ready" or plan.refused or plan.clarification
+            or not 1 <= len(plan.steps) <= 3):
         raise ValueError("不是完整只读查询计划")
     root = Path(cwd).expanduser().resolve(strict=True)
     if not root.is_dir():
