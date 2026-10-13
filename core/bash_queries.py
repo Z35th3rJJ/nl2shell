@@ -213,13 +213,14 @@ def command_request(plan, prepared):
         tasks.append(rule)
     rules = """根据已审查计划生成候选 Bash 参数数组及中文解释。只输出 {"commands":[{"step":1,"argv":["pwd","-P"],"explanation":"说明"}]}，每步一条。不输出 Markdown 或命令字符串。
 参数规则（顺序固定，变量必须来自计划）：
-working_directory: [pwd,-P]
-list_directory: [ls,-1,--color=never,--quoting-style=literal]，include_hidden=true 时追加 -A，然后追加 [--,路径]。
+working_directory: ["pwd","-P"]
+list_directory: ["ls","-1","--color=never","--quoting-style=literal","--","PATH"]。include_hidden=true 时在 "--" 前加 "-A"。
 find_files/count_files: 保留 mandatory_prefix；pattern 非 * 时追加 [-name,pattern]；有时间时追加 [-newermt,time_bounds.after,!, -newermt,time_bounds.before]；有大小时追加 [-size,+字节数c]；最后追加 -print0。禁止管道，计数由程序核验返回路径后计算。
-search_text: [grep,-F,-n,-e,pattern,--,路径]，字面匹配。
-text_stats: [wc,指标,--,路径]，lines=-l、words=-w、bytes=-c。
-read_text: [head或tail,-n,行数,--,路径]。
-system_info: disk=[df,-B1,--output=size,used,avail,--,路径]，没有 path 时用 .；memory=[free,-b]；system=[uname,-s,-r,-m]。
+search_text: ["grep","-F","-n","-e","PATTERN","--","PATH"]，字面匹配。
+text_stats: ["wc","METRIC","--","PATH"]，lines=-l、words=-w、bytes=-c。
+read_text: ["END","-n","LINES","--","PATH"]，END=head或tail，LINES 是计划行数的十进制字符串。
+system_info: disk=["df","-B1","--output=size,used,avail","--","PATH"]，没有 path 时 PATH 为 .；memory=["free","-b"]；system=["uname","-s","-r","-m"]。
+模板变量必须替换成计划实际值。"--" 是一个真实的独立参数，不是省略号，必须保留，不能遗漏。
 路径 . 保持 .，其他相对路径必须加 ./ 前缀。数组每个参数独立，不加 Shell 引号或转义，不把整条命令放进一个元素。
 禁止额外参数、命令拼接、管道、重定向、命令替换、脚本、改变目录或修改文件。必须保留所有条件。"""
     return [{"role": "system", "content": rules},

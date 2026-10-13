@@ -174,6 +174,7 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 - text_stats 参数：path（单个文本文件）、metric=lines/words/bytes。统计文件行数不是 count_files。
 - read_text 参数：path、end=head/tail、lines（明确的1到1000行）；没有说明首尾位置或行数时追问，不默认十行。
 - 条件不能用以上参数准确表达时，必须追问或返回 unsupported 并说明限制，不得忽略条件后返回 ready。
+- 用户明确给出文件名就是已给出路径，相对名称以当前工作目录为基准；不要要求确认名称是否正确。文件存在性和安全边界由程序检查。
 - 当前目录使用 path="."；子目录和文件优先使用相对路径。用户明确指定 organize 时，path="organize"，不能改成当前目录。
 - 全部文件路径必须在当前工作目录内。禁止通过文件路径直接访问回收区，但允许 list_trash 和 restore。不支持链接、软件安装、权限修改、服务管理、任意脚本、网络或远程操作。
 - 不判断哪些文件没用。不知道操作对象或复制目标时必须追问。
@@ -185,6 +186,12 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 查看回收区：{"status":"ready","steps":[{"operation":"list_trash","parameters":{},"explanation":"列出可恢复的文件"}]}
 恢复指定编号：{"status":"ready","steps":[{"operation":"restore","parameters":{"trash_id":"用户提供的编号"},"explanation":"恢复文件"}]}
 查看系统信息：{"status":"ready","steps":[{"operation":"system_info","parameters":{"query":"system"},"explanation":"查看系统信息"}]}
+查询内存使用情况：{"status":"ready","steps":[{"operation":"system_info","parameters":{"query":"memory"}}]}
+在 note.txt 中搜索字面文本 ERROR：{"status":"ready","steps":[{"operation":"search_text","parameters":{"path":"note.txt","pattern":"ERROR"}}]}
+统计 note.txt 的行数：{"status":"ready","steps":[{"operation":"text_stats","parameters":{"path":"note.txt","metric":"lines"}}]}
+统计 note.txt 的字节数：{"status":"ready","steps":[{"operation":"text_stats","parameters":{"path":"note.txt","metric":"bytes"}}]}
+查看 note.txt 的前两行：{"status":"ready","steps":[{"operation":"read_text","parameters":{"path":"note.txt","end":"head","lines":2}}]}
+查看 note.txt 的最后一行：{"status":"ready","steps":[{"operation":"read_text","parameters":{"path":"note.txt","end":"tail","lines":1}}]}
 递归备份最近三天的日志到 archive 并保留层次：{"status":"ready","steps":[{"operation":"find_files","parameters":{"path":".","recursive":true,"pattern":"*.log","modified_within_days":3},"explanation":"查找日志文件"},{"operation":"copy_files","parameters":{"source_step":1,"destination":"archive","preserve_structure":true},"explanation":"复制查找结果并保留目录层次"}]}
 移动到工作目录外的 ../archive：{"status":"unsupported","reason":"目标位于工作目录外，不能执行"}
 把 note.txt 复制一下：{"status":"need_clarification","clarification":"复制到哪个目录？"}
@@ -404,10 +411,11 @@ class Engine:
         self.command_attempts = []
         # 独立需求契约不读取候选计划，避免两者遗漏同一个条件而被自评放行。
         answers = [answer.split("用户回答：", 1)[-1].strip() for answer in clarifications]
-        original = f"当前目录：{cwd}\n{user_input}\n用户补充：" + json.dumps(answers, ensure_ascii=False)
+        original = json.dumps({"cwd": cwd, "request": user_input, "answers": answers}, ensure_ascii=False)
         record = {"phase": "independent_requirements"}
         self.command_attempts.append(record)
-        raw = chat([{"role": "system", "content": _AGENT_SYSTEM},
+        required = json.dumps(self.request_intent.get("operations", []))
+        raw = chat([{"role": "system", "content": _AGENT_SYSTEM + "\n仅提取原始需求及用户回答中的条件，不检查文件事实。独立识别的必要操作为：" + required},
                     {"role": "user", "content": original}], backend=self._backend)
         record["raw_output"] = redact_value(raw)
         reference = _normalize_paths(parse_operation_plan(raw), cwd)

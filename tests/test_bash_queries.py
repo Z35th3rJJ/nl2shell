@@ -266,3 +266,21 @@ def test_word_count_rejects_unsupported_separators(tmp_path, text):
     (tmp_path / "input").write_text(text, encoding="utf-8")
     with pytest.raises(ValueError, match="Unicode"):
         prepare_queries(plan("text_stats", path="input", metric="words"), str(tmp_path))
+
+
+def test_independent_request_keeps_original_data_without_the_plan(monkeypatch, tmp_path):
+    value = plan("working_directory")
+    prepared = prepare_queries(value, str(tmp_path))
+    calls = []
+    def reply(messages, backend=None):
+        calls.append(messages)
+        if len(calls) == 1:
+            original = json.loads(messages[-1]["content"])
+            assert original == {"cwd": str(tmp_path), "request": "显示当前工作目录", "answers": []}
+            assert "plan" not in original and "commands" not in original
+            return json.dumps({"status": "ready", "steps": [{"operation": "working_directory", "parameters": {}}]})
+        return json.dumps(candidates(prepared))
+    monkeypatch.setattr("core.engine.chat", reply)
+    assert Engine(ssh_hosts=[]).generate_bash_commands("显示当前工作目录", str(tmp_path), value,
+                                                      prepared, []) == candidates(prepared)
+    assert len(calls) == 2
