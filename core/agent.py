@@ -54,6 +54,8 @@ def parse_contract(raw, cwd, goal):
         if not isinstance(step, dict) or not isinstance(step.get("parameters"), dict):
             raise ValueError("Agent 动作格式不合法")
         step = dict(step, parameters=dict(step["parameters"]))
+        if selection is None and step.get("operation") in {"copy_files", "move_files", "trash"} and "sources" not in step["parameters"]:
+            raise ValueError("复制、移动或回收必须提供明确 sources，或用 selection 引用已授权的 find_files；不允许 source_step")
         if selection is not None:
             if (selection not in by_id or by_id[selection]["step"]["operation"] != "find_files"
                     or step.get("operation") not in {"copy_files", "move_files", "trash"}

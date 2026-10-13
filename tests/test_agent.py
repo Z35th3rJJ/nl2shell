@@ -460,3 +460,28 @@ def test_agent_preserves_current_level_scope_rule(tmp_path):
     value = {"status": "ready", "rules": [rule(1, "find_files", {"path": ".", "recursive": True})]}
     with pytest.raises(ValueError, match="不能递归"):
         parse_contract(json.dumps(value), str(tmp_path), "查找当前目录这一层的文件")
+
+
+def test_contract_format_correction_is_bounded_and_each_review_is_independent(tmp_path, monkeypatch):
+    good = {"status": "ready", "rules": selection_rules()}
+    bad = json.loads(json.dumps(good))
+    bad["rules"][1].pop("selection")
+    responses = [bad, good, bad, good]
+    messages = []
+    def chat(value, **kwargs):
+        messages.append(json.loads(json.dumps(value)))
+        return json.dumps(responses.pop(0))
+    monkeypatch.setattr("core.engine.chat", chat)
+    engine = Engine()
+    assert engine.agent_contract("找当前目录这一层 txt 复制到 backup", str(tmp_path)) == good
+    assert len(messages[0]) == len(messages[2]) == 2
+    assert len(messages[1]) == len(messages[3]) == 4
+    assert [r["format_correction"] for r in engine.agent_attempts] == [0, 1, 0, 1]
+
+
+def test_contract_does_not_loop_after_two_invalid_outputs(tmp_path, monkeypatch):
+    chat = Mock(return_value='{"status":"ready","rules":[]}')
+    monkeypatch.setattr("core.engine.chat", chat)
+    with pytest.raises(ValueError, match="两次"):
+        Engine().agent_contract("明确目标", str(tmp_path))
+    assert chat.call_count == 2

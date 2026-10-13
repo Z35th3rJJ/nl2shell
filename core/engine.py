@@ -412,9 +412,22 @@ class Engine:
         self.agent_attempts = []
         contracts = []
         for attempt in range(2):
-            raw = chat(contract_messages(goal), backend=self._backend, json_mode=True)
-            self.agent_attempts.append({"phase": "goal_constraints", "attempt": attempt + 1, "raw_output": redact_value(raw)})
-            contracts.append(parse_contract(raw, cwd, goal))
+            messages = contract_messages(goal)
+            for correction in range(2):
+                raw = chat(messages, backend=self._backend, json_mode=True)
+                record = {"phase": "goal_constraints", "attempt": attempt + 1,
+                          "format_correction": correction, "raw_output": redact_value(raw)}
+                self.agent_attempts.append(record)
+                try:
+                    contracts.append(parse_contract(raw, cwd, goal))
+                    break
+                except (ValueError, TypeError, KeyError) as error:
+                    record["validation_error"] = str(error)
+                    if correction:
+                        raise ValueError("Agent 两次目标输出均不合法：" + str(error)) from error
+                    messages.extend([{"role": "assistant", "content": raw}, {"role": "user", "content":
+                        "上个输出不合法，不是已执行的事实。程序检查错误：" + str(error) +
+                        "。请依据原始目标修正完整 rules JSON。不能补充用户未授权的参数或动作。"}])
         if contracts[0] != contracts[1]:
             raise ValueError("两次独立目标约束不一致，请简化目标或明确条件")
         return contracts[0]
