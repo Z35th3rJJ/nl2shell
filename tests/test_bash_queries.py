@@ -272,7 +272,8 @@ def test_independent_request_keeps_original_data_without_the_plan(monkeypatch, t
     value = plan("working_directory")
     prepared = prepare_queries(value, str(tmp_path))
     calls = []
-    def reply(messages, backend=None):
+    def reply(messages, backend=None, json_mode=False):
+        assert json_mode
         calls.append(messages)
         if len(calls) == 1:
             original = json.loads(messages[-1]["content"])
@@ -284,3 +285,16 @@ def test_independent_request_keeps_original_data_without_the_plan(monkeypatch, t
     assert Engine(ssh_hosts=[]).generate_bash_commands("显示当前工作目录", str(tmp_path), value,
                                                       prepared, []) == candidates(prepared)
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_json_mode_is_only_requested_for_structured_calls(monkeypatch, enabled):
+    from core.llm import chat
+    client = Mock()
+    client.chat.completions.create.return_value.choices = [Mock(message=Mock(content='{"ok":true}'))]
+    monkeypatch.setattr("core.llm._get_client", lambda backend: (client, "model"))
+    assert chat([{"role": "user", "content": "JSON"}], "local", json_mode=enabled) == '{"ok":true}'
+    sent = client.chat.completions.create.call_args.kwargs
+    assert ("response_format" in sent) is enabled
+    if enabled:
+        assert sent["response_format"] == {"type": "json_object"}

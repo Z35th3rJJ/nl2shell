@@ -60,13 +60,14 @@ def _get_client(backend: str | None = None) -> tuple[OpenAI, str]:
     return client, model
 
 
-def chat(messages: list[dict], backend: str | None = None) -> str:
+def chat(messages: list[dict], backend: str | None = None, *, json_mode: bool = False) -> str:
     client, model = _get_client(backend)
     safe_messages = redact_messages(messages)
     for attempt in range(2):
         try:
             response = client.chat.completions.create(
                 model=model, messages=safe_messages, temperature=0,
+                **({"response_format": {"type": "json_object"}} if json_mode else {}),
             )
             if not response.choices:
                 raise RuntimeError("模型返回了空响应，请重试")

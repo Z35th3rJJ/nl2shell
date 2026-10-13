@@ -416,7 +416,7 @@ class Engine:
         self.command_attempts.append(record)
         required = json.dumps(self.request_intent.get("operations", []))
         raw = chat([{"role": "system", "content": _AGENT_SYSTEM + "\n仅提取原始需求及用户回答中的条件，不检查文件事实。独立识别的必要操作为：" + required},
-                    {"role": "user", "content": original}], backend=self._backend)
+                    {"role": "user", "content": original}], backend=self._backend, json_mode=True)
         record["raw_output"] = redact_value(raw)
         reference = _normalize_paths(parse_operation_plan(raw), cwd)
         if not same_query_plan(plan, reference):
@@ -426,6 +426,6 @@ class Engine:
         messages = command_request(plan, prepared)
         record = {"phase": "candidate_commands"}
         self.command_attempts.append(record)
-        raw = chat(messages, backend=self._backend)
+        raw = chat(messages, backend=self._backend, json_mode=True)
         record["raw_output"] = redact_value(raw)
         return json.loads(raw)
