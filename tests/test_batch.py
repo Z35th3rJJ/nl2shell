@@ -10,6 +10,9 @@ from core.task_plan import TaskPlan, TaskStep
 def _engine(command):
     engine = Mock()
     engine.generate_task_plan.return_value = TaskPlan((TaskStep(operation="find_files", parameters={"path": ".", "recursive": False}),)) if command == "ls" else TaskPlan((), refused=True, reason="禁止永久删除")
+    engine.generate_bash_commands.side_effect = lambda request, cwd, value, prepared, answers: {
+        "commands": [{"step": action["step"], "argv": action["_required_argv"], "explanation": "按条件查询"}
+                     for action in prepared["actions"]]}
     return engine
 
 
@@ -19,12 +22,15 @@ def test_batch_runs_tasks_serially_and_saves_summary(tmp_path):
     executor = Mock()
     executor.is_available.return_value = True
     executor.execute.return_value = ExecutionResult(0, "ok\n", "", 0.1)
+    executor.execute_query.return_value = (ExecutionResult(0, "./tasks.jsonl\0", "", 0.1), ["/usr/bin/find"])
     history = HistoryStore(tmp_path / "history.jsonl")
 
     summary = run_batch(_engine("ls"), executor, history, tasks)
 
     assert summary["success"] == 1
     assert summary["failed"] == 0
+    executor.execute_query.assert_called_once()
+    executor.execute.assert_not_called()
     assert (tmp_path / f"batch_{summary['batch_id']}.json").exists()
     assert history.query(limit=None, batch_id=summary["batch_id"])[0]["status"] == "batch_summary"
 

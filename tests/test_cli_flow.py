@@ -19,6 +19,9 @@ class History:
 def engine_for(*steps):
     engine = Mock()
     engine.generate_task_plan.return_value = TaskPlan(steps)
+    engine.generate_bash_commands.side_effect = lambda request, cwd, value, prepared, answers: {
+        "commands": [{"step": action["step"], "argv": action["_required_argv"], "explanation": "按条件查询"}
+                     for action in prepared["actions"]]}
     return engine
 
 
@@ -106,7 +109,11 @@ def test_batch_writes_cancelled_and_reads_succeed(tmp_path):
     assert execute_request(engine_for(step("create_file", path="a")), Mock(), History(),
                            "创建", str(tmp_path), BATCH) == "cancelled"
     engine = engine_for(step("count_files", path=".", recursive=False))
-    assert execute_request(engine, Mock(), History(), "计数", str(tmp_path), BATCH) == "verified"
+    from core.execution import ExecutionResult
+    executor = Mock()
+    executor.execute_query.return_value = (ExecutionResult(0, "", "", 0.01), ["/usr/bin/find"])
+    assert execute_request(engine, executor, History(), "计数", str(tmp_path), BATCH) == "verified"
+    executor.execute_query.assert_called_once()
     engine.remember_task.assert_not_called()
 
 

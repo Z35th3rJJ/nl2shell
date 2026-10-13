@@ -99,15 +99,37 @@ class BashExecutor:
             [self.bash_path, "-lc", command], timeout_seconds=timeout_seconds, cwd=cwd,
         )
 
+    def execute_query(self, argv, operation, parameters, cwd, now, excluded_paths=(), *, timeout_seconds=60):
+        from .bash_queries import prepare_queries
+        from .task_plan import TaskPlan, TaskStep
+        if os.name != "posix" or type(self) is not BashExecutor:
+            raise RuntimeError("新增参数数组执行仅支持原生 Ubuntu/WSL；不会降级到其他后端")
+        action = prepare_queries(TaskPlan((TaskStep(operation=operation, parameters=parameters),)), cwd,
+                                 now=now, timeout_seconds=timeout_seconds,
+                                 excluded_paths=excluded_paths)["actions"][0]
+        if not isinstance(argv, list) or argv != action["_required_argv"]:
+            raise ValueError("执行器拒绝未通过参数与路径检查的命令")
+        binary = Path("/usr/bin") / argv[0]
+        if not binary.is_file():
+            binary = Path("/bin") / argv[0]
+        if not binary.is_file():
+            raise RuntimeError("系统没有对应的受支持命令")
+        actual = [str(binary), *argv[1:]]
+        locale = "C" if argv[0] == "wc" else "C.UTF-8"
+        environment = {"PATH": "/usr/bin:/bin", "LC_ALL": locale, "LANG": locale, "POSIXLY_CORRECT": "1"}
+        result = self._execute_argv(actual, timeout_seconds, cwd, env=environment)
+        return result, actual
+
     def _execute_argv(self, argv: list[str], timeout_seconds: float | None,
-                      cwd: str | None = None) -> ExecutionResult:
+                      cwd: str | None = None, *, env=None) -> ExecutionResult:
 
         start = time.monotonic()
         with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
             process = subprocess.Popen(
-                argv, stdout=stdout_file, stderr=stderr_file,
+                argv, stdout=stdout_file, stderr=stderr_file, shell=False,
                 cwd=cwd, start_new_session=os.name != "nt",
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+                **({"env": env} if env is not None else {}),
             )
             timed_out = False
             try:
@@ -115,6 +137,9 @@ class BashExecutor:
             except subprocess.TimeoutExpired:
                 timed_out = True
                 _terminate_process_tree(process)
+            except KeyboardInterrupt:
+                _terminate_process_tree(process)
+                raise
             stdout, stdout_truncated = _read_limited(stdout_file, self.output_limit)
             stderr, stderr_truncated = _read_limited(stderr_file, self.output_limit)
         if timed_out:

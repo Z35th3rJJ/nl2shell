@@ -48,8 +48,10 @@ class TaskPlan:
 OPERATIONS = {
     "find_files", "count_files", "create_file", "create_directory", "copy_files",
     "move_files", "rename", "trash", "restore", "list_trash", "organize_files", "system_info",
+    "working_directory", "list_directory", "search_text", "text_stats", "read_text",
 }
-READ_OPERATIONS = {"find_files", "count_files", "list_trash", "system_info"}
+READ_OPERATIONS = {"find_files", "count_files", "list_trash", "system_info", "working_directory",
+                   "list_directory", "search_text", "text_stats", "read_text"}
 
 
 def parse_operation_plan(raw: str) -> TaskPlan:
@@ -96,7 +98,10 @@ def validate_parameters(operation: str, p: dict, index: int, previous) -> None:
         "move_files": {"sources", "source_step", "destination"},
         "rename": {"source", "destination"}, "trash": {"sources", "source_step"},
         "restore": {"trash_id"}, "list_trash": set(),
-        "organize_files": {"path", "recursive", "group_by"}, "system_info": {"query"},
+        "organize_files": {"path", "recursive", "group_by"}, "system_info": {"query", "path"},
+        "working_directory": set(), "list_directory": {"path", "include_hidden"},
+        "search_text": {"path", "pattern"}, "text_stats": {"path", "metric"},
+        "read_text": {"path", "end", "lines"},
     }
     if operation not in allowed or set(p) - allowed[operation]:
         raise ValueError("不支持的操作参数")
@@ -106,13 +111,15 @@ def validate_parameters(operation: str, p: dict, index: int, previous) -> None:
         "copy_files": {"destination"}, "move_files": {"destination"},
         "rename": {"source", "destination"}, "restore": {"trash_id"},
         "organize_files": {"path", "recursive", "group_by"}, "system_info": {"query"},
+        "list_directory": {"path", "include_hidden"}, "search_text": {"path", "pattern"},
+        "text_stats": {"path", "metric"}, "read_text": {"path", "end", "lines"},
     }
     if required.get(operation, set()) - set(p):
         raise ValueError("缺少关键操作参数，必须向用户追问")
-    for key in {"path", "source", "destination", "pattern", "trash_id", "query", "group_by"} & p.keys():
+    for key in {"path", "source", "destination", "pattern", "trash_id", "query", "group_by", "metric", "end"} & p.keys():
         if not isinstance(p[key], str) or not p[key].strip() or "\0" in p[key]:
             raise ValueError(f"{key} 必须是非空字符串")
-    for key in {"recursive", "preserve_structure"} & p.keys():
+    for key in {"recursive", "preserve_structure", "include_hidden"} & p.keys():
         if type(p[key]) is not bool:
             raise ValueError(f"{key} 必须是布尔值")
     for key in {"modified_within_days", "size_gt_bytes"} & p.keys():
@@ -134,6 +141,15 @@ def validate_parameters(operation: str, p: dict, index: int, previous) -> None:
         raise ValueError("第一版只支持按文件类型整理")
     if operation == "system_info" and p["query"] not in {"disk", "memory", "system"}:
         raise ValueError("不支持的系统查询")
+    if operation == "system_info" and "path" in p and p["query"] != "disk":
+        raise ValueError("仅磁盘查询接受工作区路径")
+    if operation == "text_stats" and p["metric"] not in {"lines", "words", "bytes"}:
+        raise ValueError("仅支持行数、单词数或字节数")
+    if operation == "read_text" and (p["end"] not in {"head", "tail"} or
+                                     type(p["lines"]) is not int or not 1 <= p["lines"] <= 1000):
+        raise ValueError("必须明确首尾位置及 1 到 1000 行")
+    if operation == "search_text" and any(char in p["pattern"] for char in "\r\n"):
+        raise ValueError("仅支持单行字面文本搜索")
 
 
 def plan_payload(plan: TaskPlan) -> dict:

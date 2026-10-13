@@ -31,6 +31,7 @@ from core.ssh_config import load_ssh_profiles
 from core.structured_log import log_event
 from core.task_plan import TaskPlan, TaskStep, plan_payload
 from core.operations import prepare_plan, preview_details, preparation_changed, execute_action, workspace_path, unique_target
+from core.bash_queries import uses_bash, prepare_queries, review_commands, query_preview, execute_query
 
 load_dotenv(ENV_PATH)
 
@@ -81,7 +82,7 @@ def json_result(record: dict, status: str) -> dict:
         "verification": verification,
         "duration_seconds": sum(item.get("duration_seconds", 0) for item in verification),
         "error": next((item.get("detail", "") for item in verification
-                       if item.get("status") not in {"verified", "exit_code_only", "not_executed"}),
+                       if item.get("status") not in {"verified", "no_matches", "exit_code_only", "not_executed"}),
                       record.get("block_reason", "")),
     }
 
@@ -147,12 +148,15 @@ _OPERATION_NAMES = {
     "create_directory": "创建目录", "copy_files": "复制文件", "move_files": "移动文件",
     "rename": "重命名", "trash": "移入回收区", "restore": "恢复文件",
     "list_trash": "查看回收区", "organize_files": "按文件类型整理", "system_info": "查询系统信息",
+    "working_directory": "显示当前目录", "list_directory": "列出目录内容",
+    "search_text": "搜索文本", "text_stats": "统计文本", "read_text": "查看文本首尾",
 }
 _STATUS_NAMES = {"verified": "已验证成功", "preview": "仅预览", "needs_clarification": "需要补充信息",
                  "unsupported": "暂不支持", "blocked": "已停止", "cancelled": "已取消",
                  "plan_failed": "无法生成计划", "execution_failed": "执行失败", "unverified": "尚未验证",
                  "interrupted": "已中断", "audit_failed": "记录保存失败", "not_executed": "未执行"}
 _STATUS_NAMES.update(failed="执行失败", pending="未执行", executing="执行中")
+_STATUS_NAMES["no_matches"] = "没有匹配结果"
 
 
 def show_preview(prepared):
@@ -161,6 +165,10 @@ def show_preview(prepared):
         print(f"第 {action['step']} 步：{_OPERATION_NAMES[action['operation']]}")
         if action["explanation"]:
             print(f"说明：{action['explanation']}")
+        if action.get("candidate_argv"):
+            print(f"候选命令：{action['command']}\n命令解释：{action['candidate_explanation']}\n执行方式：模型命令，受审查参数数组\n审查：{action['review']}")
+        else:
+            print("执行方式：受保护的 Python 工具")
         if "path" in action["parameters"]:
             print(f"范围：{action['parameters']['path']}；" +
                   ("包含子目录" if action["parameters"].get("recursive") else "当前层"))
@@ -198,6 +206,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                     batch_index: int | None = None, assume_yes: bool = False) -> str:
     plan = TaskPlan(())
     prepared, outcomes = None, []
+    candidates, bash_query = None, False
     audit_path = getattr(history, "path", None)
     excluded = [audit_path] if isinstance(audit_path, (str, os.PathLike)) else []
     if os.environ.get("NL2SHELL_LOG_JSON"):
@@ -217,9 +226,11 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                          command=json.dumps(payload, ensure_ascii=False),
                          risk=SAFE if prepared and prepared["read_only"] else WARN,
                          status=status, executed=executed, run_mode=mode, plan=payload,
-                         preview=preview_details(prepared) if prepared else [],
+                         preview=(query_preview(prepared) if bash_query else preview_details(prepared)) if prepared else [],
                          verification=outcomes, block_reason=detail,
                          timed_out=any(item.get("timed_out") for item in outcomes),
+                         command_attempts=getattr(engine, "command_attempts", []) if bash_query and isinstance(getattr(engine, "command_attempts", None), list) else [],
+                         candidates=candidates,
                          **({"batch_id": batch_id, "batch_index": batch_index} if batch_id else {}))
         except OSError as error:
             status = "audit_failed"
@@ -253,9 +264,26 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         return finish("plan_failed", str(error))
     if plan.refused:
         return finish("unsupported", plan.reason or "暂不支持这项操作")
+    bash_query = uses_bash(plan)
+    if not bash_query and any(step.operation in {"system_info", "working_directory", "list_directory",
+                                                "search_text", "text_stats", "read_text"} for step in plan.steps):
+        return finish("blocked", "首版请把命令查询和文件写入分开提交；未执行任何步骤")
+    def prepare():
+        options = {"timeout_seconds": timeout_seconds, "excluded_paths": excluded}
+        if prepared is not None:
+            options["now"] = prepared["now"]
+        value = (prepare_queries if bash_query else prepare_plan)(plan, cwd, **options)
+        if bash_query and candidates is not None:
+            review_commands(value, candidates)
+        return value
+    def preview():
+        return query_preview(prepared) if bash_query else preview_details(prepared)
     try:
-        prepared = prepare_plan(plan, cwd, timeout_seconds=timeout_seconds, excluded_paths=excluded)
-    except (ValueError, OSError) as error:
+        prepared = prepare()
+        if bash_query:
+            candidates = engine.generate_bash_commands(user_input, cwd, plan, prepared, clarifications)
+            review_commands(prepared, candidates)
+    except (ValueError, TypeError, RuntimeError, OSError) as error:
         return finish("blocked", str(error))
     print("任务预览：")
     show_preview(prepared)
@@ -271,8 +299,8 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             if ask("是否执行以上操作？请输入 yes 确认 > ").lower() != "yes":
                 return finish("cancelled")
         try:
-            current = prepare_plan(plan, cwd, now=prepared["now"], timeout_seconds=timeout_seconds, excluded_paths=excluded)
-        except (ValueError, OSError) as error:
+            current = prepare()
+        except (ValueError, TypeError, RuntimeError, OSError) as error:
             return finish("blocked", str(error))
         if not preparation_changed(prepared, current):
             prepared = current
@@ -290,7 +318,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     try:
         save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
                      status="confirmed", executed=False, plan=plan_payload(plan),
-                     preview=preview_details(prepared), run_mode=mode)
+                     preview=preview(), run_mode=mode)
     except OSError as error:
         history.last_record.update(status="audit_failed", block_reason=str(error))
         print(f"无法保存执行记录，操作已停止：{error}")
@@ -298,16 +326,20 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     deadline = time.monotonic() + timeout_seconds
     for action in prepared["actions"]:
         remaining = deadline - time.monotonic()
-        outcome = execute_action(prepared, action, executor, timeout_seconds=max(0, remaining))
+        outcome = (execute_query if bash_query else execute_action)(prepared, action, executor,
+                                                                   timeout_seconds=max(0, remaining))
+        if not bash_query:
+            outcome["execution_kind"] = "python_tool"
         outcomes.append(outcome)
         show_outcome(outcome)
-        if outcome["status"] != "verified":
+        if outcome["status"] not in {"verified", "no_matches"}:
             break
     for action in prepared["actions"][len(outcomes):]:
         outcomes.append({"step": action["step"], "operation": action["operation"],
                          "status": "not_executed", "detail": "前序步骤未成功", "executed": False})
-    failed = next((item for item in outcomes if item["status"] not in {"verified", "not_executed"}), None)
-    return finish(failed["status"] if failed else "verified", failed["detail"] if failed else "")
+    failed = next((item for item in outcomes if item["status"] not in {"verified", "no_matches", "not_executed"}), None)
+    final_status = failed["status"] if failed else "no_matches" if any(item["status"] == "no_matches" for item in outcomes) else "verified"
+    return finish(final_status, failed["detail"] if failed else "")
 
 
 def _batch_tasks(path: Path, default_cwd: str) -> list[dict]:
@@ -333,7 +365,7 @@ def run_batch(engine: Engine, executor: BashExecutor, history: HistoryStore, tas
     tasks = _batch_tasks(task_path, os.getcwd())
     batch_id = uuid4().hex[:12]
     summary = {"batch_id": batch_id, "source": str(task_path), "total": len(tasks),
-               "success": 0, "failed": 0, "blocked": 0, "timed_out": 0, "results": []}
+               "success": 0, "no_matches": 0, "failed": 0, "blocked": 0, "timed_out": 0, "results": []}
     print(f"批量任务 {batch_id}：共 {len(tasks)} 条，失败后继续执行。")
     try:
         for index, task in enumerate(tasks, 1):
@@ -344,6 +376,8 @@ def run_batch(engine: Engine, executor: BashExecutor, history: HistoryStore, tas
             summary["results"].append({"index": index, "input": task["input"], "status": status})
             if status == "verified":
                 summary["success"] += 1
+            elif status == "no_matches":
+                summary["no_matches"] += 1
             elif status in {"blocked", "unsupported"}:
                 summary["blocked"] += 1
             elif status == "execution_failed" and history.query(1, batch_id=batch_id)[0].get("timed_out"):
@@ -359,7 +393,7 @@ def run_batch(engine: Engine, executor: BashExecutor, history: HistoryStore, tas
     history.append({"input": "批量任务摘要", "cwd": os.getcwd(), "command": "", "risk": SAFE,
                     "status": "batch_summary", "executed": False, "run_mode": BATCH,
                     "batch_id": batch_id, "source": str(task_path), "summary": summary})
-    print(f"\n汇总：成功 {summary['success']}，失败 {summary['failed']}，阻止 {summary['blocked']}，超时 {summary['timed_out']}。")
+    print(f"\n汇总：成功 {summary['success']}，无匹配 {summary['no_matches']}，失败 {summary['failed']}，阻止 {summary['blocked']}，超时 {summary['timed_out']}。")
     print(f"结果文件：{summary_path}")
     return summary
 
