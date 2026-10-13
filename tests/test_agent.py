@@ -446,3 +446,17 @@ def test_finish_cannot_ignore_verified_observation_basis(tmp_path):
     engine, executor, history = setup_agent(tmp_path, rules)
     engine.agent_decide.side_effect = [action(rules[0], []), {"status": "finish", "basis": []}]
     assert run(tmp_path, engine, executor, history) == "blocked"
+
+
+def test_agent_prompt_reuses_parameters_without_conflicting_task_plan_schema():
+    from core.agent import contract_messages
+    prompt = contract_messages("在 note.txt 中搜索 ERROR")[0]["content"]
+    assert '"status":"ready","rules"' in prompt
+    assert '"status":"ready","steps"' not in prompt
+    assert "search_text 参数" in prompt and "软件安装" in prompt
+
+
+def test_agent_preserves_current_level_scope_rule(tmp_path):
+    value = {"status": "ready", "rules": [rule(1, "find_files", {"path": ".", "recursive": True})]}
+    with pytest.raises(ValueError, match="不能递归"):
+        parse_contract(json.dumps(value), str(tmp_path), "查找当前目录这一层的文件")

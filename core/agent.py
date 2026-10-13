@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from .bash_queries import prepare_queries
-from .engine import _AGENT_SYSTEM, _missing_conditions, _normalize_paths
+from .engine import _AGENT_SYSTEM, _missing_conditions, _normalize_paths, _task_plan_errors
 from .llm import request_deadline
 from .operations import snapshot, workspace_path
 from .redaction import redact_value
@@ -13,7 +13,8 @@ from .task_plan import TaskPlan, parse_operation_plan, plan_payload
 
 
 def contract_messages(goal):
-    return [{"role": "system", "content": _AGENT_SYSTEM + """
+    parameter_rules = "- find_files/count_files 参数：" + _AGENT_SYSTEM.split("- find_files/count_files 参数：", 1)[1].split("输出示例", 1)[0]
+    return [{"role": "system", "content": "你是受限 Agent 的目标约束提取器。以下是现有工具参数与安全规则：\n" + parameter_rules + """
 这次只独立提取用户目标的授权约束，不预判文件事实，不生成固定执行序列。只输出 JSON：
 {"status":"ready","rules":[{"id":"a1","when":[],"step":{"operation":"find_files","parameters":{"path":".","recursive":false,"pattern":"*.txt"}}},{"id":"a2","when":[{"observation":"a1","comparison":"gt","value":0}],"selection":"a1","step":{"operation":"copy_files","parameters":{"destination":"backup"}}}]}
 规则：最多五个授权动作，id 按 a1,a2 等编号；用户没有授权的动作不能列出。
@@ -23,6 +24,7 @@ selection 只能引用更早的 find_files，表示处理该次实际查找的�
 源文件由用户明确指定时用 sources；没有查询事实时不能猜测 sources。
 不默认增加查询、写操作或完成条件。所有目录、匹配条件、阈值和目标必须来自用户目标。正常一次查找后复制用 selection，不是把两步合进一份计划。
 只能根据文件数量分支；复杂条件、未知动作或不明确目标返回 need_clarification 或 unsupported。rule 只允许 id/when/step/selection。
+本入口只用 rules，不输出普通任务计划的顶层 steps。
 """}, {"role": "user", "content": json.dumps({"goal": goal}, ensure_ascii=False)}]
 
 
@@ -59,6 +61,9 @@ def parse_contract(raw, cwd, goal):
                 raise ValueError("选取文件只能来自已授权的 find_files")
             step["parameters"]["sources"] = ["__observed_selection__"]
         plan = _normalize_paths(parse_operation_plan(json.dumps({"status": "ready", "steps": [step]})), cwd)
+        errors = _task_plan_errors(plan, goal, cwd, {plan.steps[0].operation})
+        if errors:
+            raise ValueError("；".join(errors))
         missing = _missing_conditions(plan, goal, cwd, [])
         if missing:
             return {"status": "need_clarification", "clarification": missing}
