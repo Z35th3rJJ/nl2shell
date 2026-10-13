@@ -73,6 +73,8 @@ def inspect_failure_files(prepared, outcome):
     root = Path(prepared["cwd"])
     paths, state = [], "unchanged"
     deadline = time.monotonic() + 5
+    from .llm import request_deadline
+    deadline = min(deadline, request_deadline.get() or deadline)
     try:
         if not root.is_dir():
             raise FileNotFoundError("工作目录已不存在")

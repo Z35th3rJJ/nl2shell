@@ -1,11 +1,13 @@
 import os
 import time
+from contextvars import ContextVar
 import httpx
 from openai import APIConnectionError, APITimeoutError, OpenAI, OpenAIError
 from .redaction import redact_messages, redact_text
 
 # 按后端缓存客户端，支持同进程内切换（对比实验用）
 _clients: dict[str, tuple[OpenAI, str]] = {}
+request_deadline = ContextVar("request_deadline", default=None)
 
 
 def model_configuration(backend: str | None = None) -> dict:
@@ -65,19 +67,26 @@ def chat(messages: list[dict], backend: str | None = None, *, json_mode: bool = 
     safe_messages = redact_messages(messages)
     for attempt in range(2):
         try:
-            response = client.chat.completions.create(
+            deadline = request_deadline.get()
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("任务总时限已用完")
+            bounded = client if remaining is None else client.with_options(timeout=remaining, max_retries=0)
+            response = bounded.chat.completions.create(
                 model=model, messages=safe_messages, temperature=0,
                 **({"response_format": {"type": "json_object"}} if json_mode else {}),
             )
             if not response.choices:
                 raise RuntimeError("模型返回了空响应，请重试")
             content = response.choices[0].message.content
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("模型响应超过任务总时限")
             if not isinstance(content, str) or not content.strip():
                 raise RuntimeError("模型返回了空响应，请重试")
             return content.strip()
         except (APIConnectionError, APITimeoutError) as error:
             if attempt == 0:
-                time.sleep(0.2)
+                time.sleep(0.2 if request_deadline.get() is None else max(0, min(0.2, request_deadline.get() - time.monotonic())))
                 continue
             raise RuntimeError(f"模型连接失败：{redact_text(str(error))}") from error
         except OpenAIError as error:

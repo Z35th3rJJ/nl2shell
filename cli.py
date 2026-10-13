@@ -85,6 +85,9 @@ def json_result(record: dict, status: str) -> dict:
         "error": next((item.get("detail", "") for item in verification
                        if item.get("status") not in {"verified", "no_matches", "exit_code_only", "not_executed"}),
                       record.get("block_reason", "")),
+        **({"agent_trace": record["agent_trace"], "tool_executions": record["tool_executions"],
+            "execution_repair_attempts": record["execution_repair_attempts"],
+            "completion_verified": record["completion_verified"]} if record.get("agent") else {}),
     }
 
 
@@ -217,12 +220,13 @@ def show_outcome(outcome):
 def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStore,
                     user_input: str, cwd: str, mode: str, input_fn=input,
                     timeout_seconds: float = 60, batch_id: str = "",
-                    batch_index: int | None = None, assume_yes: bool = False) -> str:
+                    batch_index: int | None = None, assume_yes: bool = False,
+                    agent_context: dict | None = None) -> str:
     plan = TaskPlan(())
     prepared, outcomes = None, []
     candidates, bash_query = None, False
     diagnoses, repairs, initial_command_attempts = [], [], []
-    repair_used = False
+    repair_used = bool(agent_context and agent_context["repairs"])
     audit_path = getattr(history, "path", None)
     excluded = [audit_path] if isinstance(audit_path, (str, os.PathLike)) else []
     if os.environ.get("NL2SHELL_LOG_JSON"):
@@ -233,6 +237,24 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             return input_fn(message).strip()
         except (EOFError, KeyboardInterrupt):
             return ""
+
+    def remaining_time():
+        return timeout_seconds if agent_context is None else max(0, agent_context["deadline"] - time.monotonic())
+
+    def check_agent():
+        if agent_context is not None:
+            if remaining_time() <= 0:
+                raise TimeoutError("Agent 总时限已用完")
+            agent_context["check"](prepared)
+
+    def run_action(value, action):
+        check_agent()
+        if agent_context is not None:
+            if agent_context["executions"] >= 5:
+                raise ValueError("Agent 最多执行五次工具，已停止")
+            agent_context["executions"] += 1
+        return (execute_query if bash_query else execute_action)(value, action, executor,
+            timeout_seconds=max(0, deadline - time.monotonic()))
 
     def finish(status, detail=""):
         executed = any(item.get("executed") for item in outcomes)
@@ -315,7 +337,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                                                 "search_text", "text_stats", "read_text"} for step in plan.steps):
         return finish("blocked", "首版请把命令查询和文件写入分开提交；未执行任何步骤")
     def prepare():
-        options = {"timeout_seconds": timeout_seconds, "excluded_paths": excluded}
+        options = {"timeout_seconds": remaining_time(), "excluded_paths": excluded}
         if prepared is not None:
             options["now"] = prepared["now"]
         value = (prepare_queries if bash_query else prepare_plan)(plan, cwd, **options)
@@ -325,6 +347,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     def preview():
         return query_preview(prepared) if bash_query else preview_details(prepared)
     try:
+        check_agent()
         prepared = prepare()
         if bash_query:
             candidates = engine.generate_bash_commands(user_input, cwd, plan, prepared, clarifications)
@@ -351,12 +374,15 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             if ask("是否执行以上操作？请输入 yes 确认 > ").lower() != "yes":
                 return finish("cancelled")
         try:
+            check_agent()
             current = prepare()
         except (ValueError, TypeError, RuntimeError, OSError) as error:
             return finish("blocked", str(error))
         if not preparation_changed(prepared, current):
             prepared = current
             break
+        if agent_context is not None:
+            return finish("blocked", "Agent 确认期间文件变化，停止，不扩大范围")
         prepared = current
         automatic = False
         if mode == BATCH:
@@ -375,7 +401,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         history.last_record.update(status="audit_failed", block_reason=str(error))
         print(f"无法保存执行记录，操作已停止：{error}")
         return "audit_failed"
-    deadline = time.monotonic() + timeout_seconds
+    deadline = time.monotonic() + timeout_seconds if agent_context is None else agent_context["deadline"]
     def repair(action, failed, diagnosis):
         nonlocal repair_used
         if repair_used and diagnosis is not None and diagnosis["repair_eligible"]:
@@ -385,6 +411,8 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             return failed
         # 先消耗整项任务的唯一预算；候选被拒绝或用户取消也不能再次申请。
         repair_used = True
+        if agent_context is not None:
+            agent_context["repairs"] = 1
         attempt = {"attempt": 1, "step": action["step"], "initial_outcome": dict(failed),
                    "status": "not_executed", "executed": False}
         repairs.append(attempt)
@@ -414,8 +442,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
                          status="repair_confirmed", executed=False, plan=plan_payload(plan),
                          preview=query_preview(checked), repair_attempt=1, run_mode=mode)
-            repaired = execute_query(checked, checked["actions"][action["step"] - 1], executor,
-                                     timeout_seconds=max(0, deadline - time.monotonic()))
+            repaired = run_action(checked, checked["actions"][action["step"] - 1])
             attempt.update(status=repaired["status"], executed=repaired["executed"], outcome=repaired)
             print("修复执行结果：")
             show_outcome(repaired)
@@ -427,9 +454,10 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             print(f"修复已停止：{error}")
             return failed
     for action in prepared["actions"]:
-        remaining = deadline - time.monotonic()
-        outcome = (execute_query if bash_query else execute_action)(prepared, action, executor,
-                                                                   timeout_seconds=max(0, remaining))
+        try:
+            outcome = run_action(prepared, action)
+        except (ValueError, OSError, RuntimeError) as error:
+            return finish("blocked", str(error))
         if not bash_query:
             outcome["execution_kind"] = "python_tool"
         outcomes.append(outcome)
@@ -591,15 +619,20 @@ def main(input_session=None, args=None) -> None:
         if warning and not args.json:
             print(f"{YELLOW}{warning}{RESET}")
         mode = PREVIEW if args.preview else settings.run_mode
+        if getattr(args, "agent", False):
+            from core.agent import execute_agent
+            runner = execute_agent
+        else:
+            runner = execute_request
         if args.json:
             output = io.StringIO()
             with redirect_stdout(output):
-                status = execute_request(engine, executor, history, args.task, cwd, mode,
+                status = runner(engine, executor, history, args.task, cwd, mode,
                                          timeout_seconds=args.timeout, assume_yes=args.yes, input_fn=lambda _: "")
             record = history.last_record
             print(json.dumps(json_result(record, status), ensure_ascii=False))
         else:
-            execute_request(engine, executor, history, args.task, cwd, mode,
+            runner(engine, executor, history, args.task, cwd, mode,
                             timeout_seconds=args.timeout, assume_yes=args.yes)
         return
 
@@ -697,9 +730,12 @@ def entrypoint() -> None:
     parser.add_argument("--preview", action="store_true", help="仅生成并展示计划")
     parser.add_argument("--yes", action="store_true", help="仅对受支持的只读任务跳过确认")
     parser.add_argument("--json", action="store_true", help="输出稳定 JSON 结果（适合脚本调用）")
+    parser.add_argument("--agent", action="store_true", help="按真实观察逐步决策，最多五次受控工具调用")
     parsed_args = parser.parse_args()
     if not math.isfinite(parsed_args.timeout) or parsed_args.timeout <= 0:
         parser.error("--timeout 必须是有限正数")
+    if parsed_args.agent and (not parsed_args.task or parsed_args.batch):
+        parser.error("--agent 需要一个明确目标，不能与 --batch 同用")
     main(args=parsed_args)
 
 
