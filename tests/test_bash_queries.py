@@ -259,3 +259,10 @@ def test_interrupt_terminates_the_process_before_returning(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         BashExecutor()._execute_argv(["pwd", "-P"], 1)
     terminate.assert_called_once_with(process)
+
+
+@pytest.mark.parametrize("text", ["中文\u00a0word", "中文\u2060word", "\x01"])
+def test_word_count_rejects_unsupported_separators(tmp_path, text):
+    (tmp_path / "input").write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="Unicode"):
+        prepare_queries(plan("text_stats", path="input", metric="words"), str(tmp_path))

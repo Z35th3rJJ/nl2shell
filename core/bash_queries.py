@@ -186,7 +186,10 @@ def prepare_queries(plan, cwd, *, now=None, timeout_seconds=60, excluded_paths=(
                 selected = lines[:p["lines"]] if p["end"] == "head" else lines[-p["lines"]:]
                 action["_expected"] = b"".join(selected).decode("utf-8")
             else:
-                action["_expected"] = {"lines": data.count(b"\n"), "words": len(data.split()),
+                if p["metric"] == "words" and any(not char.isprintable() or char.isspace()
+                    for char in text if char not in " \t\n\r\v\f"):
+                    raise ValueError("单词统计暂不支持特殊 Unicode 空白或控制字符")
+                action["_expected"] = {"lines": data.count(b"\n"), "words": len(text.split()),
                                        "bytes": len(data)}[p["metric"]]
         action["_required_argv"] = required_argv(operation, p, now, excluded_arguments)
         actions.append(action)

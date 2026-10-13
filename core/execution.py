@@ -115,7 +115,7 @@ class BashExecutor:
         if not binary.is_file():
             raise RuntimeError("系统没有对应的受支持命令")
         actual = [str(binary), *argv[1:]]
-        locale = "C" if argv[0] == "wc" else "C.UTF-8"
+        locale = "C.UTF-8"
         environment = {"PATH": "/usr/bin:/bin", "LC_ALL": locale, "LANG": locale, "POSIXLY_CORRECT": "1"}
         result = self._execute_argv(actual, timeout_seconds, cwd, env=environment)
         return result, actual
