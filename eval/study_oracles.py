@@ -74,10 +74,10 @@ def decode(argv, root, now, result="output"):
             p["modified_within_days"] = matched
         operation = "count_files" if result == "count" else "find_files"
     elif name == "grep":
-        if len(args) == 7 and args[:3] == ['-F', '-n', '-e'] and args[4] == '--':
-            raise ValueError("grep 参数多余")
         if len(args) == 6 and args[:3] == ['-F', '-n', '-e'] and args[4] == '--':
             pattern, path = args[3], args[5]
+        elif len(args) == 5 and args[:3] == ['-F', '-n', '-e']:
+            pattern, path = args[3], args[4]
         elif len(args) == 2 and not any(c in args[0] for c in '.^$*+?[](){}|\\'):
             pattern, path = args
         else:
@@ -97,9 +97,9 @@ def decode(argv, root, now, result="output"):
         operation, p = "system_info", {"query": "system"}
     elif name == "df" and args:
         if args[:2] == ['-B1', '--output=size,used,avail']:
-            if len(args) not in {2, 4} or len(args) == 4 and args[2] != '--':
+            if len(args) not in {2, 3, 4} or len(args) == 4 and args[2] != '--':
                 raise ValueError("磁盘参数错误")
-            path = args[-1] if len(args) == 4 else "."
+            path = args[-1] if len(args) in {3,4} else "."
         elif args[0] == '-h' and len(args) <= 2:
             path = args[-1] if len(args) == 2 else "."
         else:
@@ -179,6 +179,8 @@ def common_gate(plan, arrays, root, now):
             prepared = prepare_queries(one, str(root), now=now, timeout_seconds=10)
             review_commands(prepared, {'commands':[{'step':1,'argv':argv,'explanation':'评测候选，不改写'}]})
         else:
+            if s.operation=='copy_files' and not (root/s.parameters['destination']).is_dir():
+                raise ValueError('公共转译只支持已存在的目标目录，不能将 cp 文件目标改成目录')
             prepared = prepare_plan(one, str(root), now=now, timeout_seconds=10)
             for item in prepared['actions'][0]['items']:
                 for key in ('source','destination'):

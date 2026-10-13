@@ -26,7 +26,7 @@ from eval.study_cases import cases, supplementary_cases, fixture, environment, d
 from eval.study_oracles import decode_candidates, expected_plan, signature, writes, common_gate, authorize, execute, final_oracle
 
 load_dotenv()
-PROTOCOL = 'study-v1'
+PROTOCOL = 'study-v2'
 STRATEGIES = ('basic','structured','fewshot')
 
 

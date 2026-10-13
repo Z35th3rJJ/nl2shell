@@ -227,3 +227,23 @@ def test_http_observer_records_real_call_boundary_and_does_not_change_response(m
     assert trace.calls[0]['raw_response']==reply
     assert not transport.event_hooks['request'] and not transport.event_hooks['response']
     client.close()
+
+
+@pytest.mark.parametrize('identifier,argv',[('Q04',['df','-B1','--output=size,used,avail','./']),
+                                         ('Q09',['grep','-F','-n','-e','WARN','chapter.txt'])])
+def test_semantic_grading_accepts_separator_aliases_but_execution_remains_strict(tmp_path,identifier,argv):
+    fixture(tmp_path,NOW)
+    case=next(c for c in cases() if c['id']==identifier)
+    executor=Mock()
+    row=evaluate_one(case,'A','basic',tmp_path,NOW,Trace([{'status':'ready','commands':[{'argv':argv}]}]),executor)
+    assert row['raw_command_correct'] and row['status']=='common_rejected'
+    executor.execute_query.assert_not_called()
+
+
+def test_cp_file_destination_is_never_silently_translated_to_directory(tmp_path):
+    fixture(tmp_path,NOW)
+    case=next(c for c in cases() if c['id']=='M01')
+    before=tree_state(tmp_path)
+    row=evaluate_one(case,'A','basic',tmp_path,NOW,Trace([{'status':'ready','commands':[{'argv':['cp','chapter.txt','chapter.copy']}]}]),Mock())
+    assert row['wrong_write_proposed'] and not row['wrong_write_accepted']
+    assert row['status']=='common_rejected' and tree_state(tmp_path)==before
