@@ -19,6 +19,11 @@ class ExecutionResult:
     duration_seconds: float
     timed_out: bool = False
     output_truncated: bool = False
+    process_state: str = "unknown"
+
+
+class ExecutionStartError(OSError):
+    """Popen 已确认失败，没有启动子进程。"""
 
 
 DEFAULT_OUTPUT_LIMIT = 200_000
@@ -125,12 +130,17 @@ class BashExecutor:
 
         start = time.monotonic()
         with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
-            process = subprocess.Popen(
-                argv, stdout=stdout_file, stderr=stderr_file, shell=False,
-                cwd=cwd, start_new_session=os.name != "nt",
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
-                **({"env": env} if env is not None else {}),
-            )
+            try:
+                process = subprocess.Popen(
+                    argv, stdout=stdout_file, stderr=stderr_file, shell=False,
+                    cwd=cwd, start_new_session=os.name != "nt",
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+                    **({"env": env} if env is not None else {}),
+                )
+            except OSError as error:
+                failure = ExecutionStartError(error.errno, str(error))
+                failure.attempted_argv = list(argv)
+                raise failure from error
             timed_out = False
             try:
                 process.wait(timeout=timeout_seconds)
@@ -144,13 +154,15 @@ class BashExecutor:
             stderr, stderr_truncated = _read_limited(stderr_file, self.output_limit)
         if timed_out:
             return ExecutionResult(None, stdout, stderr, time.monotonic() - start, True,
-                                   stdout_truncated or stderr_truncated)
+                                   stdout_truncated or stderr_truncated,
+                                   "stopped" if type(process.poll()) is int else "unknown")
         return ExecutionResult(
             exit_code=process.returncode,
             stdout=stdout,
             stderr=stderr,
             duration_seconds=time.monotonic() - start,
             output_truncated=stdout_truncated or stderr_truncated,
+            process_state="exited",
         )
 
 

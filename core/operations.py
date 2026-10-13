@@ -398,7 +398,8 @@ def execute_action(prepared: dict, action: dict, executor=None, *, timeout_secon
         if action["items"] == [] and operation not in READ_OPERATIONS:
             outcome["detail"] = "没有符合条件的文件，未修改任何文件"
     except (OSError, ValueError, RuntimeError, KeyboardInterrupt) as error:
-        outcome.update(status="execution_failed", detail=str(error), timed_out=isinstance(error, TimeoutError))
+        outcome.update(status="execution_failed", detail=str(error), timed_out=isinstance(error, TimeoutError),
+                       error_type=type(error).__name__, error_number=getattr(error, "errno", None))
         if isinstance(error, KeyboardInterrupt):
             outcome.update(status="interrupted", detail="用户中断；已完成操作保留，未完成操作停止")
         if outcome["items"]:

@@ -303,28 +303,38 @@ def _verify_output(prepared, action, result):
 
 
 def execute_query(prepared, action, executor, *, timeout_seconds=60):
+    from .execution import ExecutionStartError
     outcome = {"step": action["step"], "operation": action["operation"], "status": "unverified",
                "execution_kind": "model_bash_argv", "candidate_argv": action.get("candidate_argv"),
-               "review": action.get("review"), "items": [], "executed": False, "task_completed": False}
+               "review": action.get("review"), "items": [], "executed": False, "task_completed": False,
+               "execution_state": "not_started"}
     started = time.monotonic()
+    phase = "review"
     try:
         if action.get("review") != "accepted" or action.get("candidate_argv") != action["_required_argv"]:
             raise ValueError("未通过审查的命令不能执行")
         # 执行前重查真实环境；不把旧的文件快照当作当前状态。
+        phase = "environment"
         from .task_plan import TaskPlan, TaskStep
         current = prepare_queries(TaskPlan((TaskStep(operation=action["operation"], parameters=action["parameters"]),)),
                                   prepared["cwd"], now=prepared["now"], timeout_seconds=timeout_seconds,
                                   excluded_paths=prepared["excluded"])["actions"][0]
         if any(current.get(key) != action.get(key) for key in ("files", "_identities", "_expected", "_required_argv")):
             raise ValueError("查询范围或文件已变化，请重新确认")
+        phase = "execution"
+        outcome["execution_state"] = "unknown"
         result, actual = executor.execute_query(action["candidate_argv"], action["operation"], action["parameters"],
                                                prepared["cwd"], prepared["now"], prepared["excluded"],
                                                timeout_seconds=timeout_seconds)
         outcome.update(executed=True, actual_argv=actual, exit_code=result.exit_code,
                        stdout=result.stdout, stderr=result.stderr, timed_out=result.timed_out,
-                       output_truncated=result.output_truncated, command_succeeded=result.exit_code == 0)
+                       output_truncated=result.output_truncated, command_succeeded=result.exit_code == 0,
+                       execution_state=("exited" if not result.timed_out and type(result.exit_code) is int
+                                        else result.process_state))
+        phase = "verification"
         no_match = action["operation"] == "search_text" and result.exit_code == 1
         if result.timed_out or (result.exit_code != 0 and not no_match):
+            phase = "execution"
             outcome.update(status="execution_failed", detail="命令失败或超时，未自动修复")
         elif result.output_truncated or result.stderr or not _verify_output(prepared, action, result):
             outcome.update(status="unverified", detail="命令已运行，但输出或实际环境未通过独立验证")
@@ -337,7 +347,13 @@ def execute_query(prepared, action, executor, *, timeout_seconds=60):
             if action["operation"] == "count_files":
                 outcome["count"] = len(action["files"])
     except (OSError, ValueError, RuntimeError, TypeError, KeyboardInterrupt) as error:
-        outcome.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "execution_failed",
-                       detail=str(error), timed_out=isinstance(error, TimeoutError))
+        status = "unverified" if phase == "verification" else "blocked" if phase in {"review", "environment"} and isinstance(error, ValueError) else "execution_failed"
+        outcome.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else status,
+                       detail=str(error), timed_out=isinstance(error, TimeoutError),
+                       error_type=type(error).__name__, error_number=getattr(error, "errno", None))
+        if isinstance(error, ExecutionStartError):
+            outcome["execution_state"] = "not_started"
+            outcome["attempted_argv"] = getattr(error, "attempted_argv", [])
+    outcome["failure_phase"] = phase
     outcome["duration_seconds"] = time.monotonic() - started
     return outcome

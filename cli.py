@@ -32,6 +32,7 @@ from core.structured_log import log_event
 from core.task_plan import TaskPlan, TaskStep, plan_payload
 from core.operations import prepare_plan, preview_details, preparation_changed, execute_action, workspace_path, unique_target
 from core.bash_queries import uses_bash, prepare_queries, review_commands, query_preview, execute_query
+from core.error_analysis import assess_failure, safe_advice
 
 load_dotenv(ENV_PATH)
 
@@ -220,6 +221,8 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     plan = TaskPlan(())
     prepared, outcomes = None, []
     candidates, bash_query = None, False
+    diagnoses, repairs, initial_command_attempts = [], [], []
+    repair_used = False
     audit_path = getattr(history, "path", None)
     excluded = [audit_path] if isinstance(audit_path, (str, os.PathLike)) else []
     if os.environ.get("NL2SHELL_LOG_JSON"):
@@ -242,8 +245,9 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                          preview=(query_preview(prepared) if bash_query else preview_details(prepared)) if prepared else [],
                          verification=outcomes, block_reason=detail,
                          timed_out=any(item.get("timed_out") for item in outcomes),
-                         command_attempts=getattr(engine, "command_attempts", []) if bash_query and isinstance(getattr(engine, "command_attempts", None), list) else [],
+                         command_attempts=initial_command_attempts or (getattr(engine, "command_attempts", []) if bash_query and isinstance(getattr(engine, "command_attempts", None), list) else []),
                          candidates=candidates,
+                         diagnoses=diagnoses, repairs=repairs, execution_repair_attempts=int(repair_used),
                          **({"batch_id": batch_id, "batch_index": batch_index} if batch_id else {}))
         except OSError as error:
             status = "audit_failed"
@@ -252,6 +256,35 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         _remember_task(engine, mode, user_input, cwd, plan, status, executed)
         print(f"任务结果：{_STATUS_NAMES.get(status, status)}" + (f"，{detail}" if detail else ""))
         return status
+
+    def diagnose(outcome):
+        diagnosis = assess_failure(outcome, prepared)
+        if diagnosis is None:
+            return None
+        diagnosis["step"] = outcome.get("step")
+        if diagnosis["category"] not in {"safety_rejected", "interrupted"}:
+            evidence = dict(diagnosis["evidence_untrusted"])
+            for key in ("stdout", "stderr", "detail"):
+                if isinstance(evidence.get(key), str):
+                    evidence[key] = evidence[key][:4000]
+            detail = {"classification": diagnosis["category"], "checks": diagnosis["checks"],
+                      "file_state": {"state": diagnosis["file_state"]["state"], "paths": diagnosis["file_state"]["paths"][:30]},
+                      "evidence_untrusted": evidence}
+            try:
+                raw = engine.suggest_fix(json.dumps(plan_payload(plan), ensure_ascii=False),
+                                         json.dumps(detail, ensure_ascii=False))
+                diagnosis["model_advice"] = raw if isinstance(raw, str) else ""
+                diagnosis["advice"] = safe_advice(raw, diagnosis)
+            except (ValueError, TypeError, RuntimeError, OSError) as error:
+                diagnosis["model_error"] = str(error)
+                diagnosis["advice"] = "；".join(diagnosis["checks"])
+        else:
+            diagnosis["advice"] = "；".join(diagnosis["checks"])
+        diagnoses.append(diagnosis)
+        print(f"原因：{diagnosis['summary']}\n建议：{diagnosis['advice']}")
+        if not diagnosis["read_only"]:
+            print("写操作可能已有部分修改。请核对已完成项；系统不会重放任务。")
+        return diagnosis
 
     try:
         if user_input.startswith("/restore "):
@@ -296,7 +329,13 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         if bash_query:
             candidates = engine.generate_bash_commands(user_input, cwd, plan, prepared, clarifications)
             review_commands(prepared, candidates)
+            if isinstance(getattr(engine, "command_attempts", None), list):
+                initial_command_attempts = list(engine.command_attempts)
     except (ValueError, TypeError, RuntimeError, OSError) as error:
+        if isinstance(error, OSError):
+            diagnose({"status": "execution_failed", "detail": str(error), "executed": False,
+                      "execution_state": "not_started", "failure_phase": "preparation",
+                      "error_type": type(error).__name__, "error_number": getattr(error, "errno", None)})
         return finish("blocked", str(error))
     print("任务预览：")
     show_preview(prepared)
@@ -337,6 +376,56 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         print(f"无法保存执行记录，操作已停止：{error}")
         return "audit_failed"
     deadline = time.monotonic() + timeout_seconds
+    def repair(action, failed, diagnosis):
+        nonlocal repair_used
+        if repair_used and diagnosis is not None and diagnosis["repair_eligible"]:
+            print("本任务的一次修复预算已用完，已停止。")
+        if (repair_used or not bash_query or diagnosis is None or not diagnosis["repair_eligible"]
+                or mode == BATCH or time.monotonic() >= deadline):
+            return failed
+        # 先消耗整项任务的唯一预算；候选被拒绝或用户取消也不能再次申请。
+        repair_used = True
+        attempt = {"attempt": 1, "step": action["step"], "initial_outcome": dict(failed),
+                   "status": "not_executed", "executed": False}
+        repairs.append(attempt)
+        try:
+            current = prepare_queries(plan, cwd, now=prepared["now"],
+                                      timeout_seconds=max(0, deadline - time.monotonic()), excluded_paths=excluded)
+            review_commands(current, candidates)
+            if preparation_changed(prepared, current):
+                raise ValueError("文件或查询范围变化，停止修复；请重新提交原始需求")
+            payload = engine.generate_bash_commands(user_input, cwd, plan, current, clarifications,
+                                                    repair_evidence=diagnosis)
+            attempt["candidates"] = payload
+            if isinstance(getattr(engine, "command_attempts", None), list):
+                attempt["generation_attempts"] = list(engine.command_attempts)
+            review_commands(current, payload)
+            attempt["review"] = "accepted"
+            print("唯一一次修复候选（只执行失败的当前步骤）：")
+            show_preview(current)
+            if ask("是否执行这一次只读修复？请输入 yes 确认 > ").lower() != "yes":
+                attempt["status"] = "cancelled"
+                return failed
+            checked = prepare_queries(plan, cwd, now=prepared["now"],
+                                      timeout_seconds=max(0, deadline - time.monotonic()), excluded_paths=excluded)
+            review_commands(checked, payload)
+            if preparation_changed(current, checked):
+                raise ValueError("修复确认后文件变化，已停止")
+            save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
+                         status="repair_confirmed", executed=False, plan=plan_payload(plan),
+                         preview=query_preview(checked), repair_attempt=1, run_mode=mode)
+            repaired = execute_query(checked, checked["actions"][action["step"] - 1], executor,
+                                     timeout_seconds=max(0, deadline - time.monotonic()))
+            attempt.update(status=repaired["status"], executed=repaired["executed"], outcome=repaired)
+            print("修复执行结果：")
+            show_outcome(repaired)
+            if repaired["status"] not in {"verified", "no_matches"}:
+                diagnose(repaired)
+            return repaired
+        except (ValueError, TypeError, RuntimeError, OSError) as error:
+            attempt.update(status="blocked", review="rejected", reason=str(error))
+            print(f"修复已停止：{error}")
+            return failed
     for action in prepared["actions"]:
         remaining = deadline - time.monotonic()
         outcome = (execute_query if bash_query else execute_action)(prepared, action, executor,
@@ -345,6 +434,10 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             outcome["execution_kind"] = "python_tool"
         outcomes.append(outcome)
         show_outcome(outcome)
+        if outcome["status"] not in {"verified", "no_matches"}:
+            diagnosis = diagnose(outcome)
+            outcome = repair(action, outcome, diagnosis)
+            outcomes[-1] = outcome
         if outcome["status"] not in {"verified", "no_matches"}:
             break
     for action in prepared["actions"][len(outcomes):]:
