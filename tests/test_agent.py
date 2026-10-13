@@ -485,3 +485,38 @@ def test_contract_does_not_loop_after_two_invalid_outputs(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="两次"):
         Engine().agent_contract("明确目标", str(tmp_path))
     assert chat.call_count == 2
+
+
+def test_explicit_query_reference_parameter_normalizes_without_inference(tmp_path):
+    rules = selection_rules()
+    rules[1]["step"]["parameters"]["selection"] = rules[1].pop("selection")
+    normalized = parse_contract(json.dumps({"status": "ready", "rules": rules}), str(tmp_path), "查找当前目录这一层 txt 复制到 backup")
+    assert normalized["rules"] == selection_rules()
+    (tmp_path / "a.txt").write_text("a")
+    def decide(goal, contract, observations):
+        if not observations:
+            return action(rules[0], observations)
+        if len(observations) == 1:
+            return {"status": "act", "rule": "a2", "step": rules[1]["step"], "basis": ["a1"]}
+        return {"status": "finish", "basis": ["a1", "a2"]}
+    engine, executor, history = setup_agent(tmp_path, normalized["rules"], decide)
+    assert run(tmp_path, engine, executor, history) == "verified"
+    assert (tmp_path / "backup/a.txt").read_text() == "a"
+
+
+def test_conflicting_query_references_are_rejected(tmp_path):
+    rules = selection_rules()
+    rules[1]["step"]["parameters"]["selection"] = "a2"
+    with pytest.raises(ValueError, match="矛盾"):
+        parse_contract(json.dumps({"status": "ready", "rules": rules}), str(tmp_path), "复制到 backup")
+
+
+@pytest.mark.parametrize("flag", ["agent", "agent_step"])
+def test_history_cannot_route_agent_records_into_fixed_plan_execution(flag, monkeypatch):
+    import cli
+    store = Mock()
+    store.find.return_value = {"input": "原始条件目标", flag: True}
+    execute = Mock()
+    monkeypatch.setattr(cli, "execute_request", execute)
+    cli.handle_history_command('/history replay record', store, Mock(), Mock(), 'confirm')
+    execute.assert_not_called()

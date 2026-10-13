@@ -270,6 +270,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                          command_attempts=initial_command_attempts or (getattr(engine, "command_attempts", []) if bash_query and isinstance(getattr(engine, "command_attempts", None), list) else []),
                          candidates=candidates,
                          diagnoses=diagnoses, repairs=repairs, execution_repair_attempts=int(repair_used),
+                         **({"agent_step": True} if agent_context is not None else {}),
                          **({"batch_id": batch_id, "batch_index": batch_index} if batch_id else {}))
         except OSError as error:
             status = "audit_failed"
@@ -396,7 +397,8 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     try:
         save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
                      status="confirmed", executed=False, plan=plan_payload(plan),
-                     preview=preview(), run_mode=mode)
+                     preview=preview(), run_mode=mode,
+                     **({"agent_step": True} if agent_context is not None else {}))
     except OSError as error:
         history.last_record.update(status="audit_failed", block_reason=str(error))
         print(f"无法保存执行记录，操作已停止：{error}")
@@ -441,7 +443,8 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                 raise ValueError("修复确认后文件变化，已停止")
             save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
                          status="repair_confirmed", executed=False, plan=plan_payload(plan),
-                         preview=query_preview(checked), repair_attempt=1, run_mode=mode)
+                         preview=query_preview(checked), repair_attempt=1, run_mode=mode,
+                         **({"agent_step": True} if agent_context is not None else {}))
             repaired = run_action(checked, checked["actions"][action["step"] - 1])
             attempt.update(status=repaired["status"], executed=repaired["executed"], outcome=repaired)
             print("修复执行结果：")
@@ -568,6 +571,9 @@ def handle_history_command(command: str, store: HistoryStore, engine: Engine, ex
         if not record or not record.get("input"):
             print("未找到可重放的历史记录。")
             return
+        if record.get("agent") or record.get("agent_step"):
+            print("Agent 记录不能通过固定计划入口重放；请用 --agent 重新提交完整目标。")
+            return
         execute_request(engine, executor, store, record["input"], os.getcwd(), mode)
         return
     if arguments[0] == "replay-batch" and len(arguments) == 2:
@@ -575,6 +581,9 @@ def handle_history_command(command: str, store: HistoryStore, engine: Engine, ex
         records = sorted((record for record in records if record.get("input") != "批量任务摘要"),
                          key=lambda record: record.get("batch_index", 0))
         for record in records:
+            if record.get("agent") or record.get("agent_step"):
+                print("Agent 记录不能通过固定计划批量重放，已跳过。")
+                continue
             execute_request(engine, executor, store, record["input"], os.getcwd(), mode)
         return
     limit, filters = _history_options(arguments)

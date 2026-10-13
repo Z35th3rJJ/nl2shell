@@ -54,6 +54,11 @@ def parse_contract(raw, cwd, goal):
         if not isinstance(step, dict) or not isinstance(step.get("parameters"), dict):
             raise ValueError("Agent 动作格式不合法")
         step = dict(step, parameters=dict(step["parameters"]))
+        if "selection" in step["parameters"]:
+            reference = step["parameters"].pop("selection")
+            if selection is not None and selection != reference:
+                raise ValueError("查询引用不能互相矛盾")
+            selection = reference
         if selection is None and step.get("operation") in {"copy_files", "move_files", "trash"} and "sources" not in step["parameters"]:
             raise ValueError("复制、移动或回收必须提供明确 sources，或用 selection 引用已授权的 find_files；不允许 source_step")
         if selection is not None:
@@ -265,6 +270,10 @@ def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=inp
             if not isinstance(step, dict) or not isinstance(step.get("parameters"), dict):
                 raise ValueError("下一步必须包含一个结构化工具动作")
             step = dict(step, parameters=dict(step["parameters"]))
+            if "selection" in step["parameters"]:
+                reference = step["parameters"].pop("selection")
+                if reference != rule.get("selection") or rule.get("selection") is None:
+                    raise ValueError("下一步引用与用户授权的查询不一致")
             if rule.get("selection") and not {"sources", "source_step"} & step["parameters"].keys():
                 step["parameters"]["sources"] = observation["files"]
                 row["selection_binding"] = {"observation": rule["selection"], "sources": observation["files"]}
