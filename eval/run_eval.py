@@ -236,7 +236,9 @@ def run_eval(limit=200, delay=0, backend=None, execute_safe=False, output_dir=No
               "task_completion_rate": rate(ready, "task_completed") if execute_safe else None,
               "execution_requested": execute_safe, "details": results}
     report = redact_value(report)
-    output = Path(output_dir) if output_dir else Path(__file__).parent
+    output = Path(output_dir) if output_dir else Path.home() / 'nl2shell-evaluations' / 'legacy'
+    if output.resolve().is_relative_to(repo.resolve()):
+        raise ValueError("评测结果必须保存在代码仓库外")
     output.mkdir(parents=True, exist_ok=True)
     filename = f"eval_result_{backend}_{datetime.now(timezone.utc):%Y%m%dT%H%M%S}_{uuid4().hex[:8]}.json"
     destination = output / filename
@@ -251,7 +253,8 @@ if __name__ == "__main__":
     parser.add_argument("--backend", choices=["local", "deepseek"])
     parser.add_argument("--limit", type=int, default=200)
     parser.add_argument("--execute-safe", action="store_true", help="在临时目录执行匹配期望的固定操作")
+    parser.add_argument("--output-dir", type=Path, help="仓库外的结果目录")
     args = parser.parse_args()
     if args.limit <= 0:
         parser.error("--limit 必须大于 0")
-    run_eval(limit=args.limit, backend=args.backend, execute_safe=args.execute_safe)
+    run_eval(limit=args.limit, backend=args.backend, execute_safe=args.execute_safe, output_dir=args.output_dir)

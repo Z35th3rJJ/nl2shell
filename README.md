@@ -133,7 +133,7 @@ python cli.py --agent "先查找当前目录这一层的 *.log 文件。有匹�
 python -m pytest -q
 python eval/run_eval.py --backend local
 python eval/run_eval.py --backend local --execute-safe
-python eval/compare.py eval/第一次结果.json eval/第二次结果.json
+python eval/compare.py /path/outside-repo/第一次结果.json /path/outside-repo/第二次结果.json
 ```
 
 新评测集覆盖条件理解、多步规划、必要追问和范围拒绝。判分先统一工作目录内的路径。实际执行只发生在独立临时目录；操作和参数匹配预期的计划可以执行。写法不同的写入计划，还必须通过只读预览证明写操作顺序、源文件及目标文件清单与预期相同，才允许执行；额外写入不允许。执行后仍用独立文件期望检查任务完成。结果文件带时间和编号，不覆盖旧结果。
@@ -143,6 +143,20 @@ python eval/compare.py eval/第一次结果.json eval/第二次结果.json
 自动测试使用模型替身，验证程序逻辑。它不证明真实 Ollama 的理解或规划能力。真实模型评测需另行运行。历史 Bash 数据集保留作旧版本参考，不再由主评测入口执行。
 
 这些指标测量模型与程序检查共同组成的规划流程，不是裸模型成绩。评测集新增了缺少复制目标和模糊时间的不同表达；不同数据集版本不能直接比较总分。
+
+独立 A/B/C 入口与旧评测分开：A 直接产生候选；B 先产生计划再产生候选；C 增加独立需求及计划/候选一致性检查。三组共享路径、参数和授权检查，不把公共检查算作 C 的贡献。24 条核心任务、6 条故障修复和4条动态 Agent 使用合成文件与独立结果判分。
+
+```bash
+python eval/study.py --output-dir /path/outside-repo/study --variants A B C --strategy basic
+python eval/study.py --output-dir /path/outside-repo/study --variants C --strategy structured
+python eval/study.py --output-dir /path/outside-repo/study --variants C --strategy fewshot
+LOCAL_MODEL=qwen2.5-coder:3b python eval/study.py --output-dir /path/outside-repo/study --variants C --strategy basic
+python eval/study_supplementary.py --output-dir /path/outside-repo/study
+```
+
+输出目录首次登记固定任务、环境时刻和任务 SHA-256，后续实验复用同一登记。真实实验要求工作区已提交。候选正确性、公共审查、C 检查、写入授权和实际结果分别记录。错误写候选接受率是在最后授权前计算；不符合登记范围的写入不执行。写命令仅转译到受保护的 Python 工具，不宣称执行了 Bash cp/mv。A 的计划指标为不适用。无法自动解释的候选保留原文待核对，不将退出码或模型成功标签当成任务完成。
+
+三种 Prompt 都使用接口必需的 JSON 格式；结构化版本增加明确字段约束，fewshot 再增加不属于测试集的开发示例。这是提示文案比较，不是不同 JSON API 模式的比较。模型比较需先实际部署；没有部署结果不能以替身代替。旧评测默认结果也保存在仓库外。
 
 ## 提交和推送前检查
 

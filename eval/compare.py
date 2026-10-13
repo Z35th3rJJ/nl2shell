@@ -8,6 +8,20 @@ def compare(first: Path, second: Path):
     reports = [json.loads(path.read_text(encoding="utf-8")) for path in (first, second)]
     if reports[0]["dataset_version"] != reports[1]["dataset_version"] or reports[0]["total"] != reports[1]["total"]:
         raise ValueError("用例版本或数量不同，不能直接比较")
+    if any('protocol_version' in r for r in reports):
+        if (not all(r.get('complete') for r in reports) or reports[0].get('protocol_version') != reports[1].get('protocol_version')
+                or reports[0].get('fixed_now') != reports[1].get('fixed_now')
+                or reports[0].get('code_revision') != reports[1].get('code_revision')
+                or {r['id'] for r in reports[0]['details']} != {r['id'] for r in reports[1]['details']}):
+            raise ValueError('实验不完整、协议、初始时刻或任务编号不同，不能直接比较')
+        for key in reports[0]['metrics']:
+            values=[]
+            for report in reports:
+                value=report['metrics'][key]
+                values.append('不适用' if value is None else f"{value['numerator']}/{value['denominator']} ({value['percent']:.2f}%)"
+                              if isinstance(value,dict) and value['percent'] is not None else str(value))
+            print(key,*values,sep=' | ')
+        return
     print("模型：", *[report["model"] for report in reports], sep=" | ")
     if reports[0].get("evaluation_version", 1) != reports[1].get("evaluation_version", 1):
         print("注意：判分或执行规则不同，分数变化不能直接解释为模型能力提升。")
