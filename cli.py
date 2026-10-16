@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import time
 import math
 import sys
@@ -57,6 +58,31 @@ def _status_color(status):
     if status in {"unsupported", "blocked", "plan_failed", "execution_failed", "failed", "audit_failed"}:
         return RED
     return YELLOW
+
+
+_TASK_SERIAL = 0
+
+
+def _rule_width():
+    return max(16, min(shutil.get_terminal_size(fallback=(72, 20)).columns, 92))
+
+
+def _rule(character="─", color=GRAY):
+    print(_paint(character * _rule_width(), color))
+
+
+def _section(number, title):
+    print()
+    _rule()
+    print(_paint(f"{number:02d} / {title}", BOLD, CYAN))
+
+
+def _task_end(number, status):
+    color = _status_color(status)
+    _rule("━", color)
+    print(_paint(f"任务 {number:02d} 结束 · {_STATUS_NAMES.get(status, status)}", BOLD, color))
+    _rule("━", color)
+    print("\n\n", end="")
 
 
 def _remember_task(engine: Engine, mode: str, user_input: str, cwd: str,
@@ -183,16 +209,19 @@ _STATUS_NAMES["no_matches"] = "没有匹配结果"
 _STATUS_NAMES["accepted"] = "审查通过，尚未执行"
 
 
-def show_preview(prepared):
-    print(_paint(f"工作目录：{prepared['cwd']}", GRAY))
+def show_preview(prepared, *, show_cwd=True, request=""):
+    if show_cwd:
+        print(_paint(f"工作目录：{prepared['cwd']}", GRAY))
     for action in prepared["actions"]:
         print("\n" + _paint(f"第 {action['step']} 步：{_OPERATION_NAMES[action['operation']]}", BOLD))
-        if action["explanation"]:
+        if action["explanation"] and action["explanation"] != request:
             print(f"  说明：{action['explanation']}")
         if action.get("candidate_argv"):
             print("\n  候选命令：")
             print(_paint(f"    {action['command']}", CYAN))
-            print(_paint(f"  命令解释：{action['candidate_explanation']}\n  执行方式：模型命令，受审查参数数组", GRAY))
+            if action["candidate_explanation"] != action["explanation"]:
+                print(_paint(f"  命令解释：{action['candidate_explanation']}", GRAY))
+            print(_paint("  执行方式：模型命令，受审查参数数组", GRAY))
             review = action["review"]
             text = "通过（尚未执行）" if review == "accepted" else "拒绝（未执行）" if review == "rejected" else review
             print(_paint(f"  审查：{text}", GREEN if review == "accepted" else RED if review == "rejected" else YELLOW))
@@ -266,6 +295,16 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     excluded = [audit_path] if isinstance(audit_path, (str, os.PathLike)) else []
     if os.environ.get("NL2SHELL_LOG_JSON"):
         excluded.append(Path(os.environ["NL2SHELL_LOG_JSON"]).expanduser())
+    global _TASK_SERIAL
+    _TASK_SERIAL += 1
+    task_number = _TASK_SERIAL
+    result_section_printed = False
+
+    def show_result_section():
+        nonlocal result_section_printed
+        if not result_section_printed:
+            _section(3, "执行与验证")
+            result_section_printed = True
 
     def ask(message):
         try:
@@ -312,11 +351,13 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             detail = f"历史记录保存失败；请保留本次输出：{error}"
             history.last_record.update(status=status, block_reason=detail)
         _remember_task(engine, mode, user_input, cwd, plan, status, executed)
+        show_result_section()
         print("\n" + _paint("最终验证", BOLD))
         print(_paint(f"任务结果：{_STATUS_NAMES.get(status, status)}", BOLD, _status_color(status)))
         print(_paint("执行状态：" + ("已执行，请核对各步结果" if executed else "未执行"), GRAY))
         if detail:
             print(_paint(f"说明：{detail}", _status_color(status)))
+        _task_end(task_number, status)
         return status
 
     def diagnose(outcome):
@@ -349,7 +390,12 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             print(_paint("写操作可能已有部分修改。请核对已完成项；系统不会重放任务。", YELLOW))
         return diagnosis
 
-    print("\n" + _paint(f"任务：{user_input}", BOLD))
+    print("\n\n")
+    _rule("━", CYAN)
+    print(_paint(f"任务 {task_number:02d}", BOLD, CYAN))
+    print(_paint(f"任务：{user_input}", BOLD))
+    print(_paint(f"工作目录：{cwd}", GRAY))
+    _rule("━", CYAN)
     try:
         if user_input.startswith("/restore "):
             plan = TaskPlan((TaskStep(operation="restore", parameters={"trash_id": user_input.split(maxsplit=1)[1]}),))
@@ -402,8 +448,8 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                       "execution_state": "not_started", "failure_phase": "preparation",
                       "error_type": type(error).__name__, "error_number": getattr(error, "errno", None)})
         return finish("blocked", str(error))
-    print("\n" + _paint("任务预览：", BOLD))
-    show_preview(prepared)
+    _section(1, "执行预览")
+    show_preview(prepared, show_cwd=False, request=user_input)
     if mode == PREVIEW:
         return finish("preview")
     if isinstance(executor, DockerExecutor) and not prepared["read_only"]:
@@ -411,6 +457,11 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     if mode == BATCH and not prepared["read_only"]:
         return finish("cancelled", "批处理只支持只读任务，文件修改需要人工确认")
     automatic = prepared["read_only"] and (mode == BATCH or assume_yes)
+    _section(2, "等待确认" if not automatic else "执行授权")
+    if automatic:
+        print(_paint("只读任务：按当前运行参数跳过人工确认。", GRAY))
+    else:
+        print(_paint("请核对上方操作和文件清单。只有输入 yes 才会执行。", YELLOW))
     for _ in range(3):
         if not automatic:
             if ask(_paint("\n是否执行以上操作？请输入 yes 确认 > ", YELLOW)).lower() != "yes":
@@ -430,7 +481,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         if mode == BATCH:
             return finish("blocked", "文件清单已变化，批处理不能重新确认")
         print(_paint("\n文件或目标名称已变化，请重新确认：", YELLOW))
-        show_preview(prepared)
+        show_preview(prepared, show_cwd=False, request=user_input)
     else:
         return finish("blocked", "文件持续变化，请稍后重试")
 
@@ -497,6 +548,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             attempt.update(status="blocked", review="rejected", reason=str(error))
             print(_paint(f"修复已停止：{error}", RED))
             return failed
+    show_result_section()
     for action in prepared["actions"]:
         try:
             outcome = run_action(prepared, action)
@@ -704,8 +756,10 @@ def main(input_session=None, args=None) -> None:
             last_cwd = cwd
             if warning:
                 print(_paint(warning, YELLOW))
-            print("\n" + _paint(f"工作目录：{cwd}", GRAY))
+            print("\n\n")
+            _rule()
             print(_paint("新任务", BOLD))
+            print(_paint(f"工作目录：{cwd}", GRAY))
             user_input = input_session.prompt("你想做什么？> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n再见！")
