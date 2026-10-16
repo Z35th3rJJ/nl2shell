@@ -36,8 +36,27 @@ from core.error_analysis import assess_failure, safe_advice
 
 load_dotenv(ENV_PATH)
 
-RED, YELLOW, GREEN, BOLD, RESET = "\033[91m", "\033[93m", "\033[92m", "\033[1m", "\033[0m"
+RED, YELLOW, GREEN, CYAN, GRAY, BOLD, RESET = "\033[91m", "\033[93m", "\033[92m", "\033[96m", "\033[90m", "\033[1m", "\033[0m"
 BATCH = "batch"
+
+
+def _paint(text, *styles):
+    if (not sys.stdout.isatty() or "NO_COLOR" in os.environ
+            or os.environ.get("TERM") == "dumb"):
+        return text
+    if os.name == "nt" and not (os.environ.get("WT_SESSION") or os.environ.get("ANSICON")
+                                or os.environ.get("ConEmuANSI") == "ON"
+                                or os.environ.get("TERM", "").startswith(("xterm", "vt100", "ansi", "screen", "tmux"))):
+        return text
+    return "".join(styles) + text + RESET
+
+
+def _status_color(status):
+    if status in {"verified", "no_matches"}:
+        return GREEN
+    if status in {"unsupported", "blocked", "plan_failed", "execution_failed", "failed", "audit_failed"}:
+        return RED
+    return YELLOW
 
 
 def _remember_task(engine: Engine, mode: str, user_input: str, cwd: str,
@@ -161,60 +180,76 @@ _STATUS_NAMES = {"verified": "已验证成功", "preview": "仅预览", "needs_c
                  "interrupted": "已中断", "audit_failed": "记录保存失败", "not_executed": "未执行"}
 _STATUS_NAMES.update(failed="执行失败", pending="未执行", executing="执行中")
 _STATUS_NAMES["no_matches"] = "没有匹配结果"
+_STATUS_NAMES["accepted"] = "审查通过，尚未执行"
 
 
 def show_preview(prepared):
-    print(f"工作目录：{prepared['cwd']}")
+    print(_paint(f"工作目录：{prepared['cwd']}", GRAY))
     for action in prepared["actions"]:
-        print(f"第 {action['step']} 步：{_OPERATION_NAMES[action['operation']]}")
+        print("\n" + _paint(f"第 {action['step']} 步：{_OPERATION_NAMES[action['operation']]}", BOLD))
         if action["explanation"]:
-            print(f"说明：{action['explanation']}")
+            print(f"  说明：{action['explanation']}")
         if action.get("candidate_argv"):
-            print(f"候选命令：{action['command']}\n命令解释：{action['candidate_explanation']}\n执行方式：模型命令，受审查参数数组\n审查：{action['review']}")
+            print("\n  候选命令：")
+            print(_paint(f"    {action['command']}", CYAN))
+            print(_paint(f"  命令解释：{action['candidate_explanation']}\n  执行方式：模型命令，受审查参数数组", GRAY))
+            review = action["review"]
+            text = "通过（尚未执行）" if review == "accepted" else "拒绝（未执行）" if review == "rejected" else review
+            print(_paint(f"  审查：{text}", GREEN if review == "accepted" else RED if review == "rejected" else YELLOW))
         else:
-            print("执行方式：受保护的 Python 工具")
+            print(_paint("  执行方式：受保护的 Python 工具", GRAY))
         if "path" in action["parameters"]:
             scope = f"范围：{action['parameters']['path']}"
             if "recursive" in action["parameters"]:
                 scope += "；" + ("包含子目录" if action["parameters"]["recursive"] else "当前层")
-            print(scope)
+            print(_paint("  " + scope, GRAY))
         p = action["parameters"]
         if "pattern" in p:
-            print(f"匹配条件：{p['pattern']}")
+            print(_paint(f"  匹配条件：{p['pattern']}", GRAY))
         if "modified_within_days" in p:
-            print(f"修改时间：最近 {p['modified_within_days']} 天")
+            print(_paint(f"  修改时间：最近 {p['modified_within_days']} 天", GRAY))
         if "size_gt_bytes" in p:
-            print(f"大小条件：大于 {p['size_gt_bytes']} 字节")
+            print(_paint(f"  大小条件：大于 {p['size_gt_bytes']} 字节", GRAY))
         if action["operation"] == "read_text":
-            print(f"查看范围：{'前' if p['end'] == 'head' else '后'} {p['lines']} 行")
+            print(_paint(f"  查看范围：{'前' if p['end'] == 'head' else '后'} {p['lines']} 行", GRAY))
         if action["operation"] == "text_stats":
-            print("统计内容：" + {"lines": "行数", "words": "单词数", "bytes": "字节数"}[p["metric"]])
+            print(_paint("  统计内容：" + {"lines": "行数", "words": "单词数", "bytes": "字节数"}[p["metric"]], GRAY))
         if action["files"]:
-            print(f"找到 {len(action['files'])} 个文件：")
+            print(f"  找到 {len(action['files'])} 个文件：")
             for name in action["files"]:
-                print(f"  {name}")
+                print(_paint(f"    {name}", GRAY))
         for item in action["items"]:
-            print(f"  {item.get('source', '新建')} → {item['destination']}")
+            print(_paint(f"    {item.get('source', '新建')} → {item['destination']}", GRAY))
         if action["operation"] == "system_info":
-            print("查询：" + {"disk": "磁盘空间", "memory": "内存使用", "system": "系统信息"}[action["parameters"]["query"]])
+            print("  查询：" + {"disk": "磁盘空间", "memory": "内存使用", "system": "系统信息"}[action["parameters"]["query"]])
         if not action["items"] and action["operation"] not in {"system_info", "list_trash"}:
-            print("本步骤不修改文件。")
+            print(_paint("  本步骤不修改文件。", GRAY))
 
 
 def show_outcome(outcome):
-    print(f"第 {outcome['step']} 步：{_STATUS_NAMES.get(outcome['status'], outcome['status'])}，{outcome['detail']}")
+    color = _status_color(outcome["status"])
+    print("\n" + _paint(f"第 {outcome['step']} 步：{_STATUS_NAMES.get(outcome['status'], outcome['status'])}", BOLD, color))
+    print(_paint(f"  {outcome['detail']}", GRAY))
+    if outcome.get("actual_argv"):
+        print("  实际命令：")
+        print(_paint("    " + shlex.join(outcome["actual_argv"]), CYAN))
     if "count" in outcome:
-        print(f"文件数量：{outcome['count']}")
+        print(f"  文件数量：{outcome['count']}")
     if outcome.get("stdout"):
+        print(_paint("  命令输出：", GRAY))
         print(outcome["stdout"].rstrip())
+    if outcome.get("stderr"):
+        print(_paint("  错误输出：", RED))
+        print(outcome["stderr"].rstrip())
     for entry in outcome.get("entries", []):
-        print(f"{entry['id']} | {entry['original']} | {entry.get('timestamp', '')}")
+        print(_paint(f"  {entry['id']} | {entry['original']} | {entry.get('timestamp', '')}", GRAY))
     if outcome["operation"] == "list_trash" and not outcome.get("entries"):
-        print("回收区为空。")
+        print(_paint("  回收区为空。", GRAY))
     for item in outcome.get("items", []):
-        print(f"  {item.get('source', '新建')} → {item['destination']}：{_STATUS_NAMES.get(item['status'], item['status'])}")
+        print(_paint(f"  {item.get('source', '新建')} → {item['destination']}", GRAY))
+        print(_paint(f"    {_STATUS_NAMES.get(item['status'], item['status'])}", _status_color(item["status"])))
         if "trash_id" in item:
-            print(f"  恢复编号：{item['trash_id']}")
+            print(_paint(f"    恢复编号：{item['trash_id']}", GRAY))
 
 
 def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStore,
@@ -277,7 +312,11 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             detail = f"历史记录保存失败；请保留本次输出：{error}"
             history.last_record.update(status=status, block_reason=detail)
         _remember_task(engine, mode, user_input, cwd, plan, status, executed)
-        print(f"任务结果：{_STATUS_NAMES.get(status, status)}" + (f"，{detail}" if detail else ""))
+        print("\n" + _paint("最终验证", BOLD))
+        print(_paint(f"任务结果：{_STATUS_NAMES.get(status, status)}", BOLD, _status_color(status)))
+        print(_paint("执行状态：" + ("已执行，请核对各步结果" if executed else "未执行"), GRAY))
+        if detail:
+            print(_paint(f"说明：{detail}", _status_color(status)))
         return status
 
     def diagnose(outcome):
@@ -304,11 +343,13 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         else:
             diagnosis["advice"] = "；".join(diagnosis["checks"])
         diagnoses.append(diagnosis)
-        print(f"原因：{diagnosis['summary']}\n建议：{diagnosis['advice']}")
+        print(_paint(f"\n原因：{diagnosis['summary']}", RED))
+        print(_paint(f"建议：{diagnosis['advice']}", GRAY))
         if not diagnosis["read_only"]:
-            print("写操作可能已有部分修改。请核对已完成项；系统不会重放任务。")
+            print(_paint("写操作可能已有部分修改。请核对已完成项；系统不会重放任务。", YELLOW))
         return diagnosis
 
+    print("\n" + _paint(f"任务：{user_input}", BOLD))
     try:
         if user_input.startswith("/restore "):
             plan = TaskPlan((TaskStep(operation="restore", parameters={"trash_id": user_input.split(maxsplit=1)[1]}),))
@@ -322,7 +363,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                 break
             if mode in {BATCH, PREVIEW}:
                 return finish("needs_clarification", plan.clarification)
-            answer = ask(f"{plan.clarification}\n你的回答> ")
+            answer = ask(_paint(f"\n{plan.clarification}\n你的回答> ", YELLOW))
             if not answer:
                 return finish("needs_clarification", plan.clarification)
             clarifications.append(f"问题：{plan.clarification}；用户回答：{answer}")
@@ -361,7 +402,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                       "execution_state": "not_started", "failure_phase": "preparation",
                       "error_type": type(error).__name__, "error_number": getattr(error, "errno", None)})
         return finish("blocked", str(error))
-    print("任务预览：")
+    print("\n" + _paint("任务预览：", BOLD))
     show_preview(prepared)
     if mode == PREVIEW:
         return finish("preview")
@@ -372,7 +413,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     automatic = prepared["read_only"] and (mode == BATCH or assume_yes)
     for _ in range(3):
         if not automatic:
-            if ask("是否执行以上操作？请输入 yes 确认 > ").lower() != "yes":
+            if ask(_paint("\n是否执行以上操作？请输入 yes 确认 > ", YELLOW)).lower() != "yes":
                 return finish("cancelled")
         try:
             check_agent()
@@ -388,7 +429,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         automatic = False
         if mode == BATCH:
             return finish("blocked", "文件清单已变化，批处理不能重新确认")
-        print("文件或目标名称已变化，请重新确认：")
+        print(_paint("\n文件或目标名称已变化，请重新确认：", YELLOW))
         show_preview(prepared)
     else:
         return finish("blocked", "文件持续变化，请稍后重试")
@@ -401,13 +442,13 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                      **({"agent_step": True} if agent_context is not None else {}))
     except OSError as error:
         history.last_record.update(status="audit_failed", block_reason=str(error))
-        print(f"无法保存执行记录，操作已停止：{error}")
+        print(_paint(f"无法保存执行记录，操作已停止：{error}", RED))
         return "audit_failed"
     deadline = time.monotonic() + timeout_seconds if agent_context is None else agent_context["deadline"]
     def repair(action, failed, diagnosis):
         nonlocal repair_used
         if repair_used and diagnosis is not None and diagnosis["repair_eligible"]:
-            print("本任务的一次修复预算已用完，已停止。")
+            print(_paint("本任务的一次修复预算已用完，已停止。", YELLOW))
         if (repair_used or not bash_query or diagnosis is None or not diagnosis["repair_eligible"]
                 or mode == BATCH or time.monotonic() >= deadline):
             return failed
@@ -431,9 +472,9 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                 attempt["generation_attempts"] = list(engine.command_attempts)
             review_commands(current, payload)
             attempt["review"] = "accepted"
-            print("唯一一次修复候选（只执行失败的当前步骤）：")
+            print("\n" + _paint("唯一一次修复候选（只执行失败的当前步骤）：", BOLD))
             show_preview(current)
-            if ask("是否执行这一次只读修复？请输入 yes 确认 > ").lower() != "yes":
+            if ask(_paint("\n是否执行这一次只读修复？请输入 yes 确认 > ", YELLOW)).lower() != "yes":
                 attempt["status"] = "cancelled"
                 return failed
             checked = prepare_queries(plan, cwd, now=prepared["now"],
@@ -447,14 +488,14 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                          **({"agent_step": True} if agent_context is not None else {}))
             repaired = run_action(checked, checked["actions"][action["step"] - 1])
             attempt.update(status=repaired["status"], executed=repaired["executed"], outcome=repaired)
-            print("修复执行结果：")
+            print("\n" + _paint("修复执行结果：", BOLD))
             show_outcome(repaired)
             if repaired["status"] not in {"verified", "no_matches"}:
                 diagnose(repaired)
             return repaired
         except (ValueError, TypeError, RuntimeError, OSError) as error:
             attempt.update(status="blocked", review="rejected", reason=str(error))
-            print(f"修复已停止：{error}")
+            print(_paint(f"修复已停止：{error}", RED))
             return failed
     for action in prepared["actions"]:
         try:
@@ -608,25 +649,25 @@ def main(input_session=None, args=None) -> None:
     try:
         settings = load_settings()
     except ValueError as error:
-        print(f"{RED}配置错误：{error}{RESET}")
+        print(_paint(f"配置错误：{error}", RED))
         return
     try:
         executor = create_executor()
     except ValueError as error:
-        print(f"{RED}执行后端配置错误：{error}{RESET}")
+        print(_paint(f"执行后端配置错误：{error}", RED))
         return
     engine, history = Engine(), HistoryStore()
     if args.batch:
         try:
             run_batch(engine, executor, history, Path(args.batch), args.timeout)
         except (OSError, ValueError) as error:
-            print(f"{RED}批量任务失败：{error}{RESET}")
+            print(_paint(f"批量任务失败：{error}", RED))
         return
 
     if args.task:
         cwd, warning = recover_working_directory()
         if warning and not args.json:
-            print(f"{YELLOW}{warning}{RESET}")
+            print(_paint(warning, YELLOW))
         mode = PREVIEW if args.preview else settings.run_mode
         if getattr(args, "agent", False):
             from core.agent import execute_agent
@@ -653,15 +694,19 @@ def main(input_session=None, args=None) -> None:
     mode = settings.run_mode
     print_diagnostics(executor, only_failures=True)
     input_session = input_session or create_input_session()
-    print(f"{BOLD}智能 Shell 助手{RESET} | {mode_name(mode)} | 输入 /help 查看命令")
+    print("\n" + _paint("智能 Shell 助手", BOLD, CYAN))
+    print(f"运行方式：{mode_name(mode)}")
+    print(_paint("输入中文需求开始任务；输入 /help 查看命令，/exit 退出。", GRAY))
     last_cwd, _ = recover_working_directory()
     while True:
         try:
             cwd, warning = recover_working_directory(last_cwd)
             last_cwd = cwd
             if warning:
-                print(f"{YELLOW}{warning}{RESET}")
-            user_input = input_session.prompt(f"\n[{cwd}]\n你想做什么？> ").strip()
+                print(_paint(warning, YELLOW))
+            print("\n" + _paint(f"工作目录：{cwd}", GRAY))
+            print(_paint("新任务", BOLD))
+            user_input = input_session.prompt("你想做什么？> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n再见！")
             break
