@@ -361,6 +361,63 @@ def test_required_core_action_is_checked_and_can_be_corrected(monkeypatch, tmp_p
     assert plan.status == "ready" and plan.steps[0].operation == operation
 
 
+def test_directory_browse_retries_unrequested_path_query(monkeypatch, tmp_path, intent_contract):
+    import json
+    from core.engine import Engine
+    intent_contract("list_directory")
+    listing = {"operation": "list_directory", "parameters": {"path": ".", "include_hidden": False}}
+    responses = iter([json.dumps({"status": "ready", "steps": [
+        {"operation": "working_directory", "parameters": {}}, listing]}),
+        json.dumps({"status": "ready", "steps": [listing]})])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(responses))
+    engine = Engine(ssh_hosts=[])
+    value = engine.generate_task_plan("我看看我现在所在目录有哪些文件", str(tmp_path))
+    assert [step.operation for step in value.steps] == ["list_directory"]
+    assert len(engine.plan_attempts) == 2
+    assert "working_directory" in str(engine.plan_attempts[0]["validation_errors"])
+
+
+def test_directory_browse_keeps_explicit_path_and_multiple_actions(monkeypatch, tmp_path, intent_contract):
+    import json
+    from core.engine import Engine
+    (tmp_path / "backup").mkdir()
+    intent_contract("working_directory", "list_directory")
+    raw = json.dumps({"status": "ready", "steps": [
+        {"operation": "working_directory", "parameters": {}},
+        {"operation": "list_directory", "parameters": {"path": str(tmp_path / "backup"), "include_hidden": True}}]})
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: raw)
+    engine = Engine(ssh_hosts=[])
+    value = engine.generate_task_plan("先显示当前路径，再列出 backup 的内容，包括隐藏项", str(tmp_path))
+    assert [step.operation for step in value.steps] == ["working_directory", "list_directory"]
+    assert value.steps[1].parameters == {"path": "backup", "include_hidden": True}
+    assert len(engine.plan_attempts) == 1
+
+
+def test_model_plan_missing_field_does_not_blame_user(monkeypatch, tmp_path, intent_contract):
+    from core.engine import Engine
+    intent_contract("list_directory")
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: reply("list_directory", path="."))
+    with pytest.raises(ValueError, match="模型输出") as error:
+        Engine(ssh_hosts=[]).generate_task_plan("列出当前目录内容", str(tmp_path))
+    assert "必须向用户追问" not in str(error.value)
+
+
+def test_explicit_browsing_of_two_directories_keeps_both_steps(monkeypatch, tmp_path, intent_contract):
+    import json
+    from core.engine import Engine
+    intent_contract("list_directory")
+    for name in ("backup", "archive"):
+        (tmp_path / name).mkdir()
+    raw = json.dumps({"status": "ready", "steps": [
+        {"operation": "list_directory", "parameters": {"path": name, "include_hidden": False}}
+        for name in ("backup", "archive")]})
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: raw)
+    engine = Engine(ssh_hosts=[])
+    value = engine.generate_task_plan("先列出 backup 的内容，再列出 archive 的内容", str(tmp_path))
+    assert [step.parameters["path"] for step in value.steps] == ["backup", "archive"]
+    assert len(engine.plan_attempts) == 1
+
+
 @pytest.mark.parametrize("forbidden", ["删除", "改名", "创建文件", "创建目录", "整理", "查看系统信息"])
 def test_negated_core_actions_do_not_require_steps(monkeypatch, tmp_path, forbidden):
     from core.engine import Engine

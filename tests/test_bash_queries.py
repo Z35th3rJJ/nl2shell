@@ -325,3 +325,219 @@ def test_preview_displays_program_checked_conditions(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "最近 7 天" in output and "大于 10 字节" in output and "*.txt" in output
     assert "候选命令" in output and "模型命令" in output
+
+
+def reference_json(value):
+    return json.dumps({"status": "ready", "steps": [
+        {"operation": s.operation, "parameters": s.parameters} for s in value.steps]})
+
+
+@pytest.mark.parametrize("user_input", ["我看看有哪些文件", "我看看这个目录有哪些文件",
+                                     "我看看我现在所在目录有哪些文件"])
+def test_directory_default_path_uses_actual_fixture(monkeypatch, tmp_path, user_input):
+    from core.engine import _normalize_paths
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "note.txt").write_text("data", encoding="utf-8")
+    (tmp_path / "backup").mkdir()
+    (tmp_path / ".hidden").write_text("hidden", encoding="utf-8")
+    value = _normalize_paths(plan("list_directory", path=".", include_hidden=False), os.getcwd())
+    prepared = prepare_queries(value, os.getcwd())
+    responses = iter([reference_json(value), json.dumps(candidates(prepared))])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(responses))
+    assert Engine(ssh_hosts=[]).generate_bash_commands(user_input, os.getcwd(), value, prepared, []) == candidates(prepared)
+    assert Path(prepared["cwd"]) == tmp_path.resolve()
+    assert prepared["actions"][0]["parameters"]["path"] == "."
+    assert prepared["actions"][0]["_expected"] == ["backup", "note.txt"]
+
+
+def test_reference_missing_hidden_field_gets_one_isolated_format_correction(monkeypatch, tmp_path):
+    value = plan("list_directory", path=".", include_hidden=False)
+    prepared = prepare_queries(value, str(tmp_path))
+    incomplete = {"status": "ready", "steps": [{"operation": "list_directory", "parameters": {"path": "."}}]}
+    responses = iter([json.dumps(incomplete), reference_json(value), json.dumps(candidates(prepared))])
+    calls = []
+    def reply(messages, **kwargs):
+        calls.append([dict(message) for message in messages])
+        return next(responses)
+    monkeypatch.setattr("core.engine.chat", reply)
+    engine = Engine(ssh_hosts=[])
+    engine.request_intent = {"operations": ["SENTINEL_OTHER_PLAN"]}
+    assert engine.generate_bash_commands("我看看这个目录有哪些文件", str(tmp_path), value, prepared, []) == candidates(prepared)
+    assert len(calls) == 3
+    assert json.loads(calls[0][1]["content"]) == {
+        "cwd": str(tmp_path), "request": "我看看这个目录有哪些文件", "answers": []}
+    correction = "\n".join(message["content"] for message in calls[1])
+    assert "SENTINEL_OTHER_PLAN" not in correction and "commands" not in correction
+    assert "格式" in correction and "语义" in correction
+    references = [r for r in engine.command_attempts if r["phase"] == "independent_requirements"]
+    assert len(references) == 2
+    assert all(set(r) == {"phase", "raw_output", "review"} for r in references)
+    assert "格式" in references[0]["review"] and references[1]["review"] == "accepted"
+    assert json.loads(references[0]["raw_output"]) == incomplete
+
+
+@pytest.mark.parametrize("second", ["{", reference_json(plan("list_directory", path="."))])
+def test_reference_format_correction_stops_after_second_invalid_output(monkeypatch, tmp_path, second):
+    value = plan("list_directory", path=".", include_hidden=False)
+    replies = iter([reference_json(plan("list_directory", path=".")), second])
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or next(replies))
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="独立参考生成失败") as error:
+        engine.generate_bash_commands("列目录", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+    assert "必须向用户追问" not in str(error.value)
+    assert len(calls) == len(engine.command_attempts) == 2
+
+
+@pytest.mark.parametrize("corrected", [
+    plan("list_directory", path="backup", include_hidden=False),
+    plan("find_files", path=".", recursive=False),
+    TaskPlan((TaskStep(operation="working_directory"),
+              TaskStep(operation="list_directory", parameters={"path": ".", "include_hidden": False}))),
+])
+def test_reference_format_correction_cannot_change_existing_semantics(monkeypatch, tmp_path, corrected):
+    (tmp_path / "backup").mkdir()
+    value = plan("list_directory", path=".", include_hidden=False)
+    replies = iter([reference_json(plan("list_directory", path=".")), reference_json(corrected)])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(replies))
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="语义"):
+        engine.generate_bash_commands("列目录", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+    assert len(engine.command_attempts) == 2
+
+
+@pytest.mark.parametrize("key,new_value", [("path", "backup"), ("recursive", True),
+    ("pattern", "*.log"), ("modified_within_days", 8), ("size_gt_bytes", 20)])
+def test_reference_missing_status_does_not_allow_filter_changes(monkeypatch, tmp_path, key, new_value):
+    (tmp_path / "backup").mkdir()
+    parameters = {"path": ".", "recursive": False, "pattern": "*.txt", "modified_within_days": 7, "size_gt_bytes": 10}
+    value = plan("find_files", **parameters)
+    incomplete = json.loads(reference_json(value))
+    del incomplete["status"]
+    changed = plan("find_files", **{**parameters, key: new_value})
+    replies = iter([json.dumps(incomplete), reference_json(changed)])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(replies))
+    with pytest.raises(ValueError, match="语义"):
+        Engine(ssh_hosts=[]).generate_bash_commands("按全部条件筛选普通文件", str(tmp_path), value,
+                                                  prepare_queries(value, str(tmp_path)), [])
+
+
+@pytest.mark.parametrize("reference", [
+    plan("list_directory", path="backup", include_hidden=False),
+    plan("list_directory", path=".", include_hidden=True),
+    plan("find_files", path=".", recursive=False),
+])
+def test_valid_reference_mismatch_never_starts_format_retry(monkeypatch, tmp_path, reference):
+    (tmp_path / "backup").mkdir()
+    value = plan("list_directory", path=".", include_hidden=False)
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or reference_json(reference))
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="独立需求"):
+        engine.generate_bash_commands("列目录", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+    assert len(calls) == 1 and engine.command_attempts[0]["review"] == "rejected"
+    assert not same_query_plan(value, reference)
+
+
+def test_reference_path_rejection_is_not_a_format_error(monkeypatch, tmp_path):
+    value = plan("list_directory", path=".", include_hidden=False)
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
+                        calls.append(args) or reference_json(plan("list_directory", path="..", include_hidden=False)))
+    with pytest.raises(ValueError, match="路径"):
+        Engine(ssh_hosts=[]).generate_bash_commands("列目录", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("operation,parameters", [
+    ("find_files", {"path": ".", "recursive": False, "include_hidden": False}),
+    ("find_files", {"path": ".", "recursive": False, "type": "directory"}),
+    ("list_directory", {"path": ".", "include_hidden": False, "pattern": "*.txt"}),
+    ("list_directory", {"path": ".", "include_hidden": False, "recursive": True}),
+    ("working_directory", {"path": "."}),
+])
+def test_directory_parameter_boundaries_are_not_widened(operation, parameters):
+    with pytest.raises(ValueError):
+        parse_operation_plan(reference_json(plan(operation, **parameters)))
+
+
+def test_browsing_and_file_filtering_are_not_equivalent(tmp_path):
+    (tmp_path / "backup").mkdir()
+    (tmp_path / "note.txt").write_text("text", encoding="utf-8")
+    listing = plan("list_directory", path=".", include_hidden=False)
+    files = plan("find_files", path=".", recursive=False)
+    assert not same_query_plan(listing, files)
+    assert prepare_queries(listing, str(tmp_path))["actions"][0]["_expected"] == ["backup", "note.txt"]
+    assert prepare_queries(files, str(tmp_path))["actions"][0]["files"] == ["note.txt"]
+
+
+def test_reference_json_structure_correction_keeps_single_step(monkeypatch, tmp_path):
+    value = plan("list_directory", path=".", include_hidden=False)
+    prepared = prepare_queries(value, str(tmp_path))
+    malformed = json.loads(reference_json(value))
+    malformed["steps"] = malformed["steps"][0]
+    replies = iter([json.dumps(malformed), reference_json(value), json.dumps(candidates(prepared))])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(replies))
+    engine = Engine(ssh_hosts=[])
+    assert engine.generate_bash_commands("列目录", str(tmp_path), value, prepared, []) == candidates(prepared)
+    assert len(engine.command_attempts) == 3
+
+
+@pytest.mark.parametrize("raw", ["{", reference_json(plan("find_files", path=".", recursive=False, type="directory")),
+                                 reference_json(plan("list_directory", path=".", include_hidden="false"))])
+def test_reference_unverifiable_or_invalid_semantics_stop_without_retry(monkeypatch, tmp_path, raw):
+    value = plan("list_directory", path=".", include_hidden=False)
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or raw)
+    with pytest.raises(ValueError, match="独立参考生成失败"):
+        Engine(ssh_hosts=[]).generate_bash_commands("列目录", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+    assert len(calls) == 1
+
+
+def test_reference_correction_cannot_change_hidden_condition(monkeypatch, tmp_path):
+    value = plan("list_directory", path=".", include_hidden=True)
+    missing_path = reference_json(plan("list_directory", include_hidden=True))
+    changed = reference_json(plan("list_directory", path=".", include_hidden=False))
+    replies = iter([missing_path, changed])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(replies))
+    with pytest.raises(ValueError, match="语义"):
+        Engine(ssh_hosts=[]).generate_bash_commands("包括隐藏项", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+
+
+@pytest.mark.parametrize("optional", [{"pattern": "*.txt"}, {"modified_within_days": 7}, {"size_gt_bytes": 10}])
+def test_format_correction_cannot_add_optional_filter(monkeypatch, tmp_path, optional):
+    value = plan("find_files", path=".", recursive=False, **optional)
+    initial = json.loads(reference_json(plan("find_files", path=".", recursive=False)))
+    del initial["status"]
+    replies = iter([json.dumps(initial), reference_json(value)])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(replies))
+    with pytest.raises(ValueError, match="语义"):
+        Engine(ssh_hosts=[]).generate_bash_commands("筛选普通文件", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+@pytest.mark.parametrize("hidden", [False, True])
+def test_explicit_directory_path_does_not_fall_back_to_current_directory(tmp_path, absolute, hidden):
+    from core.engine import _normalize_paths
+    (tmp_path / "root-only.txt").write_text("root", encoding="utf-8")
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    (backup / "child-only.txt").write_text("child", encoding="utf-8")
+    (backup / ".hidden").write_text("hidden", encoding="utf-8")
+    value = _normalize_paths(plan("list_directory", path=str(backup) if absolute else "backup",
+                                  include_hidden=hidden), str(tmp_path))
+    action = prepare_queries(value, str(tmp_path))["actions"][0]
+    assert action["parameters"]["path"] == "backup"
+    assert (tmp_path / action["parameters"]["path"]).resolve() == backup.resolve()
+    assert (tmp_path / action["_required_argv"][-1]).resolve() == backup.resolve()
+    assert action["_expected"] == ([".hidden", "child-only.txt"] if hidden else ["child-only.txt"])
+
+
+def test_missing_reference_field_does_not_retry_an_unsafe_path(monkeypatch, tmp_path):
+    value = plan("list_directory", path=".", include_hidden=False)
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
+                        calls.append(args) or reference_json(plan("list_directory", path="..")))
+    with pytest.raises(ValueError, match="路径"):
+        Engine(ssh_hosts=[]).generate_bash_commands("列目录", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+    assert len(calls) == 1

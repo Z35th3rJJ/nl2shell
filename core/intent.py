@@ -12,8 +12,24 @@ REJECTION_REASONS = {
     "software_install": "当前版本不支持安装软件。",
     "permissions": "当前版本不支持修改权限。",
     "network": "当前版本不支持网络或远程操作。",
+    "directory_selection": "当前操作只支持目录内容列表或普通文件筛选，不能只查询文件夹或混合筛选文件与文件夹。",
     "unsupported_task": "当前版本不支持此类任务。",
 }
+
+
+DIRECTORY_RULES = """目录浏览规则：
+- 普通浏览目录内容使用 list_directory，包含当前层普通文件和文件夹。口语“有哪些文件”不表示只看普通文件。
+- 未指定浏览路径时使用 path="."，以当前工作目录为起点；明确指定目录时保留该目录，不能退回当前目录。
+- 普通浏览默认 include_hidden=false；明确要求隐藏项才为 true。list_directory 不接受筛选、对象类型或递归参数。
+- 明确只看普通文件或筛选普通文件时使用 find_files；保留 path、recursive 和全部明确筛选条件。
+- find_files 只返回普通文件，可选 pattern、modified_within_days、size_gt_bytes；不接受 include_hidden 或文件夹类型参数，可包含非受限隐藏普通文件。
+- 文件类型及名称用 pattern；时间只支持最近具体天数，大小只支持大于具体字节数。条件不能完整表达时停止并说明限制，不得删除条件。
+- 只查询文件夹、筛选文件夹、混合筛选文件与文件夹，现有操作不能完整表达，返回 unsupported。不能改成仅查普通文件。
+- 查看某个目录的内容是路径限定，不是只查询文件夹对象。混合浏览无筛选条件时可使用 list_directory。
+- 仅当用户明确查询当前路径时生成 working_directory，其参数为 {}。“我现在所在目录”只限定浏览路径，不增加该操作。
+- 用户明确要求多个操作时保留全部必要操作及明确顺序。明确递归仅能用于受支持的普通文件查询，不用目录列表代替。
+- 普通浏览及只读普通文件查询未指定深度时只看当前层。组合筛选或隐藏项条件不能准确表达时返回 unsupported，不缩小对象范围。
+"""
 
 
 _SYSTEM = """先独立理解用户希望得到的结果，只识别必要操作，不生成计划或命令。只输出 JSON。
@@ -51,10 +67,13 @@ read_text：查看指定文本文件的前几行或后几行。
 - 否定动作不列入 operations。明确的单个源文件、没有筛选条件且未要求查找时，额外输出 named_sources（用户原文中的路径列表）和 selection_required=false；不要额外列出 find_files。
 - 不确定动作是否明确时可输出 action_explicit=false；程序会要求追问，不能返回可执行计划。
 - unsupported 只输出 reason_code，不输出自由文本 reason。永久删除用 permanent_delete；脚本用 arbitrary_script；安装用 software_install；权限用 permissions；网络用 network；其他不支持任务用 unsupported_task。
+- 只查询文件夹或混合筛选文件与文件夹时，reason_code 使用 directory_selection。
 否定原件移动，但明确复制指定文件：{"status":"ready","operations":["copy_files"],"named_sources":["a.txt"],"selection_required":false}
 只指定对象但没有指定动作：{"status":"need_clarification","clarification":"您想查看、复制、移动、回收还是改名？"}
 分类示例（只示范动作，不补充参数）：
-看看某个目录有哪些文件：{"status":"ready","operations":["find_files"]}
+看看某个目录有哪些文件：{"status":"ready","operations":["list_directory"]}
+只看普通文件，或按名称、类型、大小、最近天数筛选普通文件：{"status":"ready","operations":["find_files"]}
+只列出目录中的文件夹：{"status":"unsupported","reason_code":"directory_selection"}
 列出目录内容（包括文件夹）：{"status":"ready","operations":["list_directory"]}
 显示当前工作目录：{"status":"ready","operations":["working_directory"]}
 搜索指定文件中的文本：{"status":"ready","operations":["search_text"]}
@@ -71,7 +90,7 @@ read_text：查看指定文本文件的前几行或后几行。
 我要一个保存报告的文件夹：{"status":"ready","operations":["create_directory"]}
 把不同类型的文件分到不同文件夹，原件都保留：{"status":"ready","operations":["organize_files"]}
 了解电脑的内存用量或磁盘剩余空间：{"status":"ready","operations":["system_info"]}
-"""
+""" + "\n" + DIRECTORY_RULES
 
 
 def analyze_request(user_input, answers, backend, attempts):

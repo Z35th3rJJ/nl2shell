@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 from .llm import chat
 from .ssh_config import load_ssh_hosts
-from .task_plan import TaskPlan, TaskStep, READ_OPERATIONS, parse_operation_plan, plan_payload
-from .intent import analyze_request
+from .task_plan import TaskPlan, TaskStep, READ_OPERATIONS, parse_operation_plan, plan_payload, validate_parameters
+from .intent import analyze_request, DIRECTORY_RULES
 from .redaction import redact_value
 from .operations import workspace_path
 
@@ -156,7 +156,7 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 - 最多三个步骤。不得输出 command、verification、Shell 命令或 Markdown。
 - 参数只填写用户明确提供或补充确认的条件。不要猜测文件名、目录、时间或整理规则。
 - find_files/count_files 参数：path、recursive（必填），可选 pattern、modified_within_days、size_gt_bytes。
-- 当前目录指当前层，recursive=false；用户明确包含子目录才用 true。没有说明查找范围时询问。
+- 当前目录指当前层，recursive=false；用户明确包含子目录才用 true。普通浏览与只读文件查询默认当前目录当前层；修改文件前的查找范围不明时询问。
 - 超过 10 MB 使用 size_gt_bytes=10000000；最近七天使用 modified_within_days=7。
 - 文件数量必须使用 count_files，不是查找或统计文件内部行数。
 - create_file/create_directory 参数：path。创建文件只能创建空文件，不得猜测内容。
@@ -198,7 +198,7 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 备份最近修改的文件：{"status":"need_clarification","clarification":"请说明时间范围、查找目录和备份目标目录。"}
 帮我整理这个目录：{"status":"need_clarification","clarification":"是否按文件类型整理？是否包含子目录？"}
 "最近"没有具体天数时必须追问，不得默认七天。没有复制目标时不得默认当前目录或 backup。不得输出示例占位文字作为拒绝原因。
-"""
+""" + "\n" + DIRECTORY_RULES
 
 
 def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str, required) -> list[str]:
@@ -211,11 +211,67 @@ def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str, required) -> li
     if required:
         for operation in sorted(operations - set(required) - READ_OPERATIONS):
             errors.append(f"计划包含用户未要求的写操作：{operation}")
+    if set(required) == {"list_directory"} and (operations - set(required)) & READ_OPERATIONS:
+        errors.append("目录浏览不得增加用户未要求的 working_directory 或其他只读操作")
     if "当前目录" in user_input and not any(word in user_input for word in ("子目录", "递归")):
         if any(step.operation in {"find_files", "count_files"} and
                step.parameters.get("recursive") is not False for step in plan.steps):
             errors.append("当前目录当前层不能递归，recursive 必须为 false")
     return errors
+
+
+def _model_output_error(error):
+    return str(error).replace("缺少关键操作参数，必须向用户追问", "模型输出缺少必要操作参数")
+
+
+def _reference_format_payload(raw):
+    """仅保留可核对语义的结构错误或缺字段；未知参数和非法值不重试。"""
+    from .bash_queries import QUERY_OPERATIONS
+    try:
+        value = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.I))
+        if (not isinstance(value, dict) or set(value) - {"status", "steps"}
+                or value.get("status", "ready") != "ready"):
+            return None
+        steps = value.get("steps")
+        if isinstance(steps, dict):
+            steps = [steps]
+            value["steps"] = steps
+        if not isinstance(steps, list) or not 1 <= len(steps) <= 3:
+            return None
+        for index, step in enumerate(steps):
+            if (not isinstance(step, dict) or set(step) - {"operation", "parameters", "explanation"}
+                    or step.get("operation") not in QUERY_OPERATIONS
+                    or not isinstance(step.get("parameters", {}), dict)
+                    or not isinstance(step.get("explanation", ""), str)):
+                return None
+            try:
+                validate_parameters(step["operation"], step.get("parameters", {}), index, [])
+            except ValueError as error:
+                if str(error) != "缺少关键操作参数，必须向用户追问":
+                    return None
+        return value
+    except (ValueError, TypeError):
+        return None
+
+
+def _same_reference_fields(before, after):
+    if isinstance(before, dict):
+        if "operation" in before and isinstance(after, dict) and "parameters" in after:
+            for key in set(after["parameters"]) - set(before.get("parameters", {})):
+                reduced = {name: value for name, value in after["parameters"].items() if name != key}
+                try:
+                    validate_parameters(after["operation"], reduced, 0, [])
+                except ValueError as error:
+                    if str(error) != "缺少关键操作参数，必须向用户追问":
+                        return False
+                else:
+                    return False
+        return isinstance(after, dict) and all(
+            key in after and _same_reference_fields(value, after[key]) for key, value in before.items())
+    if isinstance(before, list):
+        return isinstance(after, list) and len(before) == len(after) and all(
+            _same_reference_fields(left, right) for left, right in zip(before, after))
+    return type(before) is type(after) and before == after
 
 
 def _complete_copy_plan(plan, errors, user_input, cwd, answers, required):
@@ -376,7 +432,7 @@ class Engine:
                         return TaskPlan((), clarification=missing, status="need_clarification")
                 errors = _task_plan_errors(plan, user_input, cwd, required)
             except (ValueError, TypeError, OSError) as error:
-                errors = [str(error)]
+                errors = [_model_output_error(error)]
             record["validation_errors"] = redact_value(errors)
             if not errors:
                 return plan
@@ -454,13 +510,46 @@ class Engine:
         # 独立需求契约不读取候选计划，避免两者遗漏同一个条件而被自评放行。
         answers = [answer.split("用户回答：", 1)[-1].strip() for answer in clarifications]
         original = json.dumps({"cwd": cwd, "request": user_input, "answers": answers}, ensure_ascii=False)
-        record = {"phase": "independent_requirements"}
-        self.command_attempts.append(record)
-        required = json.dumps(self.request_intent.get("operations", []))
-        raw = chat([{"role": "system", "content": _AGENT_SYSTEM + "\n仅提取原始需求及用户回答中的条件，不检查文件事实。独立识别的必要操作为：" + required},
-                    {"role": "user", "content": original}], backend=self._backend, json_mode=True)
-        record["raw_output"] = redact_value(raw)
-        reference = _normalize_paths(parse_operation_plan(raw), cwd)
+        messages = [{"role": "system", "content": _AGENT_SYSTEM + "\n仅根据原始需求及用户回答独立提取条件，不检查文件事实。"},
+                    {"role": "user", "content": original}]
+        partial = None
+        for correction in range(2):
+            record = {"phase": "independent_requirements"}
+            self.command_attempts.append(record)
+            raw = chat(messages, backend=self._backend, json_mode=True)
+            record["raw_output"] = redact_value(raw)
+            try:
+                reference = parse_operation_plan(raw)
+            except (ValueError, TypeError) as error:
+                detail = _model_output_error(error)
+                record["review"] = redact_value("rejected: 参考格式错误：" + detail)
+                if not correction:
+                    partial = _reference_format_payload(raw)
+                    if partial is not None:
+                        try:
+                            _normalize_paths(TaskPlan(tuple(TaskStep(operation=s["operation"],
+                                parameters=s.get("parameters", {})) for s in partial["steps"])), cwd)
+                        except (ValueError, OSError) as path_error:
+                            record["review"] = redact_value("rejected: 参考路径检查失败：" + str(path_error))
+                            raise ValueError("独立参考路径检查失败：" + str(path_error)) from path_error
+                        messages.extend([{"role": "assistant", "content": raw}, {"role": "user", "content":
+                            "只允许一次格式修正：修正 JSON 结构或补齐缺失的必要字段。格式修正不等于语义修正。"
+                            "只依据原始需求、用户回答及统一默认值；已有有效语义字段不得改变。"
+                            "不得改变路径、文件范围、递归、隐藏项或筛选条件，不得增加操作。"
+                            "不能确认语义保持时停止，不得猜测。格式错误：" + detail}])
+                        continue
+                raise ValueError("独立参考生成失败（模型输出格式错误；未执行）：" + detail) from error
+            if partial is not None:
+                corrected = _reference_format_payload(raw)
+                if corrected is None or not _same_reference_fields(partial, corrected):
+                    record["review"] = "rejected: 格式修正改变原有语义"
+                    raise ValueError("独立参考格式修正改变原有语义；未生成或执行命令")
+            try:
+                reference = _normalize_paths(reference, cwd)
+            except (ValueError, OSError) as error:
+                record["review"] = redact_value("rejected: 参考路径检查失败：" + str(error))
+                raise ValueError("独立参考路径检查失败：" + str(error)) from error
+            break
         if not same_query_plan(plan, reference):
             record["review"] = "rejected"
             raise ValueError("计划与独立需求契约不一致，可能遗漏条件或扩大范围；未生成或执行命令")

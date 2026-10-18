@@ -14,6 +14,41 @@ from core.task_plan import TaskPlan
 from tests.test_cli_flow import History, engine_for, step
 
 
+@pytest.mark.parametrize("output_mode", ["text", "no_color", "json"])
+def test_reference_format_failure_has_correct_source_and_clean_output(terminal, monkeypatch, tmp_path, output_mode):
+    from core.engine import Engine
+    monkeypatch.setattr("core.intent.chat", lambda *args, **kwargs:
+                        json.dumps({"status": "ready", "operations": ["list_directory"]}))
+    listing = {"operation": "list_directory", "parameters": {"path": ".", "include_hidden": False}}
+    broken = {"operation": "list_directory", "parameters": {"path": "."}}
+    replies = iter(json.dumps({"status": "ready", "steps": [s]}) for s in [listing, broken, broken])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(replies))
+    engine, history, executor = Engine(ssh_hosts=[]), History(), Mock()
+    if output_mode == "no_color":
+        monkeypatch.setenv("NO_COLOR", "1")
+    with redirect_stdout(terminal):
+        if output_mode == "json":
+            monkeypatch.setattr(cli, "Engine", lambda: engine)
+            monkeypatch.setattr(cli, "HistoryStore", lambda: history)
+            monkeypatch.setattr(cli, "create_executor", lambda: executor)
+            monkeypatch.setattr(cli, "load_settings", lambda: AppSettings("confirm", True))
+            monkeypatch.setattr(cli, "recover_working_directory", lambda: (str(tmp_path), ""))
+            cli.main(args=argparse.Namespace(task="列出目录内容", batch=None, timeout=60, preview=False, yes=True, json=True))
+        else:
+            assert cli.execute_request(engine, executor, history, "列出目录内容", str(tmp_path), "confirm",
+                                       input_fn=lambda _: pytest.fail("参考格式失败不应向用户追问")) == "blocked"
+    text = terminal.getvalue()
+    if output_mode == "json":
+        assert json.loads(text) == cli.json_result(history.last_record, "blocked")
+    if output_mode != "text":
+        assert "\x1b" not in text
+    assert "独立参考生成失败" in text and "模型输出" in text
+    assert "必须向用户追问" not in text and "已追问" not in text
+    assert len(engine.command_attempts) == 2
+    assert not history.last_record["executed"]
+    executor.execute_query.assert_not_called()
+
+
 @pytest.fixture
 def terminal(monkeypatch):
     output = io.StringIO()

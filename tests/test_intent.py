@@ -134,3 +134,13 @@ def test_intent_review_repeats_original_request(monkeypatch, user_input, operati
     monkeypatch.setattr("core.intent.chat", reply)
     assert analyze_request(user_input, answers, "local", [])["operations"] == operations
     assert len(seen) == 2
+
+
+@pytest.mark.parametrize("user_input", ["只列出 backup 内的文件夹", "找出名称含 report 的文件和文件夹"])
+def test_directory_selection_refusal_explains_object_limit(monkeypatch, tmp_path, user_input):
+    monkeypatch.setattr("core.intent.chat", lambda *args, **kwargs: json.dumps({
+        "status": "unsupported", "reason_code": "directory_selection"}))
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: pytest.fail("不支持对象时不得生成计划"))
+    value = Engine(ssh_hosts=[]).generate_task_plan(user_input, str(tmp_path))
+    assert value.status == "unsupported" and not value.steps
+    assert "文件夹" in value.reason and "普通文件筛选" in value.reason
