@@ -94,8 +94,8 @@ def inspect_blob(name, mode, content):
     return findings
 
 
-def git(*args):
-    result = subprocess.run(["git", *args], capture_output=True, check=True)
+def git(*args, timeout=None):
+    result = subprocess.run(["git", *args], capture_output=True, check=True, timeout=timeout)
     return result.stdout
 
 
@@ -117,10 +117,35 @@ def entries(revision=None):
     return result
 
 
+def unpublished_commits(revisions):
+    remotes = git("remote").decode().splitlines()
+    if len(remotes) != 1:
+        raise ValueError("Publication requires one unambiguous remote")
+    urls = git("remote", "get-url", "--push", "--all", remotes[0]).decode().splitlines()
+    if len(urls) != 1:
+        raise ValueError("Publication requires one push destination")
+    refs = git("ls-remote", "--heads", "--", urls[0], timeout=30).decode().splitlines()
+    tips = set()
+    for line in refs:
+        fields = line.split()
+        if (len(fields) != 2 or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", fields[0]) is None
+                or not fields[1].startswith("refs/heads/")):
+            raise ValueError("Live remote branch references could not be verified")
+        tips.add(fields[0])
+    for tip in sorted(tips):
+        if git("cat-file", "-t", tip).strip() != b"commit":
+            raise ValueError("Live remote history must be fetched before publication")
+    return git("rev-list", "--reverse", *revisions,
+               *("^" + tip for tip in sorted(tips)), "--").decode().splitlines()
+
+
 def check(mode="staged", revisions=None):
     snapshots = []
     if mode == "commits":
-        commits = git("rev-list", "--reverse", *revisions, "--").decode().splitlines()
+        commits = unpublished_commits(revisions)
+        print(f"Unpublished commits to scan: {len(commits)}")
+        for commit in commits:
+            print(f"  {commit}")
         for commit in commits:
             names = git("diff-tree", "--root", "-m", "--no-commit-id", "--name-only",
                         "--diff-filter=ACMR", "-r", "-z", commit).split(b"\0")
@@ -159,7 +184,8 @@ def main():
     try:
         failures, count = check("commits" if args.commits else "tracked" if args.tracked else "staged",
                                 args.commits)
-    except (subprocess.CalledProcessError, ValueError, KeyError, UnicodeError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError,
+            ValueError, KeyError, UnicodeError):
         print("Upload check failed: Git data could not be checked. Nothing is approved.", file=sys.stderr)
         return 1
     if failures:
