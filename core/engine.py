@@ -535,7 +535,12 @@ class Engine:
         original = json.dumps({"cwd": cwd, "request": user_input, "answers": answers}, ensure_ascii=False)
         messages = [{"role": "system", "content": _AGENT_SYSTEM + "\n仅根据原始需求及用户回答独立提取条件，不检查文件事实。"
                      "独立参考同样遵守统一默认值：当前目录及未指定深度的只读查询使用当前层 recursive=false，"
-                     "不要仅为是否包含子目录而追问；用户明确要求递归时保留递归条件。"},
+                     "不要仅为是否包含子目录而追问；用户明确要求递归时保留递归条件。"
+                     "统一默认值是合法参数来源，不受只填写用户明确条件的限制；没有递归要求不属于缺少关键条件。"
+                     '独立提取示例：查找当前目录中名为 report.txt 的普通文件，应返回 '
+                     '{"status":"ready","steps":[{"operation":"find_files","parameters":'
+                     '{"path":".","recursive":false,"pattern":"report.txt"}}]}。'
+                     "示例文件名不能用于其他请求，必须逐字保留实际用户文件名。时间、行数、复制目标等没有默认值，仍须追问。"},
                     {"role": "user", "content": original}]
         partial = None
         for correction in range(2):
