@@ -540,7 +540,9 @@ class Engine:
                      '独立提取示例：查找当前目录中名为 report.txt 的普通文件，应返回 '
                      '{"status":"ready","steps":[{"operation":"find_files","parameters":'
                      '{"path":".","recursive":false,"pattern":"report.txt"}}]}。'
-                     "示例文件名不能用于其他请求，必须逐字保留实际用户文件名。时间、行数、复制目标等没有默认值，仍须追问。"},
+                     "示例文件名不能用于其他请求，必须逐字保留实际用户文件名。时间、行数、复制目标等没有默认值，仍须追问。"
+                     "文件名可以以 - 或 -- 开头，这是合法的字面文件名；find_files 的 pattern 应原样保留，"
+                     "不是命令选项，不得据此前缀拒绝、去掉前缀或改成通配符。命令参数安全由后续固定规则审核。"},
                     {"role": "user", "content": original}]
         partial = None
         for correction in range(2):
@@ -586,6 +588,10 @@ class Engine:
                         + original}])
                     continue
                 raise ValueError("独立参考仍要求澄清：" + detail + "；未生成或执行命令")
+            if reference.refused:
+                detail = redact_value(reference.reason)
+                record["review"] = "rejected: 独立参考拒绝生成：" + detail
+                raise ValueError("独立参考拒绝生成：" + detail + "；未生成或执行命令")
             try:
                 reference = _normalize_paths(reference, cwd)
             except (ValueError, OSError) as error:

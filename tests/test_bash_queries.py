@@ -723,3 +723,19 @@ def test_reference_review_and_format_correction_share_one_retry_budget(monkeypat
                                       value, prepare_queries(value, str(tmp_path)), [])
     assert len(calls) == 2
     assert all(record["phase"] == "independent_requirements" for record in engine.command_attempts)
+
+
+
+def test_reference_refusal_preserves_reason_and_never_generates_candidate(monkeypatch, tmp_path):
+    value = plan("find_files", path=".", recursive=False, pattern="--danger.txt")
+    raw = json.dumps({"status": "unsupported", "reason": "文件名以 -- 开头，不符合文件名规范"})
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or raw)
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="独立参考拒绝生成：文件名以 -- 开头"):
+        engine.generate_bash_commands("查找当前目录中名为 --danger.txt 的普通文件", str(tmp_path),
+                                      value, prepare_queries(value, str(tmp_path)), [])
+    assert len(calls) == 1
+    assert len(engine.command_attempts) == 1
+    assert engine.command_attempts[0]["raw_output"] == raw
+    assert "拒绝" in engine.command_attempts[0]["review"]
