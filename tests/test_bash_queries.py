@@ -628,3 +628,98 @@ def test_reference_default_keeps_path_operation_and_filter_checks(monkeypatch, t
         engine.generate_bash_commands("浏览目录", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
     assert len(calls) == 1
     assert all(record["phase"] == "independent_requirements" for record in engine.command_attempts)
+
+
+
+def test_reference_clarification_is_reviewed_once_without_reading_primary(monkeypatch, tmp_path):
+    (tmp_path / "--danger.txt").write_text("fixture", encoding="utf-8")
+    value = plan("find_files", path=".", recursive=False, pattern="--danger.txt")
+    prepared = prepare_queries(value, str(tmp_path))
+    question = json.dumps({"status": "need_clarification",
+                           "clarification": "是否需要查找当前目录及其子目录中的 --danger.txt 文件？"})
+    replies = iter([question, reference_json(value), json.dumps(candidates(prepared))])
+    calls = []
+    def reply(messages, **kwargs):
+        calls.append([dict(message) for message in messages])
+        return next(replies)
+    monkeypatch.setattr("core.engine.chat", reply)
+    engine = Engine(ssh_hosts=[])
+    engine.request_intent = {"operations": ["SENTINEL_OTHER_PLAN"]}
+    result = engine.generate_bash_commands("查找当前目录中名为 --danger.txt 的普通文件",
+                                           str(tmp_path), value, prepared, [])
+    review_commands(prepared, result)
+    assert len(calls) == 3
+    assert len(engine.command_attempts) == 3
+    assert engine.command_attempts[0]["raw_output"] == question
+    assert "澄清" in engine.command_attempts[0]["review"]
+    assert engine.command_attempts[1]["review"] == "accepted"
+    original = {"cwd": str(tmp_path), "request": "查找当前目录中名为 --danger.txt 的普通文件", "answers": []}
+    review = calls[1][-1]["content"]
+    assert review.endswith(json.dumps(original, ensure_ascii=False))
+    assert "recursive=false" in review and "关键条件" in review
+    assert "SENTINEL_OTHER_PLAN" not in review and '"plan"' not in review and '"commands"' not in review
+    argv = result["commands"][0]["argv"]
+    assert argv[argv.index("-name") + 1] == "--danger.txt"
+    assert prepared["actions"][0]["files"] == ["--danger.txt"]
+
+
+def test_repeated_reference_clarification_stops_with_specific_reason(monkeypatch, tmp_path):
+    value = plan("find_files", path=".", recursive=False, pattern="--danger.txt")
+    question = json.dumps({"status": "need_clarification", "clarification": "是否包含子目录？"})
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or question)
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="独立参考仍要求澄清：是否包含子目录"):
+        engine.generate_bash_commands("查找当前目录中名为 --danger.txt 的普通文件", str(tmp_path),
+                                      value, prepare_queries(value, str(tmp_path)), [])
+    assert len(calls) == 2
+    assert all(record["phase"] == "independent_requirements" for record in engine.command_attempts)
+
+
+@pytest.mark.parametrize("reference", [
+    plan("find_files", path=".", recursive=True, pattern="--danger.txt"),
+    plan("find_files", path="backup", recursive=False, pattern="--danger.txt"),
+    plan("find_files", path="..", recursive=False, pattern="--danger.txt"),
+    plan("find_files", path=".", recursive=False, pattern="*.txt"),
+    plan("find_files", path=".", recursive=False),
+    plan("count_files", path=".", recursive=False, pattern="--danger.txt"),
+])
+def test_reference_clarification_review_cannot_change_query_conditions(monkeypatch, tmp_path, reference):
+    (tmp_path / "backup").mkdir()
+    value = plan("find_files", path=".", recursive=False, pattern="--danger.txt")
+    question = json.dumps({"status": "need_clarification", "clarification": "是否包含子目录？"})
+    replies = iter([question, reference_json(reference)])
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or next(replies))
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError):
+        engine.generate_bash_commands("查找当前目录中名为 --danger.txt 的普通文件", str(tmp_path),
+                                      value, prepare_queries(value, str(tmp_path)), [])
+    assert len(calls) == 2
+    assert all(record["phase"] == "independent_requirements" for record in engine.command_attempts)
+
+
+def test_genuine_reference_question_does_not_default_missing_line_count(monkeypatch, tmp_path):
+    (tmp_path / "input").write_text("one\ntwo\n", encoding="utf-8")
+    value = plan("read_text", path="input", end="head", lines=2)
+    question = json.dumps({"status": "need_clarification", "clarification": "需要查看前几行？"})
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or question)
+    with pytest.raises(ValueError, match="独立参考仍要求澄清：需要查看前几行"):
+        Engine(ssh_hosts=[]).generate_bash_commands("查看 input 的开头", str(tmp_path), value,
+                                                  prepare_queries(value, str(tmp_path)), [])
+    assert len(calls) == 2
+
+
+def test_reference_review_and_format_correction_share_one_retry_budget(monkeypatch, tmp_path):
+    value = plan("find_files", path=".", recursive=False, pattern="--danger.txt")
+    question = json.dumps({"status": "need_clarification", "clarification": "是否包含子目录？"})
+    replies = iter([question, reference_json(plan("find_files", path="."))])
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or next(replies))
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="独立参考生成失败"):
+        engine.generate_bash_commands("查找当前目录中名为 --danger.txt 的普通文件", str(tmp_path),
+                                      value, prepare_queries(value, str(tmp_path)), [])
+    assert len(calls) == 2
+    assert all(record["phase"] == "independent_requirements" for record in engine.command_attempts)

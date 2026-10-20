@@ -533,7 +533,9 @@ class Engine:
         # 独立需求契约不读取候选计划，避免两者遗漏同一个条件而被自评放行。
         answers = [answer.split("用户回答：", 1)[-1].strip() for answer in clarifications]
         original = json.dumps({"cwd": cwd, "request": user_input, "answers": answers}, ensure_ascii=False)
-        messages = [{"role": "system", "content": _AGENT_SYSTEM + "\n仅根据原始需求及用户回答独立提取条件，不检查文件事实。"},
+        messages = [{"role": "system", "content": _AGENT_SYSTEM + "\n仅根据原始需求及用户回答独立提取条件，不检查文件事实。"
+                     "独立参考同样遵守统一默认值：当前目录及未指定深度的只读查询使用当前层 recursive=false，"
+                     "不要仅为是否包含子目录而追问；用户明确要求递归时保留递归条件。"},
                     {"role": "user", "content": original}]
         partial = None
         for correction in range(2):
@@ -567,6 +569,18 @@ class Engine:
                 if corrected is None or not _same_reference_fields(partial, corrected):
                     record["review"] = "rejected: 格式修正改变原有语义"
                     raise ValueError("独立参考格式修正改变原有语义；未生成或执行命令")
+            if reference.clarification:
+                detail = redact_value(reference.clarification)
+                record["review"] = "rejected: 独立参考要求澄清：" + detail
+                if not correction:
+                    messages.extend([{"role": "assistant", "content": raw}, {"role": "user", "content":
+                        "只允许一次澄清复核：只依据下面的原始需求、用户回答及统一默认值重新提取独立参考。"
+                        "当前目录及未指定深度的只读查询默认当前层 recursive=false；明确要求递归时必须保留。"
+                        "不要从主计划推导答案，不得改变路径、操作、文件名或筛选条件。"
+                        "真正缺少关键条件时继续返回 need_clarification 和具体问题，不得猜测或强行返回 ready。\n"
+                        + original}])
+                    continue
+                raise ValueError("独立参考仍要求澄清：" + detail + "；未生成或执行命令")
             try:
                 reference = _normalize_paths(reference, cwd)
             except (ValueError, OSError) as error:
