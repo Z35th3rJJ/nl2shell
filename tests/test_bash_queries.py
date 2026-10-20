@@ -351,7 +351,7 @@ def test_directory_default_path_uses_actual_fixture(monkeypatch, tmp_path, user_
 
 
 def test_reference_missing_hidden_field_gets_one_isolated_format_correction(monkeypatch, tmp_path):
-    value = plan("list_directory", path=".", include_hidden=False)
+    value = plan("list_directory", path=".", include_hidden=True)
     prepared = prepare_queries(value, str(tmp_path))
     incomplete = {"status": "ready", "steps": [{"operation": "list_directory", "parameters": {"path": "."}}]}
     responses = iter([json.dumps(incomplete), reference_json(value), json.dumps(candidates(prepared))])
@@ -362,10 +362,10 @@ def test_reference_missing_hidden_field_gets_one_isolated_format_correction(monk
     monkeypatch.setattr("core.engine.chat", reply)
     engine = Engine(ssh_hosts=[])
     engine.request_intent = {"operations": ["SENTINEL_OTHER_PLAN"]}
-    assert engine.generate_bash_commands("我看看这个目录有哪些文件", str(tmp_path), value, prepared, []) == candidates(prepared)
+    assert engine.generate_bash_commands("列目录并包括隐藏项", str(tmp_path), value, prepared, []) == candidates(prepared)
     assert len(calls) == 3
     assert json.loads(calls[0][1]["content"]) == {
-        "cwd": str(tmp_path), "request": "我看看这个目录有哪些文件", "answers": []}
+        "cwd": str(tmp_path), "request": "列目录并包括隐藏项", "answers": []}
     correction = "\n".join(message["content"] for message in calls[1])
     assert "SENTINEL_OTHER_PLAN" not in correction and "commands" not in correction
     assert "格式" in correction and "语义" in correction
@@ -378,13 +378,13 @@ def test_reference_missing_hidden_field_gets_one_isolated_format_correction(monk
 
 @pytest.mark.parametrize("second", ["{", reference_json(plan("list_directory", path="."))])
 def test_reference_format_correction_stops_after_second_invalid_output(monkeypatch, tmp_path, second):
-    value = plan("list_directory", path=".", include_hidden=False)
+    value = plan("list_directory", path=".", include_hidden=True)
     replies = iter([reference_json(plan("list_directory", path=".")), second])
     calls = []
     monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or next(replies))
     engine = Engine(ssh_hosts=[])
     with pytest.raises(ValueError, match="独立参考生成失败") as error:
-        engine.generate_bash_commands("列目录", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+        engine.generate_bash_commands("列目录并包括隐藏项", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
     assert "必须向用户追问" not in str(error.value)
     assert len(calls) == len(engine.command_attempts) == 2
 
@@ -398,7 +398,9 @@ def test_reference_format_correction_stops_after_second_invalid_output(monkeypat
 def test_reference_format_correction_cannot_change_existing_semantics(monkeypatch, tmp_path, corrected):
     (tmp_path / "backup").mkdir()
     value = plan("list_directory", path=".", include_hidden=False)
-    replies = iter([reference_json(plan("list_directory", path=".")), reference_json(corrected)])
+    incomplete = json.loads(reference_json(value))
+    del incomplete["status"]
+    replies = iter([json.dumps(incomplete), reference_json(corrected)])
     monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(replies))
     engine = Engine(ssh_hosts=[])
     with pytest.raises(ValueError, match="语义"):
@@ -541,3 +543,88 @@ def test_missing_reference_field_does_not_retry_an_unsafe_path(monkeypatch, tmp_
     with pytest.raises(ValueError, match="路径"):
         Engine(ssh_hosts=[]).generate_bash_commands("列目录", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("path", [".", "backup"])
+def test_reference_missing_hidden_uses_default_without_model_correction(monkeypatch, tmp_path, path):
+    (tmp_path / "backup").mkdir()
+    value = plan("list_directory", path=path, include_hidden=False)
+    prepared = prepare_queries(value, str(tmp_path))
+    incomplete = reference_json(plan("list_directory", path=path))
+    replies = iter([incomplete, json.dumps(candidates(prepared))])
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or next(replies))
+    engine = Engine(ssh_hosts=[])
+    result = engine.generate_bash_commands("浏览目录", str(tmp_path), value, prepared, [])
+    assert result == candidates(prepared)
+    review_commands(prepared, result)
+    assert len(calls) == 2
+    assert len(engine.command_attempts) == 2
+    assert engine.command_attempts[0]["raw_output"] == incomplete
+    assert prepared["actions"][0]["parameters"] == {"path": path, "include_hidden": False}
+
+
+@pytest.mark.parametrize("user_input,answers", [
+    ("显示隐藏文件", []),
+    ("浏览目录", ["用户回答：包括隐藏文件"]),
+    ("list hidden files", []),
+    ("列出点号开头的文件", []),
+])
+def test_hidden_request_missing_reference_flag_never_defaults_false(monkeypatch, tmp_path, user_input, answers):
+    value = plan("list_directory", path=".", include_hidden=False)
+    incomplete = reference_json(plan("list_directory", path="."))
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or incomplete)
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="独立参考生成失败"):
+        engine.generate_bash_commands(user_input, str(tmp_path), value, prepare_queries(value, str(tmp_path)), answers)
+    assert len(calls) == 2
+    assert all(record["phase"] == "independent_requirements" for record in engine.command_attempts)
+
+
+def test_hidden_primary_and_nonhidden_reference_remain_inconsistent(monkeypatch, tmp_path):
+    value = plan("list_directory", path=".", include_hidden=True)
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs:
+                        calls.append(args) or reference_json(plan("list_directory", path=".", include_hidden=False)))
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="独立需求"):
+        engine.generate_bash_commands("包括隐藏项", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+    assert len(calls) == 1
+    assert engine.command_attempts[0]["review"] == "rejected"
+
+
+@pytest.mark.parametrize("incomplete,value", [
+    (plan("list_directory", include_hidden=False), plan("list_directory", path=".", include_hidden=False)),
+    (plan("list_directory"), plan("list_directory", path=".", include_hidden=False)),
+    (plan("find_files", path="."), plan("find_files", path=".", recursive=False)),
+    (plan("read_text", path="input", end="head"), plan("read_text", path="input", end="head", lines=2)),
+])
+def test_reference_other_missing_parameters_are_not_defaulted(monkeypatch, tmp_path, incomplete, value):
+    (tmp_path / "input").write_text("one\ntwo\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or reference_json(incomplete))
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="独立参考生成失败"):
+        engine.generate_bash_commands("浏览目录", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+    assert len(calls) == 2
+    assert all(record["phase"] == "independent_requirements" for record in engine.command_attempts)
+
+
+@pytest.mark.parametrize("reference", [
+    plan("list_directory", path="backup"),
+    plan("list_directory", path=".."),
+    plan("list_directory", path=".", pattern="*.txt"),
+    plan("list_directory", path=".", include_hidden="false"),
+    plan("find_files", path=".", recursive=False),
+])
+def test_reference_default_keeps_path_operation_and_filter_checks(monkeypatch, tmp_path, reference):
+    (tmp_path / "backup").mkdir()
+    value = plan("list_directory", path=".", include_hidden=False)
+    calls = []
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: calls.append(args) or reference_json(reference))
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError):
+        engine.generate_bash_commands("浏览目录", str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+    assert len(calls) == 1
+    assert all(record["phase"] == "independent_requirements" for record in engine.command_attempts)

@@ -20,7 +20,7 @@ def test_reference_format_failure_has_correct_source_and_clean_output(terminal, 
     monkeypatch.setattr("core.intent.chat", lambda *args, **kwargs:
                         json.dumps({"status": "ready", "operations": ["list_directory"]}))
     listing = {"operation": "list_directory", "parameters": {"path": ".", "include_hidden": False}}
-    broken = {"operation": "list_directory", "parameters": {"path": "."}}
+    broken = {"operation": "list_directory", "parameters": {"include_hidden": False}}
     replies = iter(json.dumps({"status": "ready", "steps": [s]}) for s in [listing, broken, broken])
     monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(replies))
     engine, history, executor = Engine(ssh_hosts=[]), History(), Mock()

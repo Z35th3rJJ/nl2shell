@@ -52,6 +52,7 @@ read_text：查看指定文本文件的前几行或后几行。
 - 用户明确要求复制、备份等改变文件的结果，不能用 find_files 代替。
 - 忽略用户明确禁止的动作。按类型整理且不删除，只有 organize_files。
 - 只识别动作，目标目录、时间等参数留给后续规划器检查。缺少复制目标不改变 copy_files 的动作类型。
+- 意图识别阶段只输出操作类型，不输出操作参数。ready 只允许 status、operations 及 named_sources、selection_required、action_explicit 元数据；不得输出 include_hidden、path、recursive、pattern 等操作参数。隐藏文件要求由后续计划生成设置 include_hidden=true。
 - 需要先筛选再复制时，必要操作为 find_files 和 copy_files。
 - count_files 自己完成筛选和计数；统计数量不额外要求 find_files。
 - 单个文件名已明确时，直接复制、移动、改名或回收，不额外要求 find_files；按时间、类型等条件筛选后修改文件时才需要查找。
@@ -110,8 +111,12 @@ def analyze_request(user_input, answers, backend, attempts):
                 result = {"status": "need_clarification", "clarification": "您想查看、复制、移动、回收还是改名？"}
                 status = result["status"]
             if status == "ready":
+                unknown = set(result) - {"status", "operations", "named_sources", "selection_required", "action_explicit"}
+                if unknown:
+                    raise ValueError("意图包含不支持的字段：" + "、".join(sorted(unknown)) +
+                                     "；意图识别阶段只输出操作类型，不输出操作参数，参数由后续计划生成")
                 operations = result.get("operations")
-                if (set(result) - {"status", "operations", "named_sources", "selection_required", "action_explicit"} or not isinstance(operations, list)
+                if (not isinstance(operations, list)
                         or not 1 <= len(operations) <= 3
                         or any(not isinstance(value, str) or value not in OPERATIONS for value in operations)
                         or len(set(operations)) != len(operations)):

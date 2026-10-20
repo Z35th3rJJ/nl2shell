@@ -254,6 +254,29 @@ def _reference_format_payload(raw):
         return None
 
 
+def _reference_directory_defaults(raw, user_input, answers):
+    # 隐藏项需求不明确时保留缺字段错误，不从主计划推导独立参考。
+    if re.search(r"隐藏|hidden|dot[ -]?files?|点(?:号)?开头|--all|\bls\s+-[a-zA-Z]*[aA]",
+                 "\n".join([user_input, *answers]), re.I):
+        return raw
+    try:
+        value = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.I))
+    except (ValueError, TypeError):
+        return raw
+    if not isinstance(value, dict) or value.get("status") != "ready" or not isinstance(value.get("steps"), list):
+        return raw
+    changed = False
+    for step in value["steps"]:
+        if not isinstance(step, dict) or step.get("operation") != "list_directory":
+            continue
+        parameters = step.get("parameters")
+        if (isinstance(parameters, dict) and isinstance(parameters.get("path"), str)
+                and parameters["path"].strip() and "include_hidden" not in parameters):
+            parameters["include_hidden"] = False
+            changed = True
+    return json.dumps(value, ensure_ascii=False) if changed else raw
+
+
 def _same_reference_fields(before, after):
     if isinstance(before, dict):
         if "operation" in before and isinstance(after, dict) and "parameters" in after:
@@ -519,7 +542,7 @@ class Engine:
             raw = chat(messages, backend=self._backend, json_mode=True)
             record["raw_output"] = redact_value(raw)
             try:
-                reference = parse_operation_plan(raw)
+                reference = parse_operation_plan(_reference_directory_defaults(raw, user_input, answers))
             except (ValueError, TypeError) as error:
                 detail = _model_output_error(error)
                 record["review"] = redact_value("rejected: 参考格式错误：" + detail)

@@ -144,3 +144,65 @@ def test_directory_selection_refusal_explains_object_limit(monkeypatch, tmp_path
     value = Engine(ssh_hosts=[]).generate_task_plan(user_input, str(tmp_path))
     assert value.status == "unsupported" and not value.steps
     assert "文件夹" in value.reason and "普通文件筛选" in value.reason
+
+
+@pytest.mark.parametrize("extra", [{"include_hidden": True}, {"path": "."},
+                                  {"recursive": False}, {"pattern": "*.txt"}])
+def test_intent_extra_parameter_gets_specific_error_and_one_retry(monkeypatch, extra):
+    valid = {"status": "ready", "operations": ["list_directory"]}
+    replies = iter([json.dumps({**valid, **extra}), json.dumps(valid)])
+    seen = []
+    def reply(messages, backend=None):
+        seen.append([dict(message) for message in messages])
+        return next(replies)
+    monkeypatch.setattr("core.intent.chat", reply)
+    attempts = []
+    assert analyze_request("列出当前目录中的所有文件，包括隐藏文件", [], "local", attempts) == valid
+    assert len(attempts) == 2
+    error = attempts[0]["validation_errors"][0]
+    assert next(iter(extra)) in error and "字段" in error
+    assert "必需操作必须" not in error
+    assert "不输出操作参数" in seen[1][-1]["content"]
+    assert "只输出操作类型" in seen[0][0]["content"]
+    assert attempts[1]["validation_errors"] == []
+
+
+def test_repeated_extra_intent_field_stops_before_planning(monkeypatch, tmp_path):
+    payload = {"status": "ready", "operations": ["list_directory"], "include_hidden": True}
+    monkeypatch.setattr("core.intent.chat", lambda *args, **kwargs: json.dumps(payload))
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: pytest.fail("非法意图不得进入计划阶段"))
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="结构化意图"):
+        engine.generate_task_plan("列出当前目录中的所有文件，包括隐藏文件", str(tmp_path))
+    assert len(engine.intent_attempts) == 2
+    assert all("include_hidden" in record["validation_errors"][0] for record in engine.intent_attempts)
+
+
+def test_recovered_intent_keeps_hidden_parameter_in_plan_and_preview(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+    from cli import execute_request
+    from core.settings import PREVIEW
+    from tests.test_cli_flow import History
+    valid = {"status": "ready", "operations": ["list_directory"]}
+    intents = iter([json.dumps({**valid, "include_hidden": True}), json.dumps(valid)])
+    monkeypatch.setattr("core.intent.chat", lambda *args, **kwargs: next(intents))
+    listing = {"status": "ready", "steps": [{"operation": "list_directory",
+               "parameters": {"path": ".", "include_hidden": True}}]}
+    argv = ["ls", "-1", "--color=never", "--quoting-style=literal", "-A", "--", "."]
+    replies = iter([json.dumps(listing), json.dumps(listing), json.dumps({"commands": [
+        {"step": 1, "argv": argv, "explanation": "列出目录内容，包括隐藏文件"}]})])
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: next(replies))
+    (tmp_path/"note.txt").write_text("visible", encoding="utf-8")
+    (tmp_path/".hidden").write_text("hidden", encoding="utf-8")
+    engine, executor, history = Engine(ssh_hosts=[]), Mock(), History()
+    status = execute_request(engine, executor, history, "列出当前目录中的所有文件，包括隐藏文件",
+                             str(tmp_path), PREVIEW, input_fn=lambda _: pytest.fail("预览不得请求执行确认"))
+    assert status == "preview"
+    assert engine.request_intent == valid
+    record = history.records[-1]
+    assert record["plan"]["steps"][0]["parameters"] == {"path": ".", "include_hidden": True}
+    assert record["preview"][0]["candidate_argv"] == argv
+    assert record["preview"][0]["review"] == "accepted"
+    assert not record["executed"] and not record["verification"]
+    executor.execute.assert_not_called()
+    executor.execute_query.assert_not_called()
