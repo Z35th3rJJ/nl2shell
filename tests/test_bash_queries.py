@@ -658,6 +658,7 @@ def test_reference_clarification_is_reviewed_once_without_reading_primary(monkey
     assert review.endswith(json.dumps(original, ensure_ascii=False))
     assert "recursive=false" in review and "关键条件" in review
     assert "SENTINEL_OTHER_PLAN" not in review and '"plan"' not in review and '"commands"' not in review
+    assert "mandatory_prefix" in calls[2][0]["content"] and "逐项复制" in calls[2][0]["content"]
     argv = result["commands"][0]["argv"]
     assert argv[argv.index("-name") + 1] == "--danger.txt"
     assert prepared["actions"][0]["files"] == ["--danger.txt"]
@@ -739,3 +740,33 @@ def test_reference_refusal_preserves_reason_and_never_generates_candidate(monkey
     assert len(engine.command_attempts) == 1
     assert engine.command_attempts[0]["raw_output"] == raw
     assert "拒绝" in engine.command_attempts[0]["review"]
+
+
+
+@pytest.mark.parametrize("omission", ["first_sensitive", "all_sensitive", "audit"])
+def test_find_candidate_missing_mandatory_exclusions_never_executes(tmp_path, omission):
+    value = plan("find_files", path=".", recursive=False, pattern="--danger.txt")
+    engine, executor, history = engine_for(value), Mock(), History()
+    history.path = tmp_path / "history.jsonl"
+    def reply(request, cwd, value, prepared, answers):
+        payload = candidates(prepared)
+        argv = list(payload["commands"][0]["argv"])
+        if omission == "first_sensitive":
+            index = argv.index("-ipath") - 1
+            del argv[index:index + 3]
+        elif omission == "all_sensitive":
+            while "-ipath" in argv:
+                index = argv.index("-ipath") - 1
+                del argv[index:index + 3]
+        else:
+            index = argv.index("-path") - 1
+            del argv[index:index + 3]
+        payload["commands"][0]["argv"] = argv
+        return payload
+    engine.generate_bash_commands.side_effect = reply
+    status = execute_request(engine, executor, history, "查找当前目录中名为 --danger.txt 的普通文件",
+                             str(tmp_path), "confirm", input_fn=lambda _: pytest.fail("安全排除缺失时不能进入确认"))
+    assert status == "blocked"
+    assert not history.records[-1]["executed"]
+    executor.execute.assert_not_called()
+    executor.execute_query.assert_not_called()
