@@ -134,6 +134,75 @@ def reply(operation="find_files", **parameters):
     return json.dumps({"status": "ready", "steps": [{"operation": operation, "parameters": parameters}]})
 
 
+@pytest.mark.parametrize("pattern", ["ERROR.*", "[1]"], ids=["A_error_dot_star", "B_brackets"])
+def test_literal_search_recovers_from_false_regex_refusal(monkeypatch, tmp_path, intent_contract, pattern):
+    import json
+    from unittest.mock import Mock
+    from core.engine import Engine
+
+    intent_contract("search_text")
+    refusal = json.dumps({"status": "unsupported", "reason": "当前版本只支持字面文本搜索，不支持正则表达式搜索"})
+    model = Mock(side_effect=[refusal, reply("search_text", path="sample.txt", pattern=pattern)])
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+    plan = engine.generate_task_plan(f"在 sample.txt 中搜索字面文本 {pattern}", str(tmp_path))
+
+    assert model.call_count == 2
+    assert len(engine.plan_attempts) == 2
+    assert plan.status == "ready" and not plan.refused and not plan.clarification
+    assert len(plan.steps) == 1
+    assert plan.steps[0].operation == "search_text"
+    assert plan.steps[0].parameters == {"path": "sample.txt", "pattern": pattern}
+
+
+@pytest.mark.parametrize("user_input,reason", [
+    ("在 sample.txt 中使用正则表达式搜索 ERROR.*", "不支持正则表达式搜索"),
+    ("递归搜索当前目录及子目录中的 ERROR", "不支持递归文本搜索"),
+], ids=["C_explicit_regex", "D_recursive_text"])
+def test_unsupported_search_is_not_retried_as_single_file_literal(monkeypatch, tmp_path, intent_contract, user_input, reason):
+    import json
+    from unittest.mock import Mock
+    from core.engine import Engine
+
+    intent_contract("search_text")
+    model = Mock(side_effect=[json.dumps({"status": "unsupported", "reason": reason}),
+                              reply("search_text", path="sample.txt", pattern="ERROR.*")])
+    monkeypatch.setattr("core.engine.chat", model)
+    plan = Engine(ssh_hosts=[]).generate_task_plan(user_input, str(tmp_path))
+
+    assert plan.status == "unsupported" and plan.refused
+    assert not plan.steps and not plan.clarification
+    assert plan.reason == reason
+    assert model.call_count == 1
+
+
+def test_literal_search_repeated_regex_refusal_stops_after_one_retry(monkeypatch, tmp_path, intent_contract):
+    import json
+    from unittest.mock import Mock
+    from cli import execute_request
+    from core.engine import Engine
+    from core.settings import PREVIEW
+    from tests.test_cli_flow import History
+
+    intent_contract("search_text")
+    refusal = json.dumps({"status": "unsupported", "reason": "当前版本只支持字面文本搜索，不支持正则表达式搜索"})
+    model = Mock(side_effect=[refusal, refusal])
+    monkeypatch.setattr("core.engine.chat", model)
+    engine, executor, history = Engine(ssh_hosts=[]), Mock(), History()
+    status = execute_request(engine, executor, history, "在 sample.txt 中搜索字面文本 ERROR.*",
+                             str(tmp_path), PREVIEW, input_fn=lambda _: pytest.fail("拒绝任务不得请求执行确认"))
+
+    record = history.records[-1]
+    assert status in {"unsupported", "plan_failed"}
+    assert not record["plan"].get("steps")
+    assert not record["preview"] and not record["executed"] and not record["verification"]
+    assert not engine.command_attempts
+    executor.execute.assert_not_called()
+    executor.execute_query.assert_not_called()
+    assert model.call_count == 2
+    assert len(engine.plan_attempts) == 2
+
+
 def test_model_attempts_preserve_failure_and_redact_secrets(monkeypatch):
     import json
     from core.engine import Engine

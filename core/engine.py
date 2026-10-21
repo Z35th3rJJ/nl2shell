@@ -410,6 +410,7 @@ class Engine:
             return parse_operation_plan(json.dumps({key: value for key, value in self.request_intent.items()
                                                     if key in {"status", "reason", "clarification"}}))
         required = self.request_intent["operations"]
+        request_text = "\n".join([user_input, *answers])
         system = _AGENT_SYSTEM + "\n独立识别的必要操作必须全部出现在计划中：" + json.dumps(required)
         if self.request_intent.get("named_sources") and self.request_intent.get("selection_required") is False:
             system += "\n源文件已明确且无需筛选，直接使用 sources，不要先查找：" + json.dumps(self.request_intent["named_sources"])
@@ -459,6 +460,13 @@ class Engine:
                         record["validation_errors"] = [missing]
                         return TaskPlan((), clarification=missing, status="need_clarification")
                 errors = _task_plan_errors(plan, user_input, cwd, required)
+                if (attempt == 0 and plan.refused and set(required) == {"search_text"}
+                        and re.search(r"字面(?:文本|字符串)", request_text)
+                        and not re.search(r"正则|regex|regular\s+expression|递归|子目录", request_text, re.I)
+                        and re.search(r"正则|regex|regular\s+expression", plan.reason, re.I)):
+                    errors = ["用户明确要求的是字面文本搜索，不是正则表达式搜索；.、*、[、]、+ 等应作为普通字符。"
+                              "请重新生成 search_text 计划，原样保留用户的搜索字符串和单个文件路径，"
+                              "不得为正则用途额外转义、扩大搜索范围或把字面搜索转换为正则搜索。"]
             except (ValueError, TypeError, OSError) as error:
                 errors = [_model_output_error(error)]
             record["validation_errors"] = redact_value(errors)
