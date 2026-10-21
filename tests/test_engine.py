@@ -6,6 +6,83 @@ import pytest
 from core.engine import classify_output, CLARIFY_PREFIX, CANNOT_GENERATE_PREFIX
 
 
+@pytest.mark.parametrize("pattern", ["ERROR.*", "[1]", "A+B"])
+def test_literal_search_metacharacters_keep_plan_and_fixed_string_preview(monkeypatch, tmp_path, intent_contract, pattern):
+    import json
+    from unittest.mock import Mock
+    from cli import execute_request
+    from core.engine import Engine
+    from core.settings import PREVIEW
+    from tests.test_cli_flow import History
+
+    intent_contract("search_text")
+    (tmp_path / "sample.txt").write_text("ERROR.*\nERRORabc\n[1]\n1\nA+B\nAAAB\nerror.*\n", encoding="utf-8")
+    user_input = f"在 sample.txt 中搜索字面文本 {pattern}"
+    parameters = {"path": "sample.txt", "pattern": pattern}
+    argv = ["grep", "-F", "-n", "-e", pattern, "--", "./sample.txt"]
+    payload = reply("search_text", **parameters)
+    responses = iter([payload, payload, json.dumps({"commands": [
+        {"step": 1, "argv": argv, "explanation": "大小写敏感地搜索单个文件中的字面文本"}]})])
+    calls = []
+
+    def respond(messages, **kwargs):
+        calls.append([dict(message) for message in messages])
+        return next(responses)
+
+    monkeypatch.setattr("core.engine.chat", respond)
+    engine, executor, history = Engine(ssh_hosts=[]), Mock(), History()
+    status = execute_request(engine, executor, history, user_input, str(tmp_path), PREVIEW,
+                             input_fn=lambda _: pytest.fail("预览不能请求执行确认"))
+    assert status == "preview"
+    record = history.records[-1]
+    assert record["plan"]["steps"][0]["operation"] == "search_text"
+    assert record["plan"]["steps"][0]["parameters"] == parameters
+    assert record["preview"][0]["parameters"] == parameters
+    assert record["preview"][0]["candidate_argv"] == argv
+    assert record["preview"][0]["review"] == "accepted"
+    assert not record["executed"] and not record["verification"]
+    executor.execute.assert_not_called()
+    executor.execute_query.assert_not_called()
+    assert len(calls) == 3
+    assert user_input in calls[0][1]["content"]
+    # Mock 响应验证参数透传；提示契约另行约束，不能替代真实模型验收。
+    assert "仅当用户明确要求正则表达式搜索时" in calls[0][0]["content"]
+    assert "普通字符" in calls[0][0]["content"]
+
+
+@pytest.mark.parametrize("user_input,reason", [
+    ("在 sample.txt 中使用正则表达式搜索 ERROR.*", "不支持正则表达式搜索"),
+    ("递归搜索当前目录及所有子目录的文件中的 ERROR", "不支持递归文本搜索"),
+])
+def test_explicit_regex_and_recursive_text_search_stay_unsupported(monkeypatch, tmp_path, intent_contract, user_input, reason):
+    import json
+    from unittest.mock import Mock
+    from cli import execute_request
+    from core.engine import Engine
+    from core.settings import PREVIEW
+    from tests.test_cli_flow import History
+
+    intent_contract("search_text")
+    calls = []
+
+    def refuse(messages, **kwargs):
+        calls.append(messages)
+        return json.dumps({"status": "unsupported", "reason": reason})
+
+    monkeypatch.setattr("core.engine.chat", refuse)
+    engine, executor, history = Engine(ssh_hosts=[]), Mock(), History()
+    status = execute_request(engine, executor, history, user_input, str(tmp_path), PREVIEW,
+                             input_fn=lambda _: pytest.fail("不支持的任务不能请求确认"))
+    assert status == "unsupported"
+    record = history.records[-1]
+    assert record["plan"] == {"status": "unsupported", "reason": reason}
+    assert record["block_reason"] == reason
+    assert not record["preview"] and not record["executed"]
+    assert len(calls) == 1 and not engine.command_attempts
+    executor.execute.assert_not_called()
+    executor.execute_query.assert_not_called()
+
+
 @pytest.fixture(autouse=True)
 def intent_contract(monkeypatch):
     """隔离规划测试；动作完整性用例显式提供独立的需求契约。"""

@@ -170,7 +170,9 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 - system_info 参数：query=disk/memory/system。disk 可填明确的 path，未指定时只查询当前工作目录所在文件系统。其他查询不接受 path。system 只显示系统名、内核版本和架构，不支持额外字段或发行版查询。
 - working_directory 参数为空对象，显示当前工作目录。
 - list_directory 参数：path、include_hidden（布尔值）；只列当前层，包括文件夹。不要求隐藏文件时 include_hidden=false。
-- search_text 参数：path（明确的单个文本文件）、pattern（用户明确的单行字面文本），大小写敏感。不支持正则表达式或递归文本搜索。
+- search_text 参数：path（明确的单个文本文件）、pattern（用户明确的单行字面文本），大小写敏感。pattern 中的 .、*、[、]、+ 等默认都是普通字符，不因文本看起来像正则表达式而拒绝。
+- search_text 必须原样保留搜索字符串，不得删除字符、改变大小写或为正则用途额外转义。仅当用户明确要求正则表达式搜索时，才因正则表达式限制返回 unsupported。
+- 递归文本搜索仍不支持；不得把递归或多文件文本搜索缩小成单文件搜索后返回 ready。
 - text_stats 参数：path（单个文本文件）、metric=lines/words/bytes。统计文件行数不是 count_files。
 - read_text 参数：path、end=head/tail、lines（明确的1到1000行）；没有说明首尾位置或行数时追问，不默认十行。
 - 条件不能用以上参数准确表达时，必须追问或返回 unsupported 并说明限制，不得忽略条件后返回 ready。
@@ -187,7 +189,10 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 恢复指定编号：{"status":"ready","steps":[{"operation":"restore","parameters":{"trash_id":"用户提供的编号"},"explanation":"恢复文件"}]}
 查看系统信息：{"status":"ready","steps":[{"operation":"system_info","parameters":{"query":"system"},"explanation":"查看系统信息"}]}
 查询内存使用情况：{"status":"ready","steps":[{"operation":"system_info","parameters":{"query":"memory"}}]}
-在 note.txt 中搜索字面文本 ERROR：{"status":"ready","steps":[{"operation":"search_text","parameters":{"path":"note.txt","pattern":"ERROR"}}]}
+在 note.txt 中搜索字面文本 ERROR.*：{"status":"ready","steps":[{"operation":"search_text","parameters":{"path":"note.txt","pattern":"ERROR.*"}}]}
+在 note.txt 中搜索字面文本 [1]：{"status":"ready","steps":[{"operation":"search_text","parameters":{"path":"note.txt","pattern":"[1]"}}]}
+在 note.txt 中使用正则表达式搜索 ERROR.*：{"status":"unsupported","reason":"当前版本只支持字面文本搜索，不支持正则表达式搜索"}
+递归搜索当前目录及子目录的文件中的 ERROR：{"status":"unsupported","reason":"当前版本不支持递归或多文件文本搜索"}
 统计 note.txt 的行数：{"status":"ready","steps":[{"operation":"text_stats","parameters":{"path":"note.txt","metric":"lines"}}]}
 统计 note.txt 的字节数：{"status":"ready","steps":[{"operation":"text_stats","parameters":{"path":"note.txt","metric":"bytes"}}]}
 查看 note.txt 的前两行：{"status":"ready","steps":[{"operation":"read_text","parameters":{"path":"note.txt","end":"head","lines":2}}]}
