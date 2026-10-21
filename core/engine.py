@@ -397,7 +397,7 @@ class Engine:
         return first, rest
 
     def generate_task_plan(self, user_input: str, cwd: str, clarifications: list[str] | None = None) -> TaskPlan:
-        """只生成固定操作计划，最多修正一次非法输出。"""
+        """通常最多两次；字面搜索误拒绝纠正后可再纠正一次可核对的格式错误。"""
         self.plan_attempts = []
         self.intent_attempts = []
         self.request_intent = {}
@@ -437,7 +437,10 @@ class Engine:
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ]
-        for attempt in range(2):
+        attempt, max_attempts = 0, 2
+        literal_retry = False
+        format_baseline = None
+        while attempt < max_attempts:
             record = {"attempt": attempt + 1}
             self.plan_attempts.append(record)
             try:
@@ -449,6 +452,10 @@ class Engine:
             plan = None
             try:
                 plan = parse_operation_plan(raw)
+                if format_baseline is not None:
+                    corrected = _reference_format_payload(raw)
+                    if corrected is None or not _same_reference_fields(format_baseline, corrected):
+                        raise ValueError("字面搜索格式修正改变了操作、路径或搜索条件；未生成或执行命令")
                 if plan.status == "ready":
                     plan = _normalize_paths(plan, cwd)
                     direct = _direct_named_copy(plan, self.request_intent, cwd)
@@ -464,11 +471,29 @@ class Engine:
                         and re.search(r"字面(?:文本|字符串)", request_text)
                         and not re.search(r"正则|regex|regular\s+expression|递归|子目录", request_text, re.I)
                         and re.search(r"正则|regex|regular\s+expression", plan.reason, re.I)):
+                    literal_retry = True
                     errors = ["用户明确要求的是字面文本搜索，不是正则表达式搜索；.、*、[、]、+ 等应作为普通字符。"
                               "请重新生成 search_text 计划，原样保留用户的搜索字符串和单个文件路径，"
                               "不得为正则用途额外转义、扩大搜索范围或把字面搜索转换为正则搜索。"]
             except (ValueError, TypeError, OSError) as error:
                 errors = [_model_output_error(error)]
+                if attempt == 1 and literal_retry and isinstance(error, json.JSONDecodeError):
+                    closed = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.I) + "}"
+                    baseline = _reference_format_payload(closed)
+                    if baseline is not None:
+                        try:
+                            preserved = parse_operation_plan(closed)
+                            if len(preserved.steps) != 1 or preserved.steps[0].operation != "search_text":
+                                baseline = None
+                            else:
+                                _normalize_paths(preserved, cwd)
+                        except (ValueError, TypeError, OSError):
+                            baseline = None
+                    if baseline is not None:
+                        format_baseline = baseline
+                        max_attempts = 3
+                        errors.append("仅修正 JSON 格式，完整保留已有的 search_text 操作、文件路径和字面搜索字符串；"
+                                      "不得扩大范围或改变任何已识别条件。")
             record["validation_errors"] = redact_value(errors)
             if not errors:
                 return plan
@@ -478,7 +503,7 @@ class Engine:
                     record["recovery"] = {"operation": "copy_files", "reason": "补齐用户明确要求的复制步骤",
                                           "plan": plan_payload(recovered)}
                     return recovered
-            if attempt == 0:
+            if attempt + 1 < max_attempts:
                 messages.extend([
                     {"role": "assistant", "content": raw},
                     {
@@ -490,7 +515,9 @@ class Engine:
                         ),
                     },
                 ])
-        raise ValueError("模型两次生成的计划均未满足任务约束：" + "；".join(errors))
+            attempt += 1
+        count = "三次" if max_attempts == 3 else "两次"
+        raise ValueError("模型" + count + "生成的计划均未满足任务约束：" + "；".join(errors))
 
     def suggest_fix(self, command: str, detail: str) -> str:
         """仅生成修复建议，不执行建议中的命令。"""

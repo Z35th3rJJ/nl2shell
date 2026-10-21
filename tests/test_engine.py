@@ -203,6 +203,96 @@ def test_literal_search_repeated_regex_refusal_stops_after_one_retry(monkeypatch
     assert len(engine.plan_attempts) == 2
 
 
+@pytest.fixture
+def no_planning_commands(monkeypatch):
+    from unittest.mock import Mock
+
+    launch = Mock(side_effect=AssertionError("计划纠正不能启动命令"))
+    monkeypatch.setattr("subprocess.Popen", launch)
+    yield launch
+    launch.assert_not_called()
+
+
+def test_literal_search_semantic_then_format_correction_recovers(monkeypatch, tmp_path, intent_contract, no_planning_commands):
+    import json
+    from unittest.mock import Mock
+    from core.engine import Engine
+
+    intent_contract("search_text")
+    user_input = "在 sample.txt 中搜索字面文本 ERROR.*"
+    refusal = json.dumps({"status": "unsupported", "reason": "当前版本只支持字面文本搜索，不支持正则表达式搜索"})
+    valid = reply("search_text", path="sample.txt", pattern="ERROR.*")
+    malformed = valid[:-1]  # 仅缺少最外层右花括号，内部计划和参数完整。
+    responses = Mock(side_effect=[refusal, malformed, valid])
+    calls = []
+
+    def respond(messages, **kwargs):
+        calls.append([dict(message) for message in messages])
+        return responses(messages, **kwargs)
+
+    monkeypatch.setattr("core.engine.chat", respond)
+    engine = Engine(ssh_hosts=[])
+    plan = engine.generate_task_plan(user_input, str(tmp_path))
+
+    assert responses.call_count == 3 and len(engine.plan_attempts) == 3
+    assert plan.status == "ready" and not plan.refused and not plan.clarification
+    assert len(plan.steps) == 1 and plan.steps[0].operation == "search_text"
+    assert plan.steps[0].parameters == {"path": "sample.txt", "pattern": "ERROR.*"}
+    assert not engine.command_attempts
+    for messages in calls:
+        assert messages[0] == calls[0][0]
+        assert calls[0][1] in messages and user_input in messages[1]["content"]
+    assert "字面文本" in calls[1][-1]["content"]
+    assert "原样保留" in calls[1][-1]["content"]
+    assert "扩大搜索范围" in calls[1][-1]["content"]
+    assert calls[1][-1] in calls[2]
+    assert "JSON" in calls[2][-1]["content"]
+
+
+def test_literal_search_format_correction_stops_after_third_invalid_response(monkeypatch, tmp_path, intent_contract, no_planning_commands):
+    import json
+    from unittest.mock import Mock
+    from core.engine import Engine
+
+    intent_contract("search_text")
+    refusal = json.dumps({"status": "unsupported", "reason": "当前版本只支持字面文本搜索，不支持正则表达式搜索"})
+    malformed = reply("search_text", path="sample.txt", pattern="ERROR.*")[:-1]
+    model = Mock(side_effect=[refusal, malformed, '{"status":"ready",'])
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+
+    with pytest.raises(ValueError):
+        engine.generate_task_plan("在 sample.txt 中搜索字面文本 ERROR.*", str(tmp_path))
+
+    assert model.call_count == 3 and len(engine.plan_attempts) == 3
+    assert not engine.command_attempts
+
+
+@pytest.mark.parametrize("parameters", [
+    {"path": "sample.txt", "pattern": "ERROR*"},
+    {"path": ".", "pattern": "ERROR.*"},
+], ids=["changed_pattern", "expanded_path"])
+def test_literal_search_format_correction_rejects_semantic_changes(monkeypatch, tmp_path, intent_contract, no_planning_commands, parameters):
+    import json
+    from unittest.mock import Mock
+    from core.engine import Engine
+
+    intent_contract("search_text")
+    refusal = json.dumps({"status": "unsupported", "reason": "当前版本只支持字面文本搜索，不支持正则表达式搜索"})
+    malformed = reply("search_text", path="sample.txt", pattern="ERROR.*")[:-1]
+    changed = reply("search_text", **parameters)
+    model = Mock(side_effect=[refusal, malformed, changed])
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+
+    with pytest.raises(ValueError):
+        engine.generate_task_plan("在 sample.txt 中搜索字面文本 ERROR.*", str(tmp_path))
+
+    assert model.call_count == 3 and len(engine.plan_attempts) == 3
+    assert engine.plan_attempts[2]["raw_output"] == changed
+    assert not engine.command_attempts
+
+
 def test_model_attempts_preserve_failure_and_redact_secrets(monkeypatch):
     import json
     from core.engine import Engine
