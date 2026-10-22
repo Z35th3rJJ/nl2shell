@@ -701,7 +701,7 @@ def test_directory_browse_keeps_explicit_path_and_multiple_actions(monkeypatch, 
 def test_model_plan_missing_field_does_not_blame_user(monkeypatch, tmp_path, intent_contract):
     from core.engine import Engine
     intent_contract("list_directory")
-    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: reply("list_directory", path="."))
+    monkeypatch.setattr("core.engine.chat", lambda *args, **kwargs: reply("list_directory", include_hidden=False))
     with pytest.raises(ValueError, match="模型输出") as error:
         Engine(ssh_hosts=[]).generate_task_plan("列出当前目录内容", str(tmp_path))
     assert "必须向用户追问" not in str(error.value)

@@ -666,6 +666,95 @@ def test_directory_clarification_is_saved_even_when_reference_disagrees(
     executor.execute_query.assert_not_called()
 
 
+@pytest.mark.parametrize("operation,user_input,parameters,expected,answers", [
+    ("list_directory", "列出 organize 目录的内容", {"path": "organize"}, {"path": "organize", "include_hidden": False}, []),
+    ("list_directory", "看看 organize 里有什么", {"path": "organize"}, {"path": "organize", "include_hidden": False}, []),
+    ("list_directory", "浏览目录", {"path": "organize"}, {"path": "organize", "include_hidden": False}, ["问题：浏览哪里？；用户回答：organize"]),
+    ("list_directory", "列出 organize，包括隐藏文件", {"path": "organize", "include_hidden": True}, {"path": "organize", "include_hidden": True}, []),
+    ("list_directory", "列出 organize，不包含隐藏文件", {"path": "organize", "include_hidden": False}, {"path": "organize", "include_hidden": False}, []),
+    ("count_files", "统计当前目录中的文件数量", {"path": "."}, {"path": ".", "recursive": False}, []),
+    ("count_files", "统计当前目录及子目录中的文件数量", {"path": "."}, {"path": ".", "recursive": True}, []),
+])
+def test_shared_defaults_apply_to_primary_and_independent_plans(
+        monkeypatch, tmp_path, no_reference_execution, operation, user_input, parameters, expected, answers):
+    (tmp_path / "organize").mkdir()
+    raw = reference_json(plan(operation, **parameters))
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": [operation]})))
+    chat = Mock(return_value=raw)
+    monkeypatch.setattr("core.engine.chat", chat)
+    engine = Engine(ssh_hosts=[])
+    primary = engine.generate_task_plan(user_input, str(tmp_path), clarifications=answers)
+    assert primary.steps[0].parameters == expected
+    assert len(engine.plan_attempts) == 1 and engine.plan_attempts[0]["raw_output"] == raw
+    prepared = prepare_queries(primary, str(tmp_path))
+    chat.side_effect = [raw, json.dumps(candidates(prepared))]
+    result = engine.generate_bash_commands(user_input, str(tmp_path), primary, prepared, answers)
+    review_commands(prepared, result)
+    assert chat.call_count == 3
+    original = json.loads(chat.call_args_list[1].args[0][1]["content"])
+    assert original == {"cwd": str(tmp_path), "request": user_input, "answers": answers}
+    assert engine.command_attempts[0]["review"] == "accepted"
+
+
+@pytest.mark.parametrize("user_input,answers", [
+    ("列出 organize，包括隐藏文件", []),
+    ("列出 organize，不包含隐藏文件", []),
+    ("列出 organize", ["问题：是否包含隐藏文件？；用户回答：是"]),
+    ("列出 organize", ["问题：是否包含隐藏文件？；用户回答：否"]),
+])
+def test_shared_defaults_never_fill_an_explicit_hidden_requirement(
+        monkeypatch, tmp_path, no_reference_execution, user_input, answers):
+    (tmp_path / "organize").mkdir()
+    raw = reference_json(plan("list_directory", path="organize"))
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": ["list_directory"]})))
+    monkeypatch.setattr("core.engine.chat", Mock(return_value=raw))
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="必要操作参数"):
+        engine.generate_task_plan(user_input, str(tmp_path), clarifications=answers)
+    assert len(engine.plan_attempts) == 2
+    primary = plan("list_directory", path="organize", include_hidden=True)
+    with pytest.raises(ValueError, match="必要操作参数"):
+        engine.generate_bash_commands(user_input, str(tmp_path), primary, prepare_queries(primary, str(tmp_path)), answers)
+    assert all(r["phase"] == "independent_requirements" for r in engine.command_attempts)
+
+
+@pytest.mark.parametrize("parameters", [{}, {"path": ".."}, {"path": ".", "include_hidden": "false"},
+                                       {"path": ".", "type": "directory"}])
+def test_shared_defaults_keep_primary_parameter_and_path_validation(
+        monkeypatch, tmp_path, no_reference_execution, parameters):
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": ["list_directory"]})))
+    monkeypatch.setattr("core.engine.chat", Mock(return_value=reference_json(plan("list_directory", **parameters))))
+    with pytest.raises(ValueError):
+        Engine(ssh_hosts=[]).generate_task_plan("浏览目录", str(tmp_path))
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_plan_attempts_are_saved_redacted_across_clarification_rounds(
+        monkeypatch, tmp_path, no_reference_execution, fails):
+    (tmp_path / "organize").mkdir()
+    secret = "test-placeholder"
+    invalid = json.dumps({"status": "ready", "token": secret})
+    clarification = json.dumps({"status": "need_clarification", "clarification": "是否包含隐藏文件？"})
+    value = plan("list_directory", path="organize", include_hidden=False)
+    prepared = prepare_queries(value, str(tmp_path))
+    outputs = [clarification, invalid, invalid if fails else reference_json(value)]
+    if not fails:
+        outputs += [reference_json(value), json.dumps(candidates(prepared))]
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": ["list_directory"]})))
+    monkeypatch.setattr("core.engine.chat", Mock(side_effect=outputs))
+    executor, history = Mock(), HistoryStore(tmp_path / "history.jsonl")
+    answers = iter(["否", "no"])
+    status = execute_request(Engine(ssh_hosts=[]), executor, history, "列出 organize 目录的内容",
+                             str(tmp_path), "confirm", input_fn=lambda _: next(answers))
+    assert status == ("plan_failed" if fails else "cancelled")
+    attempts = history.query(limit=1)[0]["plan_attempts"]
+    assert len(attempts) == 3 and attempts[0]["raw_output"] == clarification
+    assert attempts[1]["validation_errors"] and "REDACTED" in attempts[1]["raw_output"]
+    assert bool(attempts[2]["validation_errors"]) is fails
+    assert secret.encode() not in history.path.read_bytes()
+    executor.execute_query.assert_not_called()
+
+
 def test_reference_missing_hidden_field_gets_one_isolated_format_correction(monkeypatch, tmp_path):
     value = plan("list_directory", path=".", include_hidden=True)
     prepared = prepare_queries(value, str(tmp_path))

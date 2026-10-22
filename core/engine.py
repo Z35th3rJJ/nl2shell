@@ -278,8 +278,8 @@ def _count_request_recursive(user_input, answers):
     return bool(scope["children"] or scope["include"])
 
 
-def _reference_directory_defaults(raw, user_input, answers):
-    # 隐藏项需求不明确时保留缺字段错误，不从主计划推导独立参考。
+def _plan_defaults(raw, user_input, answers):
+    # 显式隐藏项条件不使用默认值；主计划和独立参考均只依据原始需求及完整问答。
     if re.search(r"隐藏|hidden|dot[ -]?files?|点(?:号)?开头|--all|\bls\s+-[a-zA-Z]*[aA]",
                  "\n".join([user_input, *answers]), re.I):
         return raw
@@ -482,7 +482,7 @@ class Engine:
             record["raw_output"] = redact_value(raw)
             plan = None
             try:
-                plan = parse_operation_plan(raw)
+                plan = parse_operation_plan(_plan_defaults(raw, user_input, clarifications or []))
                 if format_baseline is not None:
                     corrected = _reference_format_payload(raw)
                     if corrected is None or not _same_reference_fields(format_baseline, corrected):
@@ -626,7 +626,7 @@ class Engine:
             raw = chat(messages, backend=self._backend, json_mode=True)
             record["raw_output"] = redact_value(raw)
             try:
-                reference = parse_operation_plan(_reference_directory_defaults(raw, user_input, clarifications))
+                reference = parse_operation_plan(_plan_defaults(raw, user_input, clarifications))
             except (ValueError, TypeError) as error:
                 detail = _model_output_error(error)
                 record["review"] = redact_value("rejected: 参考格式错误：" + detail)

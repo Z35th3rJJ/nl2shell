@@ -293,6 +293,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                     agent_context: dict | None = None) -> str:
     plan = TaskPlan(())
     clarifications = []
+    plan_attempts = []
     prepared, outcomes = None, []
     candidates, bash_query = None, False
     diagnoses, repairs, initial_command_attempts = [], [], []
@@ -317,6 +318,14 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             return input_fn(message).strip()
         except (EOFError, KeyboardInterrupt):
             return ""
+
+    def generate_plan(**options):
+        try:
+            return engine.generate_task_plan(user_input, cwd, **options)
+        finally:
+            attempts = getattr(engine, "plan_attempts", None)
+            if isinstance(attempts, list):
+                plan_attempts.extend(redact_value(attempts))
 
     def remaining_time():
         return timeout_seconds if agent_context is None else max(0, agent_context["deadline"] - time.monotonic())
@@ -348,7 +357,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                          verification=outcomes, block_reason=detail,
                          timed_out=any(item.get("timed_out") for item in outcomes),
                          command_attempts=initial_command_attempts or (getattr(engine, "command_attempts", []) if bash_query and isinstance(getattr(engine, "command_attempts", None), list) else []),
-                         candidates=candidates,
+                         candidates=candidates, plan_attempts=plan_attempts,
                          diagnoses=diagnoses, repairs=repairs, execution_repair_attempts=int(repair_used),
                          **({"agent_step": True} if agent_context is not None else {}),
                          **({"batch_id": batch_id, "batch_index": batch_index} if batch_id else {}))
@@ -408,7 +417,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         elif user_input == "/trash":
             plan = TaskPlan((TaskStep(operation="list_trash"),))
         else:
-            plan = engine.generate_task_plan(user_input, cwd)
+            plan = generate_plan()
         for _ in range(3):
             if not plan.clarification:
                 break
@@ -418,7 +427,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             if not answer:
                 return finish("needs_clarification", plan.clarification)
             clarifications.append(f"问题：{plan.clarification}；用户回答：{answer}")
-            plan = engine.generate_task_plan(user_input, cwd, clarifications=clarifications)
+            plan = generate_plan(clarifications=clarifications)
         if plan.clarification:
             return finish("needs_clarification", plan.clarification)
     except (ValueError, TypeError, RuntimeError, OSError) as error:
@@ -494,7 +503,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     try:
         save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
                      status="confirmed", executed=False, plan=plan_payload(plan),
-                     preview=preview(), run_mode=mode, clarifications=clarifications,
+                     preview=preview(), run_mode=mode, clarifications=clarifications, plan_attempts=plan_attempts,
                      **({"agent_step": True} if agent_context is not None else {}))
     except OSError as error:
         history.last_record.update(status="audit_failed", block_reason=str(error))
@@ -541,6 +550,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
                          status="repair_confirmed", executed=False, plan=plan_payload(plan),
                          preview=query_preview(checked), repair_attempt=1, run_mode=mode, clarifications=clarifications,
+                         plan_attempts=plan_attempts,
                          **({"agent_step": True} if agent_context is not None else {}))
             repaired = run_action(checked, checked["actions"][action["step"] - 1])
             attempt.update(status=repaired["status"], executed=repaired["executed"], outcome=repaired)
