@@ -14,6 +14,14 @@ CANNOT_GENERATE_PREFIX = "CANNOT_GENERATE:"
 CLARIFY_PREFIX         = "CLARIFY:"
 _AMBIGUOUS_DELETION = re.compile(r"^(?:请)?(?:帮我)?(?:删除|清理|移除)(?:一下)?[。！!\s]*$")
 _TARGET_MARKER = r"(?:到|进|入|至|放在|存放在|保存在|目标目录(?:为|是|[:：]))"
+_UNSUPPORTED_CONTENT_SEARCH = re.compile(
+    r"(?:请)?(?:"
+    r"递归(?:搜索|查找)[^，。；;\n]*?文件(?:的)?(?:内容|中(?:的)?)"
+    r"|(?:搜索|查找)(?:当前目录|本目录)(?:和|及|以及)(?:所有|全部)?子目录中的文件[，,][ \t]*(?:查找|搜索)"
+    r"|在(?:多个文件|所有文件|全部文件|[ \t]+[A-Za-z0-9_./-]+[ \t]+和[ \t]+[A-Za-z0-9_./-]+[ \t]+)"
+    r"中(?:搜索|查找)(?:字面(?:文本|字符串)|文本|内容)"
+    r")[ \t]+(?P<text>\S+)"
+)
 
 
 def _normalize_paths(plan: TaskPlan, cwd: str) -> TaskPlan:
@@ -402,6 +410,11 @@ class Engine:
         self.intent_attempts = []
         self.request_intent = {}
         answers = [answer.split("用户回答：", 1)[-1].strip() for answer in clarifications or []]
+        content_search = _UNSUPPORTED_CONTENT_SEARCH.fullmatch(user_input.strip())
+        # 只拦截明确的内容搜索范围；命名文件或否定范围的表达仍交给原意图流程。
+        if content_search and not re.search(r"名为|文件名|名称|不要|无需|不必|不含|不包括|不递归",
+                                           content_search.string[:content_search.start("text")]):
+            return TaskPlan((), refused=True, status="unsupported", reason="当前版本不支持递归或多文件文本搜索")
         if not clarifications and _AMBIGUOUS_DELETION.fullmatch(user_input.strip()):
             return TaskPlan((), "请明确要删除或清理的具体文件、目录或匹配范围",
                             "FILE_MODIFY", "delete", status="need_clarification")

@@ -50,11 +50,11 @@ def test_literal_search_metacharacters_keep_plan_and_fixed_string_preview(monkey
     assert "普通字符" in calls[0][0]["content"]
 
 
-@pytest.mark.parametrize("user_input,reason", [
-    ("在 sample.txt 中使用正则表达式搜索 ERROR.*", "不支持正则表达式搜索"),
-    ("递归搜索当前目录及所有子目录的文件中的 ERROR", "不支持递归文本搜索"),
+@pytest.mark.parametrize("user_input,reason,model_calls", [
+    ("在 sample.txt 中使用正则表达式搜索 ERROR.*", "不支持正则表达式搜索", 1),
+    ("递归搜索当前目录及所有子目录的文件中的 ERROR", "当前版本不支持递归或多文件文本搜索", 0),
 ])
-def test_explicit_regex_and_recursive_text_search_stay_unsupported(monkeypatch, tmp_path, intent_contract, user_input, reason):
+def test_explicit_regex_and_recursive_text_search_stay_unsupported(monkeypatch, tmp_path, intent_contract, user_input, reason, model_calls):
     import json
     from unittest.mock import Mock
     from cli import execute_request
@@ -78,9 +78,78 @@ def test_explicit_regex_and_recursive_text_search_stay_unsupported(monkeypatch, 
     assert record["plan"] == {"status": "unsupported", "reason": reason}
     assert record["block_reason"] == reason
     assert not record["preview"] and not record["executed"]
-    assert len(calls) == 1 and not engine.command_attempts
+    assert len(calls) == model_calls and not engine.command_attempts
     executor.execute.assert_not_called()
     executor.execute_query.assert_not_called()
+
+
+@pytest.mark.parametrize("user_input", [
+    "递归搜索当前目录及子目录的文件中的 ERROR",
+    "搜索当前目录和所有子目录中的文件，查找 ERROR",
+    "递归搜索当前目录中的文件内容 ERROR",
+    "在多个文件中搜索字面文本 ERROR",
+    "在所有文件中搜索字面字符串 ERROR",
+    "在 sample.txt 和 other.txt 中搜索字面文本 ERROR",
+])
+def test_recursive_content_search_stops_before_intent_and_cli_question(monkeypatch, tmp_path, no_planning_commands, user_input):
+    import json
+    from unittest.mock import Mock
+    from cli import execute_request
+    from core.engine import Engine
+    from core.intent import analyze_request
+    from core.settings import CONFIRM_MODE
+    from tests.test_cli_flow import History
+
+    monkeypatch.setattr("core.engine.analyze_request", analyze_request)
+    intent_model = Mock(side_effect=[
+        json.dumps({"status": "ready", "operations": ["find_files", "search_text"], "named_sources": ["."]}),
+        json.dumps({"status": "need_clarification", "clarification": "您想查看、复制、移动、回收还是改名？"}),
+    ])
+    planning_model = Mock(side_effect=AssertionError("已知不支持的内容搜索不能进入计划或候选生成"))
+    monkeypatch.setattr("core.intent.chat", intent_model)
+    monkeypatch.setattr("core.engine.chat", planning_model)
+    engine, executor, history, ask = Engine(ssh_hosts=[]), Mock(), History(), Mock(return_value="")
+
+    status = execute_request(engine, executor, history, user_input, str(tmp_path), CONFIRM_MODE, input_fn=ask)
+
+    assert status == "unsupported"
+    assert history.records[-1]["plan"] == {"status": "unsupported", "reason": "当前版本不支持递归或多文件文本搜索"}
+    assert not history.records[-1]["executed"]
+    assert not history.records[-1]["preview"] and not history.records[-1]["verification"]
+    assert engine.intent_attempts == [] and engine.plan_attempts == [] and engine.command_attempts == []
+    intent_model.assert_not_called()
+    planning_model.assert_not_called()
+    ask.assert_not_called()
+    executor.execute.assert_not_called()
+    executor.execute_query.assert_not_called()
+
+
+@pytest.mark.parametrize("user_input,operation,parameters", [
+    ("递归查找子目录中名为 *.log 的文件", "find_files", {"path": ".", "recursive": True, "pattern": "*.log"}),
+    ("递归搜索当前目录及子目录中名为 ERROR 的文件", "find_files", {"path": ".", "recursive": True, "pattern": "ERROR"}),
+    ("在 sample.txt 中搜索字面文本 ERROR.*", "search_text", {"path": "sample.txt", "pattern": "ERROR.*"}),
+    ("在 a和b.txt 中搜索字面文本 ERROR", "search_text", {"path": "a和b.txt", "pattern": "ERROR"}),
+    ("在 a,b.txt 中搜索字面文本 ERROR", "search_text", {"path": "a,b.txt", "pattern": "ERROR"}),
+    ("在 sample.txt 中搜索字面文本 递归", "search_text", {"path": "sample.txt", "pattern": "递归"}),
+    ("在 子目录.txt 中搜索字面文本 ERROR", "search_text", {"path": "子目录.txt", "pattern": "ERROR"}),
+    ("不递归，在 sample.txt 中搜索字面文本 ERROR", "search_text", {"path": "sample.txt", "pattern": "ERROR"}),
+])
+def test_recursive_content_guard_preserves_filename_and_single_file_queries(monkeypatch, tmp_path, no_planning_commands, user_input, operation, parameters):
+    from unittest.mock import Mock
+    from core.engine import Engine
+
+    intent = Mock(return_value={"status": "ready", "operations": [operation]})
+    model = Mock(return_value=reply(operation, **parameters))
+    monkeypatch.setattr("core.engine.analyze_request", intent)
+    monkeypatch.setattr("core.engine.chat", model)
+
+    result = Engine(ssh_hosts=[]).generate_task_plan(user_input, str(tmp_path))
+
+    assert result.status == "ready" and not result.refused and not result.clarification
+    assert len(result.steps) == 1 and result.steps[0].operation == operation
+    assert result.steps[0].parameters == parameters
+    intent.assert_called_once()
+    model.assert_called_once()
 
 
 @pytest.fixture(autouse=True)
