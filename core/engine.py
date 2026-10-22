@@ -582,7 +582,10 @@ class Engine:
                      '{"path":".","recursive":false,"pattern":"report.txt"}}]}。'
                      "示例文件名不能用于其他请求，必须逐字保留实际用户文件名。时间、行数、复制目标等没有默认值，仍须追问。"
                      "文件名可以以 - 或 -- 开头，这是合法的字面文件名；find_files 的 pattern 应原样保留，"
-                     "不是命令选项，不得据此前缀拒绝、去掉前缀或改成通配符。命令参数安全由后续固定规则审核。"},
+                     "不是命令选项，不得据此前缀拒绝、去掉前缀或改成通配符。命令参数安全由后续固定规则审核。"
+                     "用户明确要求字面文本搜索时，search_text 的 .、*、[、]、+ 等都是普通字符，"
+                     "不得仅因搜索字符串看起来像正则表达式而拒绝；必须原样保留字符串和单个文件路径。"
+                     "只有用户明确要求正则表达式搜索时才应用正则限制；递归或多文件文本搜索仍不支持。"},
                     {"role": "user", "content": original}]
         partial = None
         for correction in range(2):
@@ -631,6 +634,23 @@ class Engine:
             if reference.refused:
                 detail = redact_value(reference.reason)
                 record["review"] = "rejected: 独立参考拒绝生成：" + detail
+                request_text = "\n".join([user_input, *answers])
+                # 仅接受已确认的完整理由；混合限制或未知措辞保留拒绝。
+                if (not correction
+                        and re.search(r"字面(?:文本|字符串)", request_text)
+                        and not re.search(r"正则|regex|regular\s+expression|递归|子目录", request_text, re.I)
+                        and reference.reason in {
+                            "不支持正则表达式搜索",
+                            "当前版本不支持正则表达式搜索",
+                            "当前版本只支持字面文本搜索，不支持正则表达式搜索",
+                        }):
+                    messages.extend([{"role": "assistant", "content": raw}, {"role": "user", "content":
+                        "只允许一次字面搜索误拒绝复核：用户明确要求字面文本搜索，.、*、[、]、+ 等是普通字符，"
+                        "不能仅因看起来像正则表达式而拒绝，不得转换为正则搜索。"
+                        "只依据下面的原始需求及用户回答重新生成独立参考，不得从主计划推导答案。"
+                        "原样保留文件路径、搜索字符串、操作和搜索范围，不得增加条件或扩大范围。"
+                        "真正不支持或无法确认语义时仍须拒绝，不得强行返回 ready。\n" + original}])
+                    continue
                 raise ValueError("独立参考拒绝生成：" + detail + "；未生成或执行命令")
             try:
                 reference = _normalize_paths(reference, cwd)

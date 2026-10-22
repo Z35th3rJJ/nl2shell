@@ -332,6 +332,163 @@ def reference_json(value):
         {"operation": s.operation, "parameters": s.parameters} for s in value.steps]})
 
 
+@pytest.fixture
+def no_reference_execution(monkeypatch):
+    launch = Mock(side_effect=AssertionError("独立参考纠正不得执行命令"))
+    monkeypatch.setattr("subprocess.Popen", launch)
+    yield launch
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize("pattern", ["ERROR.*", "[1]"])
+def test_literal_reference_regex_refusal_gets_one_independent_correction(monkeypatch, tmp_path, no_reference_execution, pattern):
+    (tmp_path / "sample.txt").write_text("ERROR.*\n[1]\n", encoding="utf-8")
+    value = plan("search_text", path="sample.txt", pattern=pattern)
+    prepared = prepare_queries(value, str(tmp_path))
+    request = f"在 sample.txt 中搜索字面文本 {pattern}"
+    refusal = json.dumps({"status": "unsupported", "reason": "当前版本只支持字面文本搜索，不支持正则表达式搜索"})
+    reference = reference_json(value)
+    replies = iter([refusal, reference, json.dumps(candidates(prepared))])
+    calls = []
+    def reply(messages, **kwargs):
+        calls.append([dict(message) for message in messages])
+        return next(replies)
+    monkeypatch.setattr("core.engine.chat", reply)
+    engine = Engine(ssh_hosts=[])
+    engine.request_intent = {"operations": ["SENTINEL_PRIMARY_PLAN"]}
+
+    result = engine.generate_bash_commands(request, str(tmp_path), value, prepared, [])
+
+    assert len(calls) == 3
+    assert [r["phase"] for r in engine.command_attempts] == [
+        "independent_requirements", "independent_requirements", "candidate_commands"]
+    assert "rejected" in engine.command_attempts[0]["review"]
+    assert engine.command_attempts[1]["review"] == "accepted"
+    assert engine.command_attempts[0]["raw_output"] == refusal
+    assert engine.command_attempts[1]["raw_output"] == reference
+    checked = parse_operation_plan(reference)
+    assert same_query_plan(value, checked)
+    assert checked.steps[0].parameters == {"path": "sample.txt", "pattern": pattern}
+    assert calls[0][0] == calls[1][0] and calls[0][1] in calls[1]
+    correction = calls[1][-1]["content"]
+    assert "字面" in correction and "原样保留" in correction
+    assert "正则" in correction and "范围" in correction
+    assert correction.endswith(json.dumps({"cwd": str(tmp_path), "request": request, "answers": []}, ensure_ascii=False))
+    assert "SENTINEL_PRIMARY_PLAN" not in correction and '"plan"' not in correction
+    review_commands(prepared, result)
+    assert result["commands"][0]["argv"] == ["grep", "-F", "-n", "-e", pattern, "--", "./sample.txt"]
+
+
+@pytest.mark.parametrize("user_input,reason", [
+    ("在 sample.txt 中使用正则表达式搜索 ERROR.*", "不支持正则表达式搜索"),
+    ("递归搜索当前目录及子目录中的字面文本 ERROR.*", "不支持正则表达式或递归文本搜索"),
+    ("在 sample.txt 中搜索字面文本 ERROR.*", "不支持网络操作"),
+])
+def test_literal_reference_correction_does_not_override_other_refusals(monkeypatch, tmp_path, no_reference_execution, user_input, reason):
+    (tmp_path / "sample.txt").write_text("ERROR.*\n", encoding="utf-8")
+    value = plan("search_text", path="sample.txt", pattern="ERROR.*")
+    model = Mock(return_value=json.dumps({"status": "unsupported", "reason": reason}))
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+
+    with pytest.raises(ValueError, match="独立参考拒绝生成"):
+        engine.generate_bash_commands(user_input, str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+
+    assert model.call_count == 1
+    assert len(engine.command_attempts) == 1
+    assert engine.command_attempts[0]["phase"] == "independent_requirements"
+
+
+@pytest.mark.parametrize("second", [
+    json.dumps({"status": "unsupported", "reason": "不支持正则表达式搜索"}),
+    '{"status":"ready",',
+    reference_json(plan("search_text", path="sample.txt")),
+    reference_json(plan("search_text", path="sample.txt", pattern="ERROR*")),
+    reference_json(plan("search_text", path="other.txt", pattern="ERROR.*")),
+    reference_json(plan("search_text", path="../sample.txt", pattern="ERROR.*")),
+    reference_json(plan("list_directory", path=".", include_hidden=False)),
+    reference_json(plan("search_text", path="sample.txt", pattern="ERROR.*", recursive=True)),
+], ids=["refused", "invalid_json", "missing_pattern", "changed_pattern", "changed_path", "unsafe_path", "changed_operation", "expanded_scope"])
+def test_literal_reference_correction_failure_stops_without_candidate(monkeypatch, tmp_path, no_reference_execution, second):
+    (tmp_path / "sample.txt").write_text("ERROR.*\n", encoding="utf-8")
+    value = plan("search_text", path="sample.txt", pattern="ERROR.*")
+    first = json.dumps({"status": "unsupported", "reason": "不支持正则表达式搜索"})
+    model = Mock(side_effect=[first, second])
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+
+    with pytest.raises(ValueError):
+        engine.generate_bash_commands("在 sample.txt 中搜索字面文本 ERROR.*", str(tmp_path), value,
+                                      prepare_queries(value, str(tmp_path)), [])
+
+    assert model.call_count == 2
+    assert len(engine.command_attempts) == 2
+    assert engine.command_attempts[1]["raw_output"] == second
+    assert all(r["phase"] == "independent_requirements" for r in engine.command_attempts)
+    assert all("rejected" in r["review"] for r in engine.command_attempts)
+
+
+@pytest.mark.parametrize("user_input,reason", [
+    ("在 sample.txt 和 other.txt 中搜索字面文本 ERROR.*", "不支持多文件或正则表达式搜索"),
+    ("在 sample.txt 中忽略大小写搜索字面文本 ERROR.*", "不支持忽略大小写或正则表达式搜索"),
+    ("在 sample.txt 中搜索字面文本 ERROR.*", "不支持递归或正则表达式搜索"),
+    ("在 sample.txt 中搜索字面文本 ERROR.* 并上传服务器", "不支持网络操作或正则表达式搜索"),
+    ("在 sample.txt 中搜索字面文本 ERROR.*", "不支持正则表达式搜索；另有未说明的限制"),
+    ("在 sample.txt 中搜索字面文本 ERROR.*", "此请求涉及正则表达式，无法处理"),
+], ids=["multiple_files", "ignore_case", "recursive", "network", "unknown_limit", "unknown_reason"])
+def test_literal_reference_mixed_or_uncertain_refusal_never_retries(monkeypatch, tmp_path, no_reference_execution, user_input, reason):
+    original = b"ERROR.*\n"
+    for name in ("sample.txt", "other.txt"):
+        (tmp_path / name).write_bytes(original)
+    value = plan("search_text", path="sample.txt", pattern="ERROR.*")
+    prepared = prepare_queries(value, str(tmp_path))
+    refusal = json.dumps({"status": "unsupported", "reason": reason})
+    model = Mock(side_effect=[refusal, reference_json(value), json.dumps(candidates(prepared))])
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+
+    with pytest.raises(ValueError, match="独立参考拒绝生成"):
+        engine.generate_bash_commands(user_input, str(tmp_path), value, prepared, [])
+
+    assert model.call_count == 1
+    assert len(engine.command_attempts) == 1
+    assert engine.command_attempts[0]["phase"] == "independent_requirements"
+    assert engine.command_attempts[0]["raw_output"] == refusal
+    assert "rejected" in engine.command_attempts[0]["review"]
+    assert value.steps[0].parameters == {"path": "sample.txt", "pattern": "ERROR.*"}
+    for name in ("sample.txt", "other.txt"):
+        assert (tmp_path / name).read_bytes() == original
+
+
+@pytest.mark.parametrize("reason", [
+    "不支持正则表达式搜索",
+    "当前版本不支持正则表达式搜索",
+    "当前版本只支持字面文本搜索，不支持正则表达式搜索",
+])
+def test_literal_reference_known_pure_regex_refusal_still_recovers(monkeypatch, tmp_path, no_reference_execution, reason):
+    original = b"ERROR.*\n"
+    (tmp_path / "sample.txt").write_bytes(original)
+    value = plan("search_text", path="sample.txt", pattern="ERROR.*")
+    prepared = prepare_queries(value, str(tmp_path))
+    model = Mock(side_effect=[json.dumps({"status": "unsupported", "reason": reason}),
+                              reference_json(value), json.dumps(candidates(prepared))])
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+
+    result = engine.generate_bash_commands("在 sample.txt 中搜索字面文本 ERROR.*", str(tmp_path), value, prepared, [])
+
+    assert model.call_count == 3
+    assert [r["phase"] for r in engine.command_attempts] == [
+        "independent_requirements", "independent_requirements", "candidate_commands"]
+    assert engine.command_attempts[1]["review"] == "accepted"
+    reference = parse_operation_plan(engine.command_attempts[1]["raw_output"])
+    assert same_query_plan(value, reference)
+    assert reference.steps[0].parameters == {"path": "sample.txt", "pattern": "ERROR.*"}
+    review_commands(prepared, result)
+    assert result["commands"][0]["argv"] == ["grep", "-F", "-n", "-e", "ERROR.*", "--", "./sample.txt"]
+    assert (tmp_path / "sample.txt").read_bytes() == original
+
+
 @pytest.mark.parametrize("user_input", ["我看看有哪些文件", "我看看这个目录有哪些文件",
                                      "我看看我现在所在目录有哪些文件"])
 def test_directory_default_path_uses_actual_fixture(monkeypatch, tmp_path, user_input):
