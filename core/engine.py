@@ -162,7 +162,7 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 不支持：{"status":"unsupported","reason":"当前版本不支持安装软件"}
 规则：
 - 最多三个步骤。不得输出 command、verification、Shell 命令或 Markdown。
-- 参数只填写用户明确提供或补充确认的条件。不要猜测文件名、目录、时间或整理规则。
+- 参数只填写用户明确提供、补充确认或统一默认规则确定的条件。不要猜测文件名、目录、时间或整理规则。
 - find_files/count_files 参数：path、recursive（必填），可选 pattern、modified_within_days、size_gt_bytes。
 - 当前目录指当前层，recursive=false；用户明确包含子目录才用 true。普通浏览与只读文件查询默认当前目录当前层；修改文件前的查找范围不明时询问。
 - 超过 10 MB 使用 size_gt_bytes=10000000；最近七天使用 modified_within_days=7。
@@ -306,6 +306,34 @@ def _plan_defaults(raw, user_input, answers):
             parameters["include_hidden"] = False
             changed = True
     return json.dumps(value, ensure_ascii=False) if changed else raw
+
+
+def _directory_reference_from_request(user_input, clarifications):
+    # shortcut: 仅接受完整单路径浏览语法及隐藏项问答；扩展表达前须增加无歧义解析测试。
+    request = re.fullmatch(
+        r'''(?:列出|查看|浏览)[ \t]+(?P<path>"[^"\r\n]+"|'[^'\r\n]+'|[A-Za-z0-9_./-]+)'''
+        r"[ \t]+(?:目录|文件夹)(?:的)?内容"
+        r"(?:[，,][ \t]*(?P<hidden>(?:包括|包含|显示|不包括|不包含|不显示)隐藏(?:文件|项)))?[。]?",
+        user_input.strip())
+    if request is None:
+        return None
+    hidden = None if request["hidden"] is None else not request["hidden"].startswith("不")
+    for clarification in clarifications:
+        answer = re.fullmatch(
+            r"问题：(?:是否包含隐藏(?:文件|项)|隐藏(?:文件|项)是否包含)[？?]?；用户回答："
+            r"(?P<answer>是|否|包含|不包含|包括|不包括|yes|no)", clarification, re.I)
+        if answer is None:
+            return None
+        confirmed = answer["answer"].lower() in {"是", "包含", "包括", "yes"}
+        if hidden is not None and hidden != confirmed:
+            return None
+        hidden = confirmed
+    path = request["path"]
+    parameters = {"path": path[1:-1] if path[0] in "\"'" else path}
+    if hidden is not None:
+        parameters["include_hidden"] = hidden
+    raw = json.dumps({"status": "ready", "steps": [{"operation": "list_directory", "parameters": parameters}]})
+    return parse_operation_plan(_plan_defaults(raw, user_input, clarifications))
 
 
 def _same_reference_fields(before, after):
@@ -667,8 +695,12 @@ class Engine:
                 detail = redact_value(reference.reason)
                 record["review"] = "rejected: 独立参考拒绝生成：" + detail
                 request_text = "\n".join([user_input, *answers])
-                # 仅接受已确认的完整理由；混合限制或未知措辞保留拒绝。
-                if (not correction
+                recovered = None if correction else _directory_reference_from_request(user_input, clarifications)
+                if recovered is not None:
+                    reference = recovered
+                    record["recovery"] = {"source": "original_request", "reference": plan_payload(reference)}
+                # 字面搜索仍只接受已确认的纯正则拒绝理由。
+                elif (not correction
                         and re.search(r"字面(?:文本|字符串)", request_text)
                         and not re.search(r"正则|regex|regular\s+expression|递归|子目录", request_text, re.I)
                         and reference.reason in {

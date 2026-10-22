@@ -755,6 +755,101 @@ def test_plan_attempts_are_saved_redacted_across_clarification_rounds(
     executor.execute_query.assert_not_called()
 
 
+@pytest.mark.parametrize("user_input,path,hidden,answers", [
+    ("列出 organize 目录的内容", "organize", False, []),
+    ("浏览 backup 文件夹内容，包括隐藏文件", "backup", True, []),
+    ("查看 organize 目录内容，不包含隐藏文件", "organize", False, []),
+    ('列出 "中文 目录" 目录的内容', "中文 目录", False, []),
+    ("列出 organize 目录的内容", "organize", True, ["问题：隐藏文件是否包含？；用户回答：是"]),
+    ("列出 organize 目录的内容", "organize", False, ["问题：是否包含隐藏文件？；用户回答：否"]),
+])
+def test_directory_reference_refusal_recovers_complete_original_conditions(
+        monkeypatch, tmp_path, no_reference_execution, user_input, path, hidden, answers):
+    (tmp_path / path).mkdir()
+    primary = plan("list_directory", path=path, include_hidden=hidden)
+    prepared = prepare_queries(primary, str(tmp_path))
+    refusal = json.dumps({"status": "unsupported", "reason": "当前版本不支持目录内容列表"})
+    model = Mock(side_effect=[refusal, json.dumps(candidates(prepared))])
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+    result = engine.generate_bash_commands(user_input, str(tmp_path), primary, prepared, answers)
+    review_commands(prepared, result)
+    record = engine.command_attempts[0]
+    recovered = parse_operation_plan(json.dumps(record["recovery"]["reference"]))
+    assert recovered.steps[0].parameters == {"path": path, "include_hidden": hidden}
+    assert same_query_plan(primary, recovered)
+    assert record["raw_output"] == refusal and record["review"] == "accepted"
+    assert record["recovery"]["source"] == "original_request"
+    original = json.loads(model.call_args_list[0].args[0][1]["content"])
+    assert original == {"cwd": str(tmp_path), "request": user_input, "answers": answers}
+    assert model.call_count == 2
+
+
+@pytest.mark.parametrize("user_input,answers", [
+    ("只查询 organize 中的文件夹", []),
+    ("列出 organize 目录的内容，只看文件夹", []),
+    ("列出 organize 目录的内容，按名称筛选文件和文件夹", []),
+    ("列出 organize 目录的内容，并上传服务器", []),
+    ("递归列出 organize 目录的内容", []),
+    ("列出目录内容", []),
+    ("列出 organize 目录的内容", ["是"]),
+    ("列出 organize 目录的内容", ["问题：是否只看文件夹？；用户回答：是"]),
+    ("列出 organize 目录的内容，包括隐藏文件", ["问题：是否包含隐藏文件？；用户回答：否"]),
+])
+def test_directory_reference_refusal_keeps_unknown_or_unsupported_conditions(
+        monkeypatch, tmp_path, no_reference_execution, user_input, answers):
+    (tmp_path / "organize").mkdir()
+    primary = plan("list_directory", path="organize", include_hidden=False)
+    model = Mock(return_value=json.dumps({"status": "unsupported", "reason": "不能完整表达需求"}))
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="独立参考拒绝生成"):
+        engine.generate_bash_commands(user_input, str(tmp_path), primary, prepare_queries(primary, str(tmp_path)), answers)
+    assert model.call_count == 1 and "recovery" not in engine.command_attempts[0]
+    assert all(r["phase"] == "independent_requirements" for r in engine.command_attempts)
+
+
+@pytest.mark.parametrize("user_input,primary", [
+    ("列出 organize 目录的内容", plan("list_directory", path=".", include_hidden=False)),
+    ("列出 organize 目录的内容，包括隐藏文件", plan("list_directory", path="organize", include_hidden=False)),
+    ("列出 organize 目录的内容，不包括隐藏文件", plan("list_directory", path="organize", include_hidden=True)),
+    ("列出 organize 目录的内容", plan("count_files", path="organize", recursive=False)),
+    ("列出 .. 目录的内容", plan("list_directory", path="organize", include_hidden=False)),
+])
+def test_directory_reference_recovery_preserves_strict_comparison_and_paths(
+        monkeypatch, tmp_path, no_reference_execution, user_input, primary):
+    (tmp_path / "organize").mkdir()
+    model = Mock(return_value=json.dumps({"status": "unsupported", "reason": "不支持目录内容列表"}))
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError):
+        engine.generate_bash_commands(user_input, str(tmp_path), primary, prepare_queries(primary, str(tmp_path)), [])
+    assert model.call_count == 1
+    assert "recovery" in engine.command_attempts[0]
+    assert "rejected" in engine.command_attempts[0]["review"]
+    assert all(r["phase"] == "independent_requirements" for r in engine.command_attempts)
+
+
+@pytest.mark.parametrize("reference_path", ["organize", "."])
+def test_valid_directory_reference_never_uses_refusal_recovery(
+        monkeypatch, tmp_path, no_reference_execution, reference_path):
+    (tmp_path / "organize").mkdir()
+    primary = plan("list_directory", path="organize", include_hidden=False)
+    prepared = prepare_queries(primary, str(tmp_path))
+    model = Mock(side_effect=[reference_json(plan("list_directory", path=reference_path, include_hidden=False)),
+                             json.dumps(candidates(prepared))])
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+    if reference_path == "organize":
+        review_commands(prepared, engine.generate_bash_commands("列出 organize 目录的内容", str(tmp_path), primary, prepared, []))
+        assert model.call_count == 2
+    else:
+        with pytest.raises(ValueError, match="独立需求契约不一致"):
+            engine.generate_bash_commands("列出 organize 目录的内容", str(tmp_path), primary, prepared, [])
+        assert model.call_count == 1
+    assert "recovery" not in engine.command_attempts[0]
+
+
 def test_reference_missing_hidden_field_gets_one_isolated_format_correction(monkeypatch, tmp_path):
     value = plan("list_directory", path=".", include_hidden=True)
     prepared = prepare_queries(value, str(tmp_path))
