@@ -146,6 +146,96 @@ def test_directory_selection_refusal_explains_object_limit(monkeypatch, tmp_path
     assert "文件夹" in value.reason and "普通文件筛选" in value.reason
 
 
+@pytest.fixture
+def no_filename_query_execution(monkeypatch):
+    from unittest.mock import Mock
+
+    launch = Mock(side_effect=AssertionError("意图和计划校验不能启动候选命令"))
+    monkeypatch.setattr("subprocess.Popen", launch)
+    yield launch
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize("user_input", [
+    "递归查找子目录中名为 *.log 的文件",
+    "递归查找当前目录及子目录中名为 *.log 的普通文件",
+])
+def test_recursive_filename_query_recovers_directory_selection_mistake(monkeypatch, tmp_path, no_filename_query_execution, user_input):
+    from unittest.mock import Mock
+
+    raw = json.dumps({"status": "unsupported", "reason_code": "directory_selection"})
+    intent_model = Mock(return_value=raw)
+    parameters = {"path": ".", "recursive": True, "pattern": "*.log"}
+    planner = Mock(return_value=json.dumps({"status": "ready", "steps": [
+        {"operation": "find_files", "parameters": parameters}]}))
+    monkeypatch.setattr("core.intent.chat", intent_model)
+    monkeypatch.setattr("core.engine.chat", planner)
+    engine = Engine(ssh_hosts=[])
+
+    value = engine.generate_task_plan(user_input, str(tmp_path))
+
+    assert value.status == "ready" and not value.refused and not value.clarification
+    assert len(value.steps) == 1 and value.steps[0].operation == "find_files"
+    assert value.steps[0].parameters == parameters
+    assert engine.request_intent == {"status": "ready", "operations": ["find_files"]}
+    assert engine.intent_attempts[0]["raw_output"] == raw
+    assert "普通文件" in engine.intent_attempts[0]["resolution"]
+    intent_model.assert_called_once()
+    planner.assert_called_once()
+    assert len(engine.plan_attempts) == 1 and not engine.command_attempts
+
+
+@pytest.mark.parametrize("user_input,answers,code", [
+    ("递归查找子目录中名为 *.log 的文件夹", [], "directory_selection"),
+    ("递归查找当前目录及子目录中名为 *.log 的文件和文件夹", [], "directory_selection"),
+    ("递归查找子目录中名为 *.log 的文件，并复制到 backup", [], "directory_selection"),
+    ("递归查找子目录中名为 *.log 的文件，但只要文件夹", [], "directory_selection"),
+    ("递归查找子目录中名为 *.log 的文件", ["用户回答：还要包含文件夹"], "directory_selection"),
+    ("递归查找子目录中名为 *.log 的文件", [], "network"),
+    ("递归查找子目录中名为 *.log 的文件", [], "permissions"),
+])
+def test_recursive_filename_recovery_keeps_other_rejections(monkeypatch, tmp_path, no_filename_query_execution, user_input, answers, code):
+    from unittest.mock import Mock
+    from core.intent import REJECTION_REASONS
+
+    intent_model = Mock(return_value=json.dumps({"status": "unsupported", "reason_code": code}))
+    planner = Mock(side_effect=AssertionError("真实限制不得进入计划生成"))
+    monkeypatch.setattr("core.intent.chat", intent_model)
+    monkeypatch.setattr("core.engine.chat", planner)
+    engine = Engine(ssh_hosts=[])
+
+    value = engine.generate_task_plan(user_input, str(tmp_path), clarifications=answers)
+
+    assert value.status == "unsupported" and value.refused and not value.steps
+    assert value.reason == REJECTION_REASONS[code]
+    assert engine.request_intent["reason_code"] == code
+    assert not engine.plan_attempts and not engine.command_attempts
+    assert intent_model.call_count == 2
+    planner.assert_not_called()
+
+
+@pytest.mark.parametrize("parameters", [
+    {"path": "../outside", "recursive": True, "pattern": "*.log"},
+    {"path": ".", "recursive": True, "pattern": "*.log", "type": "directory"},
+    {"path": ".", "pattern": "*.log"},
+])
+def test_recursive_filename_recovery_preserves_plan_validation(monkeypatch, tmp_path, no_filename_query_execution, parameters):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({
+        "status": "unsupported", "reason_code": "directory_selection"})))
+    planner = Mock(return_value=json.dumps({"status": "ready", "steps": [
+        {"operation": "find_files", "parameters": parameters}]}))
+    monkeypatch.setattr("core.engine.chat", planner)
+    engine = Engine(ssh_hosts=[])
+
+    with pytest.raises(ValueError):
+        engine.generate_task_plan("递归查找子目录中名为 *.log 的文件", str(tmp_path))
+
+    assert engine.request_intent["operations"] == ["find_files"]
+    assert planner.call_count == 2 and not engine.command_attempts
+
+
 @pytest.mark.parametrize("extra", [{"include_hidden": True}, {"path": "."},
                                   {"recursive": False}, {"pattern": "*.txt"}])
 def test_intent_extra_parameter_gets_specific_error_and_one_retry(monkeypatch, extra):

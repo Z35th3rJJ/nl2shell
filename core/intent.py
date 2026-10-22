@@ -1,4 +1,4 @@
-"""独立识别用户要求的操作，不读取生成计划，也不解析中文动作关键词。"""
+"""独立识别用户要求的操作，不读取生成计划。"""
 import json
 import re
 
@@ -134,6 +134,12 @@ def analyze_request(user_input, answers, backend, attempts):
                 code = result.get("reason_code")
                 if set(result) != {"status", "reason_code"} or code not in REJECTION_REASONS:
                     raise ValueError("拒绝必须提供受支持的 reason_code，不得使用自由文本理由")
+                if code == "directory_selection" and not answers and re.fullmatch(
+                        r"递归查找(?:子目录|当前目录及子目录)中名为[ \t]+"
+                        r"[A-Za-z0-9_.*?\[\]-]+[ \t]+的(?:普通)?文件", user_input.strip()):
+                    record["resolution"] = "按原始请求恢复 find_files：子目录是范围，名称条件筛选普通文件"
+                    record["validation_errors"] = []
+                    return {"status": "ready", "operations": ["find_files"]}
                 result["reason"] = REJECTION_REASONS[code]
             else:
                 key = "clarification"
