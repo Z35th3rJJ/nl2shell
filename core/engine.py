@@ -603,8 +603,9 @@ class Engine:
         self.command_attempts = []
         # 独立需求契约不读取候选计划，避免两者遗漏同一个条件而被自评放行。
         answers = [answer.split("用户回答：", 1)[-1].strip() for answer in clarifications]
-        original = json.dumps({"cwd": cwd, "request": user_input, "answers": answers}, ensure_ascii=False)
+        original = json.dumps({"cwd": cwd, "request": user_input, "answers": clarifications}, ensure_ascii=False)
         messages = [{"role": "system", "content": _AGENT_SYSTEM + "\n仅根据原始需求及用户回答独立提取条件，不检查文件事实。"
+                     "answers 保留澄清问题及用户回答，必须结合问题理解是或否；已确认条件优先于默认值。"
                      "独立参考同样遵守统一默认值：当前目录及未指定深度的只读查询使用当前层 recursive=false，"
                      "不要仅为是否包含子目录而追问；用户明确要求递归时保留递归条件。"
                      "统一默认值是合法参数来源，不受只填写用户明确条件的限制；没有递归要求不属于缺少关键条件。"
@@ -625,7 +626,7 @@ class Engine:
             raw = chat(messages, backend=self._backend, json_mode=True)
             record["raw_output"] = redact_value(raw)
             try:
-                reference = parse_operation_plan(_reference_directory_defaults(raw, user_input, answers))
+                reference = parse_operation_plan(_reference_directory_defaults(raw, user_input, clarifications))
             except (ValueError, TypeError) as error:
                 detail = _model_output_error(error)
                 record["review"] = redact_value("rejected: 参考格式错误：" + detail)

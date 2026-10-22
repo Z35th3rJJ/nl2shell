@@ -566,6 +566,100 @@ def test_directory_default_path_uses_actual_fixture(monkeypatch, tmp_path, user_
     assert prepared["actions"][0]["_expected"] == ["backup", "note.txt"]
 
 
+@pytest.mark.parametrize("answer,hidden", [("是", True), ("否", False), (None, False)])
+def test_directory_clarification_reaches_reference_and_history(
+        monkeypatch, tmp_path, no_reference_execution, answer, hidden):
+    directory = tmp_path / "organize"
+    directory.mkdir()
+    (directory / ".hidden").write_text("fixture", encoding="utf-8")
+    (directory / "visible.txt").write_text("fixture", encoding="utf-8")
+    user_input = "列出 organize 目录的内容"
+    question = "隐藏文件是否包含？"
+    clarifications = [] if answer is None else [f"问题：{question}；用户回答：{answer}"]
+    value = plan("list_directory", path="organize", include_hidden=hidden)
+    prepared = prepare_queries(value, str(tmp_path))
+    plan_replies = iter(([json.dumps({"status": "need_clarification", "clarification": question})]
+                         if answer is not None else []) + [reference_json(value)])
+    reference_requests = []
+
+    def reply(messages, **kwargs):
+        if "仅根据原始需求及用户回答独立提取条件" in messages[0]["content"]:
+            original = json.loads(messages[1]["content"])
+            reference_requests.append(original)
+            assert original == {"cwd": str(tmp_path), "request": user_input, "answers": clarifications}
+            return reference_json(value)
+        if "独立识别的必要操作必须全部出现在计划中" in messages[0]["content"]:
+            return next(plan_replies)
+        return json.dumps(candidates(prepared))
+
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": ["list_directory"]})))
+    monkeypatch.setattr("core.engine.chat", reply)
+    history, executor = HistoryStore(tmp_path / "history.jsonl"), Mock()
+    executor.execute_query.return_value = (ExecutionResult(0, ".hidden\nvisible.txt\n" if hidden else "visible.txt\n", "", 0),
+                                          ["/usr/bin/ls"])
+    prompts = []
+    answers = iter(([answer] if answer is not None else []) + ["yes"])
+
+    def confirm(prompt):
+        executor.execute_query.assert_not_called()
+        prompts.append(prompt)
+        return next(answers)
+
+    engine = Engine(ssh_hosts=[])
+    status = execute_request(engine, executor, history, user_input, str(tmp_path), "confirm", input_fn=confirm)
+    assert status == "verified"
+    assert len(prompts) == (1 if answer is None else 2)
+    assert len(reference_requests) == 1
+    assert engine.command_attempts[0]["review"] == "accepted"
+    record = history.query(limit=1)[0]
+    assert record["clarifications"] == clarifications
+    assert record["plan"]["steps"][0]["parameters"] == {"path": "organize", "include_hidden": hidden}
+    assert all(r["clarifications"] == clarifications for r in history.query())
+    assert record["verification"][0]["status"] == "verified"
+    executor.execute_query.assert_called_once()
+
+
+def test_hidden_yes_clarification_missing_reference_flag_does_not_default_false(
+        monkeypatch, tmp_path, no_reference_execution):
+    (tmp_path / "organize").mkdir()
+    value = plan("list_directory", path="organize", include_hidden=True)
+    prepared = prepare_queries(value, str(tmp_path))
+    chat = Mock(side_effect=[reference_json(plan("list_directory", path="organize")), reference_json(value),
+                             json.dumps(candidates(prepared))])
+    monkeypatch.setattr("core.engine.chat", chat)
+    engine = Engine(ssh_hosts=[])
+    result = engine.generate_bash_commands("列出 organize 目录的内容", str(tmp_path), value, prepared,
+                                           ["问题：隐藏文件是否包含？；用户回答：是"])
+    review_commands(prepared, result)
+    assert chat.call_count == 3
+    assert engine.command_attempts[0]["review"].startswith("rejected: 参考格式错误")
+    assert engine.command_attempts[1]["review"] == "accepted"
+
+
+def test_directory_clarification_is_saved_even_when_reference_disagrees(
+        monkeypatch, tmp_path, no_reference_execution):
+    (tmp_path / "organize").mkdir()
+    clarification = "问题：隐藏文件是否包含？；用户回答：是"
+    engine = engine_for(plan("list_directory", path="organize", include_hidden=True))
+    engine.generate_task_plan.side_effect = [TaskPlan((), clarification="隐藏文件是否包含？"),
+                                            plan("list_directory", path="organize", include_hidden=True)]
+    actual_engine = Engine(ssh_hosts=[])
+    engine.generate_bash_commands.side_effect = actual_engine.generate_bash_commands
+    chat = Mock(return_value=reference_json(plan("list_directory", path="organize", include_hidden=False)))
+    monkeypatch.setattr("core.engine.chat", chat)
+    history, executor = HistoryStore(tmp_path / "history.jsonl"), Mock()
+    answers = iter(["是"])
+    status = execute_request(engine, executor, history, "列出 organize 目录的内容", str(tmp_path), "confirm",
+                             input_fn=lambda _: next(answers))
+    assert status == "blocked"
+    record = history.query(limit=1)[0]
+    assert record["clarifications"] == [clarification]
+    assert not record["executed"]
+    assert "独立需求契约不一致" in record["block_reason"]
+    assert chat.call_count == 1
+    executor.execute_query.assert_not_called()
+
+
 def test_reference_missing_hidden_field_gets_one_isolated_format_correction(monkeypatch, tmp_path):
     value = plan("list_directory", path=".", include_hidden=True)
     prepared = prepare_queries(value, str(tmp_path))

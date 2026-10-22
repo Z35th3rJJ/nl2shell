@@ -292,6 +292,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                     batch_index: int | None = None, assume_yes: bool = False,
                     agent_context: dict | None = None) -> str:
     plan = TaskPlan(())
+    clarifications = []
     prepared, outcomes = None, []
     candidates, bash_query = None, False
     diagnoses, repairs, initial_command_attempts = [], [], []
@@ -342,7 +343,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             save_history(history, user_input=user_input, cwd=cwd,
                          command=json.dumps(payload, ensure_ascii=False),
                          risk=SAFE if prepared and prepared["read_only"] else WARN,
-                         status=status, executed=executed, run_mode=mode, plan=payload,
+                         status=status, executed=executed, run_mode=mode, plan=payload, clarifications=clarifications,
                          preview=(query_preview(prepared) if bash_query else preview_details(prepared)) if prepared else [],
                          verification=outcomes, block_reason=detail,
                          timed_out=any(item.get("timed_out") for item in outcomes),
@@ -408,7 +409,6 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             plan = TaskPlan((TaskStep(operation="list_trash"),))
         else:
             plan = engine.generate_task_plan(user_input, cwd)
-        clarifications = []
         for _ in range(3):
             if not plan.clarification:
                 break
@@ -494,7 +494,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     try:
         save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
                      status="confirmed", executed=False, plan=plan_payload(plan),
-                     preview=preview(), run_mode=mode,
+                     preview=preview(), run_mode=mode, clarifications=clarifications,
                      **({"agent_step": True} if agent_context is not None else {}))
     except OSError as error:
         history.last_record.update(status="audit_failed", block_reason=str(error))
@@ -540,7 +540,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                 raise ValueError("修复确认后文件变化，已停止")
             save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
                          status="repair_confirmed", executed=False, plan=plan_payload(plan),
-                         preview=query_preview(checked), repair_attempt=1, run_mode=mode,
+                         preview=query_preview(checked), repair_attempt=1, run_mode=mode, clarifications=clarifications,
                          **({"agent_step": True} if agent_context is not None else {}))
             repaired = run_action(checked, checked["actions"][action["step"] - 1])
             attempt.update(status=repaired["status"], executed=repaired["executed"], outcome=repaired)
