@@ -308,7 +308,7 @@ def _plan_defaults(raw, user_input, answers):
     return json.dumps(value, ensure_ascii=False) if changed else raw
 
 
-def _directory_reference_from_request(user_input, clarifications):
+def _directory_reference_from_request(user_input, clarifications, *, require_explicit_hidden=False):
     # shortcut: 仅接受完整单路径浏览语法及隐藏项问答；扩展表达前须增加无歧义解析测试。
     request = re.fullmatch(
         r'''(?:列出|查看|浏览)[ \t]+(?P<path>"[^"\r\n]+"|'[^'\r\n]+'|[A-Za-z0-9_./-]+)'''
@@ -328,6 +328,8 @@ def _directory_reference_from_request(user_input, clarifications):
         if hidden is not None and hidden != confirmed:
             return None
         hidden = confirmed
+    if require_explicit_hidden and hidden is None:
+        return None
     path = request["path"]
     parameters = {"path": path[1:-1] if path[0] in "\"'" else path}
     if hidden is not None:
@@ -679,6 +681,12 @@ class Engine:
                 if corrected is None or not _same_reference_fields(partial, corrected):
                     record["review"] = "rejected: 格式修正改变原有语义"
                     raise ValueError("独立参考格式修正改变原有语义；未生成或执行命令")
+            if not correction and (reference.clarification or reference.refused):
+                recovered = _directory_reference_from_request(user_input, clarifications,
+                    require_explicit_hidden=bool(reference.clarification))
+                if recovered is not None:
+                    reference = recovered
+                    record["recovery"] = {"source": "original_request", "reference": plan_payload(reference)}
             if reference.clarification:
                 detail = redact_value(reference.clarification)
                 record["review"] = "rejected: 独立参考要求澄清：" + detail
@@ -695,12 +703,8 @@ class Engine:
                 detail = redact_value(reference.reason)
                 record["review"] = "rejected: 独立参考拒绝生成：" + detail
                 request_text = "\n".join([user_input, *answers])
-                recovered = None if correction else _directory_reference_from_request(user_input, clarifications)
-                if recovered is not None:
-                    reference = recovered
-                    record["recovery"] = {"source": "original_request", "reference": plan_payload(reference)}
                 # 字面搜索仍只接受已确认的纯正则拒绝理由。
-                elif (not correction
+                if (not correction
                         and re.search(r"字面(?:文本|字符串)", request_text)
                         and not re.search(r"正则|regex|regular\s+expression|递归|子目录", request_text, re.I)
                         and reference.reason in {
