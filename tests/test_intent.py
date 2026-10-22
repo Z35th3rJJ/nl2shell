@@ -185,6 +185,53 @@ def test_recursive_filename_query_recovers_directory_selection_mistake(monkeypat
     assert len(engine.plan_attempts) == 1 and not engine.command_attempts
 
 
+def test_explicit_directory_listing_recovers_directory_selection_mistake(
+        monkeypatch, tmp_path, no_filename_query_execution):
+    from unittest.mock import Mock
+
+    user_input = "列出 organize 目录的内容"
+    raw = json.dumps({"status": "unsupported", "reason_code": "directory_selection"})
+    intent_model = Mock(return_value=raw)
+    planner = Mock(return_value=json.dumps({"status": "need_clarification", "clarification": "隐藏文件是否包含？"}))
+    monkeypatch.setattr("core.intent.chat", intent_model)
+    monkeypatch.setattr("core.engine.chat", planner)
+    engine = Engine(ssh_hosts=[])
+
+    value = engine.generate_task_plan(user_input, str(tmp_path))
+
+    assert value.clarification == "隐藏文件是否包含？" and not value.refused
+    assert engine.request_intent == {"status": "ready", "operations": ["list_directory"]}
+    assert engine.intent_attempts[0]["raw_output"] == raw
+    assert "list_directory" in engine.intent_attempts[0]["resolution"]
+    intent_model.assert_called_once()
+    planner.assert_called_once()
+    assert user_input in planner.call_args.args[0][1]["content"]
+    assert not value.steps and not engine.command_attempts
+
+
+@pytest.mark.parametrize("user_input,answers,code", [
+    ("查找 organize 目录中的文件夹", [], "directory_selection"),
+    ("列出 organize 目录的内容，只看文件夹", [], "directory_selection"),
+    ("列出 organize 目录的内容，筛选名称为 app 的文件和文件夹", [], "directory_selection"),
+    ("列出 organize 目录的内容", ["用户回答：只列出文件夹"], "directory_selection"),
+    ("列出 organize 目录的内容", [], "network"),
+])
+def test_explicit_directory_listing_recovery_keeps_real_rejections(
+        monkeypatch, tmp_path, no_filename_query_execution, user_input, answers, code):
+    from unittest.mock import Mock
+    from core.intent import REJECTION_REASONS
+
+    intent_model = Mock(return_value=json.dumps({"status": "unsupported", "reason_code": code}))
+    planner = Mock(side_effect=AssertionError("真实限制不得进入计划生成"))
+    monkeypatch.setattr("core.intent.chat", intent_model)
+    monkeypatch.setattr("core.engine.chat", planner)
+    engine = Engine(ssh_hosts=[])
+    value = engine.generate_task_plan(user_input, str(tmp_path), clarifications=answers)
+    assert value.refused and value.reason == REJECTION_REASONS[code]
+    assert not value.steps and not engine.command_attempts
+    planner.assert_not_called()
+
+
 @pytest.mark.parametrize("user_input,answers,code", [
     ("递归查找子目录中名为 *.log 的文件夹", [], "directory_selection"),
     ("递归查找当前目录及子目录中名为 *.log 的文件和文件夹", [], "directory_selection"),

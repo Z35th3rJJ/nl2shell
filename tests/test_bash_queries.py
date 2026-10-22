@@ -592,7 +592,13 @@ def test_directory_clarification_reaches_reference_and_history(
             return next(plan_replies)
         return json.dumps(candidates(prepared))
 
-    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": ["list_directory"]})))
+    def intent_reply(messages, **kwargs):
+        original = json.loads(messages[1]["content"])
+        assert original["request"] == user_input
+        return json.dumps({"status": "ready", "operations": ["list_directory"]}
+                          if original["answers"] else {"status": "unsupported", "reason_code": "directory_selection"})
+
+    monkeypatch.setattr("core.intent.chat", intent_reply)
     monkeypatch.setattr("core.engine.chat", reply)
     history, executor = HistoryStore(tmp_path / "history.jsonl"), Mock()
     executor.execute_query.return_value = (ExecutionResult(0, ".hidden\nvisible.txt\n" if hidden else "visible.txt\n", "", 0),

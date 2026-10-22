@@ -135,6 +135,11 @@ def analyze_request(user_input, answers, backend, attempts):
                 if set(result) != {"status", "reason_code"} or code not in REJECTION_REASONS:
                     raise ValueError("拒绝必须提供受支持的 reason_code，不得使用自由文本理由")
                 if code == "directory_selection" and not answers and re.fullmatch(
+                        r"列出[ \t]+[A-Za-z0-9_./-]+[ \t]+目录的内容", user_input.strip()):
+                    record["resolution"] = "按原始请求恢复 list_directory：指定目录是浏览路径，不是目录类型筛选"
+                    record["validation_errors"] = []
+                    return {"status": "ready", "operations": ["list_directory"]}
+                if code == "directory_selection" and not answers and re.fullmatch(
                         r"递归查找(?:子目录|当前目录及子目录)中名为[ \t]+"
                         r"[A-Za-z0-9_.*?\[\]-]+[ \t]+的(?:普通)?文件", user_input.strip()):
                     record["resolution"] = "按原始请求恢复 find_files：子目录是范围，名称条件筛选普通文件"
