@@ -95,6 +95,63 @@ def test_color_disabled_keeps_plain_text(terminal, monkeypatch, policy):
     assert "第 1 步：已验证成功" in text and "实际命令" in text
 
 
+@pytest.mark.parametrize("raw,lines", [
+    ("./organize/app.log\0./app.log\0", ["./organize/app.log", "./app.log"]),
+    ("./app.log\0", ["./app.log"]),
+    ("./日志目录/中文 空格.log\0./带'引号.log\0", ["./日志目录/中文 空格.log", "./带'引号.log"]),
+    ("./换\n行.log\0./回\r车.log\0", ['"./换\\n行.log"', '"./回\\r车.log"']),
+])
+def test_find_output_displays_nul_separated_paths_on_individual_lines(capsys, raw, lines):
+    outcome = {"step": 1, "operation": "find_files", "status": "verified", "detail": "验证通过", "stdout": raw}
+    cli.show_outcome(outcome)
+    output = capsys.readouterr().out.split("  命令输出：\n", 1)[1]
+    assert output.splitlines() == lines
+    assert "\0" not in output
+    assert outcome["stdout"] == raw
+
+
+def test_other_command_output_is_not_treated_as_nul_separated_paths(capsys):
+    cli.show_outcome({"step": 1, "operation": "read_text", "status": "unverified",
+                      "detail": "未验证输出", "stdout": "first\0second\n"})
+    assert capsys.readouterr().out.endswith("first\0second\n")
+
+
+@pytest.mark.parametrize("names,raw", [
+    (["organize/app.log", "app.log"], "./organize/app.log\0./app.log\0"),
+    (["app.log"], "./app.log\0"),
+    (["日志目录/中文 空格.log", "单 文件.log"], "./日志目录/中文 空格.log\0./单 文件.log\0"),
+])
+def test_find_display_preserves_verification_history_and_confirmation(tmp_path, capsys, monkeypatch, names, raw):
+    for name in names:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n", encoding="utf-8")
+    launch = Mock(side_effect=AssertionError("显示测试不得启动真实进程"))
+    monkeypatch.setattr("subprocess.Popen", launch)
+    engine = engine_for(step("find_files", path=".", recursive=True, pattern="*.log"))
+    executor, history, prompts = Mock(), History(), []
+    executor.execute_query.return_value = (ExecutionResult(0, raw, "", 0), ["/usr/bin/find", ".", "-print0"])
+
+    def confirm(prompt):
+        executor.execute_query.assert_not_called()
+        prompts.append(prompt)
+        return "yes"
+
+    status = cli.execute_request(engine, executor, history, "递归查找子目录中名为 *.log 的文件",
+                                 str(tmp_path), "confirm", input_fn=confirm)
+    text = capsys.readouterr().out
+    assert status == "verified"
+    assert len(prompts) == 1
+    assert all("./" + name in text.splitlines() for name in names)
+    assert "\0" not in text
+    outcome = history.last_record["verification"][0]
+    assert outcome["status"] == "verified" and outcome["task_completed"]
+    assert outcome["stdout"] == raw
+    assert cli.json_result(history.last_record, status)["verification"][0]["stdout"] == raw
+    executor.execute_query.assert_called_once()
+    launch.assert_not_called()
+
+
 def test_preview_mode_has_no_final_success(tmp_path, terminal):
     history, executor = History(), Mock()
     with redirect_stdout(terminal):

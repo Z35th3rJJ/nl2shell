@@ -267,6 +267,17 @@ def _reference_format_payload(raw):
         return None
 
 
+def _count_request_recursive(user_input, answers):
+    # shortcut: 仅恢复完整、明确的当前目录统计句式；其他表达或补充回答仍由原流程处理。
+    scope = None if answers else re.fullmatch(
+        r"统计当前目录(?P<children>(?:及|和)(?:所有)?子目录)?(?P<level>当前层|这一层)?"
+        r"(?:中|下)?的(?:普通)?文件(?:数量|个数)(?P<include>[，,](?:包括|包含)(?:所有)?子目录)?",
+        user_input)
+    if scope is None or (scope["level"] and (scope["children"] or scope["include"])):
+        return None
+    return bool(scope["children"] or scope["include"])
+
+
 def _reference_directory_defaults(raw, user_input, answers):
     # 隐藏项需求不明确时保留缺字段错误，不从主计划推导独立参考。
     if re.search(r"隐藏|hidden|dot[ -]?files?|点(?:号)?开头|--all|\bls\s+-[a-zA-Z]*[aA]",
@@ -278,12 +289,19 @@ def _reference_directory_defaults(raw, user_input, answers):
         return raw
     if not isinstance(value, dict) or value.get("status") != "ready" or not isinstance(value.get("steps"), list):
         return raw
+    recursive = _count_request_recursive(user_input, answers)
     changed = False
     for step in value["steps"]:
-        if not isinstance(step, dict) or step.get("operation") != "list_directory":
+        if not isinstance(step, dict):
             continue
         parameters = step.get("parameters")
-        if (isinstance(parameters, dict) and isinstance(parameters.get("path"), str)
+        if (step.get("operation") == "count_files" and len(value["steps"]) == 1
+                and recursive is not None and isinstance(parameters, dict)
+                and parameters.get("path") == "." and "recursive" not in parameters):
+            parameters["recursive"] = recursive
+            changed = True
+        if (step.get("operation") == "list_directory" and isinstance(parameters, dict)
+                and isinstance(parameters.get("path"), str)
                 and parameters["path"].strip() and "include_hidden" not in parameters):
             parameters["include_hidden"] = False
             changed = True
@@ -674,6 +692,13 @@ class Engine:
                 record["review"] = redact_value("rejected: 参考路径检查失败：" + str(error))
                 raise ValueError("独立参考路径检查失败：" + str(error)) from error
             break
+        recursive = _count_request_recursive(user_input, answers)
+        if (recursive is not None and len(reference.steps) == 1
+                and reference.steps[0].operation == "count_files"
+                and (reference.steps[0].parameters["path"] != "."
+                     or reference.steps[0].parameters["recursive"] is not recursive)):
+            record["review"] = "rejected: 独立参考统计范围与原始请求不一致"
+            raise ValueError("独立参考统计范围与原始请求不一致；未生成或执行命令")
         if not same_query_plan(plan, reference):
             record["review"] = "rejected"
             raise ValueError("计划与独立需求契约不一致，可能遗漏条件或扩大范围；未生成或执行命令")

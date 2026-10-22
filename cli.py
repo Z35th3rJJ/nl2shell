@@ -266,7 +266,12 @@ def show_outcome(outcome):
         print(f"  文件数量：{outcome['count']}")
     if outcome.get("stdout"):
         print(_paint("  命令输出：", GRAY))
-        print(outcome["stdout"].rstrip())
+        if outcome["operation"] in {"find_files", "count_files"}:
+            for name in outcome["stdout"].split("\0"):
+                if name:
+                    print(json.dumps(name, ensure_ascii=False) if "\n" in name or "\r" in name else name)
+        else:
+            print(outcome["stdout"].rstrip())
     if outcome.get("stderr"):
         print(_paint("  错误输出：", RED))
         print(outcome["stderr"].rstrip())

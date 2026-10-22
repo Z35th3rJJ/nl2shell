@@ -761,6 +761,161 @@ def test_missing_reference_field_does_not_retry_an_unsafe_path(monkeypatch, tmp_
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("user_input,recursive", [
+    ("统计当前目录中的文件数量", False),
+    ("统计当前目录当前层的普通文件个数", False),
+    ("统计当前目录及子目录中的文件数量", True),
+    ("统计当前目录中的文件数量，包括子目录", True),
+])
+def test_count_reference_missing_recursive_uses_request_without_retry(
+        monkeypatch, tmp_path, no_reference_execution, user_input, recursive):
+    value = plan("count_files", path=".", recursive=recursive)
+    prepared = prepare_queries(value, str(tmp_path))
+    incomplete = reference_json(plan("count_files", path="."))
+    chat = Mock(side_effect=lambda messages, **kwargs: incomplete
+                if "仅根据原始需求及用户回答独立提取条件" in messages[0]["content"]
+                else json.dumps(candidates(prepared)))
+    monkeypatch.setattr("core.engine.chat", chat)
+    compare = Mock(wraps=same_query_plan)
+    monkeypatch.setattr("core.bash_queries.same_query_plan", compare)
+    engine = Engine(ssh_hosts=[])
+
+    result = engine.generate_bash_commands(user_input, str(tmp_path), value, prepared, [])
+
+    assert result == candidates(prepared)
+    review_commands(prepared, result)
+    assert chat.call_count == 2  # 一次独立参考，一次候选生成。
+    reference = compare.call_args.args[1]
+    assert reference.steps[0].operation == "count_files"
+    assert reference.steps[0].parameters == {"path": ".", "recursive": recursive}
+    assert engine.command_attempts[0]["raw_output"] == incomplete
+    assert engine.command_attempts[0]["review"] == "accepted"
+    assert [r["phase"] for r in engine.command_attempts] == ["independent_requirements", "candidate_commands"]
+
+
+@pytest.mark.parametrize("parameters", [
+    {},
+    {"recursive": False},
+    {"path": ".", "recursive": "false"},
+    {"path": ".", "unknown": True},
+    {"path": ".."},
+])
+def test_count_reference_invalid_parameters_remain_rejected(
+        monkeypatch, tmp_path, no_reference_execution, parameters):
+    value = plan("count_files", path=".", recursive=False)
+    raw = reference_json(plan("count_files", **parameters))
+    chat = Mock(return_value=raw)
+    monkeypatch.setattr("core.engine.chat", chat)
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError):
+        engine.generate_bash_commands("统计当前目录中的文件数量", str(tmp_path), value,
+                                      prepare_queries(value, str(tmp_path)), [])
+    assert chat.call_count <= 2
+    assert all(r["phase"] == "independent_requirements" for r in engine.command_attempts)
+
+
+@pytest.mark.parametrize("user_input,recursive", [
+    ("统计当前目录中的文件数量", True),
+    ("统计当前目录及子目录中的文件数量", False),
+])
+def test_count_reference_explicit_scope_conflict_is_rejected_even_when_primary_agrees(
+        monkeypatch, tmp_path, no_reference_execution, user_input, recursive):
+    value = plan("count_files", path=".", recursive=recursive)
+    chat = Mock(return_value=reference_json(value))
+    monkeypatch.setattr("core.engine.chat", chat)
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError):
+        engine.generate_bash_commands(user_input, str(tmp_path), value, prepare_queries(value, str(tmp_path)), [])
+    assert chat.call_count <= 2
+    assert all(r["phase"] == "independent_requirements" for r in engine.command_attempts)
+
+
+@pytest.mark.parametrize("user_input,answers", [
+    ("统计文件数量", []),
+    ("统计当前目录中的文件数量，不含子目录但包括子目录里的日志", []),
+    ("统计当前目录中的文件数量", ["用户回答：还要统计 backup"]),
+])
+def test_count_reference_ambiguous_request_does_not_default(
+        monkeypatch, tmp_path, no_reference_execution, user_input, answers):
+    value = plan("count_files", path=".", recursive=False)
+    chat = Mock(return_value=reference_json(plan("count_files", path=".")))
+    monkeypatch.setattr("core.engine.chat", chat)
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError):
+        engine.generate_bash_commands(user_input, str(tmp_path), value, prepare_queries(value, str(tmp_path)), answers)
+    assert chat.call_count == 2
+    assert all(r["phase"] == "independent_requirements" for r in engine.command_attempts)
+
+
+def test_count_reference_default_preserves_strict_comparison(monkeypatch, tmp_path, no_reference_execution):
+    value = plan("count_files", path=".", recursive=True)
+    chat = Mock(return_value=reference_json(plan("count_files", path=".")))
+    monkeypatch.setattr("core.engine.chat", chat)
+    engine = Engine(ssh_hosts=[])
+    with pytest.raises(ValueError, match="独立需求契约不一致"):
+        engine.generate_bash_commands("统计当前目录中的文件数量", str(tmp_path), value,
+                                      prepare_queries(value, str(tmp_path)), [])
+    assert chat.call_count == 1
+    assert engine.command_attempts[0]["review"] == "rejected"
+
+
+@pytest.mark.parametrize("user_input,recursive,raw,count", [
+    ("统计当前目录中的文件数量", False, "./app.log\0", 1),
+    ("统计当前目录及子目录中的文件数量", True, "./app.log\0./nested/child.log\0", 2),
+])
+def test_count_missing_reference_recursive_completes_cli_with_independent_verification(
+        monkeypatch, tmp_path, no_reference_execution, capsys, user_input, recursive, raw, count):
+    (tmp_path / "app.log").write_text("fixture\n", encoding="utf-8")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested/child.log").write_text("fixture\n", encoding="utf-8")
+    value = plan("count_files", path=".", recursive=recursive)
+    prepared = prepare_queries(value, str(tmp_path))
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": ["count_files"]})))
+    chat = Mock(side_effect=[reference_json(value), reference_json(plan("count_files", path=".")),
+                             json.dumps(candidates(prepared))])
+    monkeypatch.setattr("core.engine.chat", chat)
+    engine, history, executor = Engine(ssh_hosts=[]), History(), Mock()
+    executor.execute_query.return_value = (ExecutionResult(0, raw, "", 0), ["/usr/bin/find", ".", "-print0"])
+
+    status = execute_request(engine, executor, history, user_input, str(tmp_path), "confirm", input_fn=lambda _: "yes")
+
+    assert status == "verified"
+    outcome = history.last_record["verification"][0]
+    assert outcome["count"] == count and outcome["task_completed"]
+    assert outcome["stdout"] == raw
+    assert f"文件数量：{count}" in capsys.readouterr().out
+    assert chat.call_count == 3  # 主计划、独立参考和候选各一次。
+    assert engine.command_attempts[0]["review"] == "accepted"
+    executor.execute_query.assert_called_once()
+
+
+def test_invalid_count_reference_never_reaches_cli_confirmation_or_execution(
+        monkeypatch, tmp_path, no_reference_execution):
+    value = plan("count_files", path=".", recursive=False)
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": ["count_files"]})))
+    chat = Mock(side_effect=[reference_json(value), reference_json(plan("count_files", path=".", recursive="false"))])
+    monkeypatch.setattr("core.engine.chat", chat)
+    engine, history, executor = Engine(ssh_hosts=[]), History(), Mock()
+    status = execute_request(engine, executor, history, "统计当前目录中的文件数量", str(tmp_path), "confirm",
+                             input_fn=lambda _: pytest.fail("非法参考不得要求执行确认"))
+    assert status == "blocked" and not history.last_record["executed"]
+    assert chat.call_count == 2
+    assert all(r["phase"] == "independent_requirements" for r in engine.command_attempts)
+    executor.execute_query.assert_not_called()
+    executor.execute.assert_not_called()
+
+
+def test_find_output_without_final_nul_remains_unverified(tmp_path, no_reference_execution):
+    (tmp_path / "app.log").write_text("fixture\n", encoding="utf-8")
+    prepared = prepare_queries(plan("find_files", path=".", recursive=True, pattern="*.log"), str(tmp_path))
+    review_commands(prepared, candidates(prepared))
+    executor = Mock()
+    executor.execute_query.return_value = (ExecutionResult(0, "./app.log", "", 0), ["/usr/bin/find", ".", "-print0"])
+    outcome = execute_query(prepared, prepared["actions"][0], executor)
+    assert outcome["status"] == "unverified" and not outcome["task_completed"]
+    assert outcome["stdout"] == "./app.log"
+
+
 @pytest.mark.parametrize("path", [".", "backup"])
 def test_reference_missing_hidden_uses_default_without_model_correction(monkeypatch, tmp_path, path):
     (tmp_path / "backup").mkdir()
