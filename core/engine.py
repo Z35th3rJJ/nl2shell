@@ -644,14 +644,17 @@ class Engine:
                             "当前版本不支持正则表达式搜索",
                             "当前版本只支持字面文本搜索，不支持正则表达式搜索",
                         }):
-                    messages.extend([{"role": "assistant", "content": raw}, {"role": "user", "content":
-                        "只允许一次字面搜索误拒绝复核：用户明确要求字面文本搜索，.、*、[、]、+ 等是普通字符，"
-                        "不能仅因看起来像正则表达式而拒绝，不得转换为正则搜索。"
-                        "只依据下面的原始需求及用户回答重新生成独立参考，不得从主计划推导答案。"
-                        "原样保留文件路径、搜索字符串、操作和搜索范围，不得增加条件或扩大范围。"
-                        "真正不支持或无法确认语义时仍须拒绝，不得强行返回 ready。\n" + original}])
-                    continue
-                raise ValueError("独立参考拒绝生成：" + detail + "；未生成或执行命令")
+                    # 仅识别完整的无引号 ASCII 单路径、单串语法；补充回答或其他表达不推断。
+                    conditions = None if answers else re.fullmatch(
+                        r"在[ \t]+(?P<path>[A-Za-z0-9_./-]+)[ \t]+中搜索字面(?:文本|字符串)[ \t]+"
+                        r"(?P<pattern>[A-Za-z0-9_.*+\[\]?^-]+)", user_input)
+                    if conditions is None:
+                        raise ValueError("独立参考拒绝生成：无法从原始请求无歧义确认单文件字面搜索；未生成或执行命令")
+                    reference = parse_operation_plan(json.dumps({"status": "ready", "steps": [{
+                        "operation": "search_text", "parameters": conditions.groupdict()}]}))
+                    record["recovery"] = {"source": "original_request", "reference": plan_payload(reference)}
+                else:
+                    raise ValueError("独立参考拒绝生成：" + detail + "；未生成或执行命令")
             try:
                 reference = _normalize_paths(reference, cwd)
             except (ValueError, OSError) as error:

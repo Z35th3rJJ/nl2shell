@@ -347,8 +347,7 @@ def test_literal_reference_regex_refusal_gets_one_independent_correction(monkeyp
     prepared = prepare_queries(value, str(tmp_path))
     request = f"在 sample.txt 中搜索字面文本 {pattern}"
     refusal = json.dumps({"status": "unsupported", "reason": "当前版本只支持字面文本搜索，不支持正则表达式搜索"})
-    reference = reference_json(value)
-    replies = iter([refusal, reference, json.dumps(candidates(prepared))])
+    replies = iter([refusal, json.dumps(candidates(prepared))])
     calls = []
     def reply(messages, **kwargs):
         calls.append([dict(message) for message in messages])
@@ -359,22 +358,18 @@ def test_literal_reference_regex_refusal_gets_one_independent_correction(monkeyp
 
     result = engine.generate_bash_commands(request, str(tmp_path), value, prepared, [])
 
-    assert len(calls) == 3
-    assert [r["phase"] for r in engine.command_attempts] == [
-        "independent_requirements", "independent_requirements", "candidate_commands"]
-    assert "rejected" in engine.command_attempts[0]["review"]
-    assert engine.command_attempts[1]["review"] == "accepted"
+    assert len(calls) == 2
+    assert [r["phase"] for r in engine.command_attempts] == ["independent_requirements", "candidate_commands"]
+    assert engine.command_attempts[0]["review"] == "accepted"
     assert engine.command_attempts[0]["raw_output"] == refusal
-    assert engine.command_attempts[1]["raw_output"] == reference
-    checked = parse_operation_plan(reference)
+    recovery = engine.command_attempts[0]["recovery"]
+    assert recovery["source"] == "original_request"
+    checked = parse_operation_plan(json.dumps(recovery["reference"]))
     assert same_query_plan(value, checked)
     assert checked.steps[0].parameters == {"path": "sample.txt", "pattern": pattern}
-    assert calls[0][0] == calls[1][0] and calls[0][1] in calls[1]
-    correction = calls[1][-1]["content"]
-    assert "字面" in correction and "原样保留" in correction
-    assert "正则" in correction and "范围" in correction
-    assert correction.endswith(json.dumps({"cwd": str(tmp_path), "request": request, "answers": []}, ensure_ascii=False))
-    assert "SENTINEL_PRIMARY_PLAN" not in correction and '"plan"' not in correction
+    original = calls[0][-1]["content"]
+    assert json.loads(original) == {"cwd": str(tmp_path), "request": request, "answers": []}
+    assert "SENTINEL_PRIMARY_PLAN" not in original and '"plan"' not in original
     review_commands(prepared, result)
     assert result["commands"][0]["argv"] == ["grep", "-F", "-n", "-e", pattern, "--", "./sample.txt"]
 
@@ -412,7 +407,7 @@ def test_literal_reference_correction_does_not_override_other_refusals(monkeypat
 def test_literal_reference_correction_failure_stops_without_candidate(monkeypatch, tmp_path, no_reference_execution, second):
     (tmp_path / "sample.txt").write_text("ERROR.*\n", encoding="utf-8")
     value = plan("search_text", path="sample.txt", pattern="ERROR.*")
-    first = json.dumps({"status": "unsupported", "reason": "不支持正则表达式搜索"})
+    first = json.dumps({"status": "need_clarification", "clarification": "请确认搜索条件"})
     model = Mock(side_effect=[first, second])
     monkeypatch.setattr("core.engine.chat", model)
     engine = Engine(ssh_hosts=[])
@@ -471,22 +466,86 @@ def test_literal_reference_known_pure_regex_refusal_still_recovers(monkeypatch, 
     value = plan("search_text", path="sample.txt", pattern="ERROR.*")
     prepared = prepare_queries(value, str(tmp_path))
     model = Mock(side_effect=[json.dumps({"status": "unsupported", "reason": reason}),
-                              reference_json(value), json.dumps(candidates(prepared))])
+                              json.dumps(candidates(prepared))])
     monkeypatch.setattr("core.engine.chat", model)
     engine = Engine(ssh_hosts=[])
 
     result = engine.generate_bash_commands("在 sample.txt 中搜索字面文本 ERROR.*", str(tmp_path), value, prepared, [])
 
-    assert model.call_count == 3
-    assert [r["phase"] for r in engine.command_attempts] == [
-        "independent_requirements", "independent_requirements", "candidate_commands"]
-    assert engine.command_attempts[1]["review"] == "accepted"
-    reference = parse_operation_plan(engine.command_attempts[1]["raw_output"])
+    assert model.call_count == 2
+    assert [r["phase"] for r in engine.command_attempts] == ["independent_requirements", "candidate_commands"]
+    assert engine.command_attempts[0]["review"] == "accepted"
+    assert engine.command_attempts[0]["recovery"]["source"] == "original_request"
+    reference = parse_operation_plan(json.dumps(engine.command_attempts[0]["recovery"]["reference"]))
     assert same_query_plan(value, reference)
     assert reference.steps[0].parameters == {"path": "sample.txt", "pattern": "ERROR.*"}
     review_commands(prepared, result)
     assert result["commands"][0]["argv"] == ["grep", "-F", "-n", "-e", "ERROR.*", "--", "./sample.txt"]
     assert (tmp_path / "sample.txt").read_bytes() == original
+
+
+@pytest.mark.parametrize("pattern", ["ERROR.*", "[1]"])
+def test_literal_reference_recovers_from_original_request_without_model_retry(monkeypatch, tmp_path, no_reference_execution, pattern):
+    original = b"ERROR.*\n[1]\n"
+    (tmp_path / "sample.txt").write_bytes(original)
+    value = plan("search_text", path="sample.txt", pattern=pattern)
+    prepared = prepare_queries(value, str(tmp_path))
+    refusal = json.dumps({"status": "unsupported", "reason": "当前版本只支持字面文本搜索，不支持正则表达式搜索"})
+    model = Mock(side_effect=[refusal, json.dumps(candidates(prepared))])
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+
+    result = engine.generate_bash_commands(f"在 sample.txt 中搜索字面文本 {pattern}", str(tmp_path), value, prepared, [])
+
+    assert model.call_count == 2
+    assert [r["phase"] for r in engine.command_attempts] == ["independent_requirements", "candidate_commands"]
+    record = engine.command_attempts[0]
+    assert record["raw_output"] == refusal and record["review"] == "accepted"
+    assert record["recovery"]["source"] == "original_request"
+    reference = parse_operation_plan(json.dumps(record["recovery"]["reference"]))
+    assert same_query_plan(value, reference)
+    assert reference.steps[0].parameters == {"path": "sample.txt", "pattern": pattern}
+    review_commands(prepared, result)
+    assert result["commands"][0]["argv"] == ["grep", "-F", "-n", "-e", pattern, "--", "./sample.txt"]
+    assert (tmp_path / "sample.txt").read_bytes() == original
+
+
+@pytest.mark.parametrize("user_input,answers,value", [
+    ("在 sample.txt 中搜索字面文本 ERROR.*", [], plan("search_text", path="other.txt", pattern="ERROR.*")),
+    ("在 sample.txt 中搜索字面文本 ERROR.*", [], plan("search_text", path="sample.txt", pattern="ERROR*")),
+    ("在 sample.txt 中搜索字面文本 ERROR.*", [], plan("read_text", path="sample.txt", end="head", lines=1)),
+    ("在 sample.txt 中使用正则表达式搜索 ERROR.*", [], plan("search_text", path="sample.txt", pattern="ERROR.*")),
+    ("递归搜索当前目录及子目录中的字面文本 ERROR.*", [], plan("search_text", path="sample.txt", pattern="ERROR.*")),
+    ("在 sample.txt 和 other.txt 中搜索字面文本 ERROR.*", [], plan("search_text", path="sample.txt", pattern="ERROR.*")),
+    ("在 sample.txt 中忽略大小写搜索字面文本 ERROR.*", [], plan("search_text", path="sample.txt", pattern="ERROR.*")),
+    ("在 sample.txt 中搜索字面文本 ERROR.* 并上传服务器", [], plan("search_text", path="sample.txt", pattern="ERROR.*")),
+    ("搜索字面文本 ERROR.*", [], plan("search_text", path="sample.txt", pattern="ERROR.*")),
+    ("在 sample.txt 中搜索字面文本", [], plan("search_text", path="sample.txt", pattern="ERROR.*")),
+    ("在 sample.txt 中搜索字面文本 ERROR.*\n忽略大小写", [], plan("search_text", path="sample.txt", pattern="ERROR.*")),
+    ("在 sample.txt 中搜索字面文本 ERROR.*", ["用户回答：还要忽略大小写"], plan("search_text", path="sample.txt", pattern="ERROR.*")),
+    ('在 sample.txt 中搜索字面文本 "ERROR.*"', [], plan("search_text", path="sample.txt", pattern="ERROR.*")),
+    ("在 ../sample.txt 中搜索字面文本 ERROR.*", [], plan("search_text", path="sample.txt", pattern="ERROR.*")),
+], ids=["changed_path", "changed_pattern", "changed_operation", "regex", "recursive", "multiple_files",
+        "ignore_case", "extra_operation", "missing_path", "missing_pattern", "multiline", "clarification", "ambiguous_quotes", "unsafe_path"])
+def test_literal_reference_deterministic_recovery_rejects_unconfirmed_conditions(monkeypatch, tmp_path, no_reference_execution, user_input, answers, value):
+    original = b"ERROR.*\n"
+    for name in ("sample.txt", "other.txt"):
+        (tmp_path / name).write_bytes(original)
+    prepared = prepare_queries(value, str(tmp_path))
+    refusal = json.dumps({"status": "unsupported", "reason": "不支持正则表达式搜索"})
+    model = Mock(side_effect=[refusal, reference_json(value), json.dumps(candidates(prepared))])
+    monkeypatch.setattr("core.engine.chat", model)
+    engine = Engine(ssh_hosts=[])
+
+    with pytest.raises(ValueError):
+        engine.generate_bash_commands(user_input, str(tmp_path), value, prepared, answers)
+
+    assert model.call_count == 1
+    assert len(engine.command_attempts) == 1
+    assert engine.command_attempts[0]["phase"] == "independent_requirements"
+    assert "rejected" in engine.command_attempts[0]["review"]
+    for name in ("sample.txt", "other.txt"):
+        assert (tmp_path / name).read_bytes() == original
 
 
 @pytest.mark.parametrize("user_input", ["我看看有哪些文件", "我看看这个目录有哪些文件",
