@@ -96,7 +96,7 @@ def validate_parameters(operation: str, p: dict, index: int, previous) -> None:
         "count_files": {"path", "recursive", "pattern", "modified_within_days", "size_gt_bytes"},
         "create_file": {"path"}, "create_directory": {"path"},
         "copy_files": {"sources", "source_step", "destination", "destination_name", "preserve_structure"},
-        "move_files": {"sources", "source_step", "destination"},
+        "move_files": {"sources", "source_step", "destination", "destination_name"},
         "rename": {"source", "destination"}, "trash": {"sources", "source_step"},
         "restore": {"trash_id"}, "list_trash": set(),
         "organize_files": {"path", "recursive", "group_by"}, "system_info": {"query", "path"},

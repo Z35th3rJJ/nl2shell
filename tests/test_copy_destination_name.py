@@ -70,6 +70,193 @@ def test_copy_destination_name_complete_flow(tmp_path, monkeypatch, capsys, user
     executor.execute_query.assert_not_called()
 
 
+def test_copy_to_new_full_target_path_preserves_exact_destination(tmp_path, monkeypatch):
+    source = tmp_path / "source_one.txt"
+    source.write_bytes(b"exact target content")
+    raw = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": {
+        "sources": ["source_one.txt"], "destination": "first_backup/first_copy.txt"}}]})
+    monkeypatch.setattr("core.engine.chat", Mock(return_value=raw))
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({
+        "status": "ready", "operations": ["copy_files"],
+        "named_sources": ["source_one.txt"], "selection_required": False})))
+    history, executor = HistoryStore(tmp_path / "history.jsonl"), Mock()
+
+    assert execute_request(Engine(ssh_hosts=[]), executor, history,
+                           "将 source_one.txt 复制到 first_backup/first_copy.txt",
+                           str(tmp_path), "confirm", input_fn=lambda _: "yes") == "verified"
+
+    record = history.query(limit=1)[0]
+    assert record["plan"]["steps"][0]["parameters"] == {
+        "sources": ["source_one.txt"], "destination": "first_backup", "destination_name": "first_copy.txt"}
+    assert Path(record["preview"][0]["items"][0]["destination"]).as_posix() == "first_backup/first_copy.txt"
+    assert (tmp_path / "first_backup/first_copy.txt").read_bytes() == source.read_bytes()
+    assert not (tmp_path / "first_backup/first_copy.txt/source_one.txt").exists()
+    executor.execute.assert_not_called()
+    executor.execute_query.assert_not_called()
+
+
+def test_copy_to_existing_nested_directory_keeps_source_name(tmp_path, monkeypatch):
+    source = tmp_path / "source_one.txt"
+    source.write_bytes(b"directory target content")
+    (tmp_path / "first_backup/first_copy.txt").mkdir(parents=True)
+    raw = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": {
+        "sources": ["source_one.txt"], "destination": "first_backup/first_copy.txt"}}]})
+    monkeypatch.setattr("core.engine.chat", Mock(return_value=raw))
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({
+        "status": "ready", "operations": ["copy_files"],
+        "named_sources": ["source_one.txt"], "selection_required": False})))
+
+    plan = Engine(ssh_hosts=[]).generate_task_plan(
+        "将 source_one.txt 复制到 first_backup/first_copy.txt", str(tmp_path))
+    prepared = prepare_plan(plan, str(tmp_path))
+
+    assert plan.steps[0].parameters == {
+        "sources": ["source_one.txt"], "destination": "first_backup/first_copy.txt"}
+    assert Path(preview_details(prepared)[0]["items"][0]["destination"]).as_posix() == \
+        "first_backup/first_copy.txt/source_one.txt"
+    assert execute_action(prepared, prepared["actions"][0])["status"] == "verified"
+    assert (tmp_path / "first_backup/first_copy.txt/source_one.txt").read_bytes() == source.read_bytes()
+
+
+def test_multiple_sources_cannot_share_one_full_target_path(tmp_path, monkeypatch):
+    for name in ("one.txt", "two.txt"):
+        (tmp_path / name).write_bytes(name.encode())
+    raw = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": {
+        "sources": ["one.txt", "two.txt"], "destination": "backup/combined.txt"}}]})
+    monkeypatch.setattr("core.engine.chat", Mock(return_value=raw))
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({
+        "status": "ready", "operations": ["copy_files"],
+        "named_sources": ["one.txt", "two.txt"], "selection_required": False})))
+
+    plan = Engine(ssh_hosts=[]).generate_task_plan(
+        "将 one.txt 和 two.txt 复制到 backup/combined.txt", str(tmp_path))
+
+    assert plan.status == "need_clarification" and not plan.steps
+    assert "目标" in plan.clarification
+    assert not (tmp_path / "backup").exists()
+
+
+def test_move_to_new_full_target_path_preserves_exact_destination(tmp_path, monkeypatch):
+    source = tmp_path / "source_one.txt"
+    source.write_bytes(b"move exact target")
+    raw = json.dumps({"status": "ready", "steps": [{"operation": "move_files", "parameters": {
+        "sources": ["source_one.txt"], "destination": "first_backup/moved.txt"}}]})
+    monkeypatch.setattr("core.engine.chat", Mock(return_value=raw))
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({
+        "status": "ready", "operations": ["move_files"],
+        "named_sources": ["source_one.txt"], "selection_required": False})))
+
+    plan = Engine(ssh_hosts=[]).generate_task_plan(
+        "将 source_one.txt 移动到 first_backup/moved.txt", str(tmp_path))
+    prepared = prepare_plan(plan, str(tmp_path))
+
+    assert plan.steps[0].parameters == {
+        "sources": ["source_one.txt"], "destination": "first_backup", "destination_name": "moved.txt"}
+    assert Path(preview_details(prepared)[0]["items"][0]["destination"]).as_posix() == "first_backup/moved.txt"
+    assert execute_action(prepared, prepared["actions"][0])["status"] == "verified"
+    assert not source.exists()
+    assert (tmp_path / "first_backup/moved.txt").read_bytes() == b"move exact target"
+
+
+def test_explicit_new_nested_directory_keeps_directory_semantics(tmp_path, monkeypatch):
+    source = tmp_path / "source_one.txt"
+    source.write_bytes(b"new nested directory")
+    raw = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": {
+        "sources": ["source_one.txt"], "destination": "backup/archive"}}]})
+    monkeypatch.setattr("core.engine.chat", Mock(return_value=raw))
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({
+        "status": "ready", "operations": ["copy_files"],
+        "named_sources": ["source_one.txt"], "selection_required": False})))
+
+    plan = Engine(ssh_hosts=[]).generate_task_plan(
+        "将 source_one.txt 复制到 backup/archive 目录", str(tmp_path))
+    prepared = prepare_plan(plan, str(tmp_path))
+
+    assert plan.steps[0].parameters == {"sources": ["source_one.txt"], "destination": "backup/archive"}
+    assert Path(preview_details(prepared)[0]["items"][0]["destination"]).as_posix() == \
+        "backup/archive/source_one.txt"
+    assert execute_action(prepared, prepared["actions"][0])["status"] == "verified"
+    assert (tmp_path / "backup/archive/source_one.txt").read_bytes() == source.read_bytes()
+
+
+def test_existing_full_target_file_is_not_overwritten(tmp_path, monkeypatch):
+    source = tmp_path / "source_one"
+    source.write_bytes(b"new content")
+    target = tmp_path / "backup/result"
+    target.parent.mkdir()
+    target.write_bytes(b"keep existing")
+    raw = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": {
+        "sources": ["source_one"], "destination": "backup/result"}}]})
+    monkeypatch.setattr("core.engine.chat", Mock(return_value=raw))
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({
+        "status": "ready", "operations": ["copy_files"],
+        "named_sources": ["source_one"], "selection_required": False})))
+
+    plan = Engine(ssh_hosts=[]).generate_task_plan("将 source_one 复制到 backup/result", str(tmp_path))
+    prepared = prepare_plan(plan, str(tmp_path))
+
+    assert plan.steps[0].parameters == {
+        "sources": ["source_one"], "destination": "backup", "destination_name": "result"}
+    assert Path(preview_details(prepared)[0]["items"][0]["destination"]).as_posix() == "backup/result_1"
+    assert execute_action(prepared, prepared["actions"][0])["status"] == "verified"
+    assert target.read_bytes() == b"keep existing"
+    assert (tmp_path / "backup/result_1").read_bytes() == source.read_bytes()
+
+
+@pytest.mark.parametrize("parameters", [
+    {"sources": ["source_one.txt"], "destination": "other/first_copy.txt"},
+    {"sources": ["source_one.txt"], "destination": "first_backup", "destination_name": "changed.txt"},
+])
+def test_full_target_path_rejects_model_parameter_conflicts(tmp_path, monkeypatch, parameters):
+    raw = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": parameters}]})
+    monkeypatch.setattr("core.engine.chat", Mock(return_value=raw))
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({
+        "status": "ready", "operations": ["copy_files"],
+        "named_sources": ["source_one.txt"], "selection_required": False})))
+
+    plan = Engine(ssh_hosts=[]).generate_task_plan(
+        "将 source_one.txt 复制到 first_backup/first_copy.txt", str(tmp_path))
+
+    assert plan.status == "need_clarification" and not plan.steps
+    assert not (tmp_path / "first_backup").exists()
+
+
+def test_copy_target_alternatives_remain_ambiguous(tmp_path, monkeypatch):
+    raw = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": {
+        "sources": ["source_one.txt"], "destination": "backup/one.txt"}}]})
+    monkeypatch.setattr("core.engine.chat", Mock(return_value=raw))
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({
+        "status": "ready", "operations": ["copy_files"],
+        "named_sources": ["source_one.txt"], "selection_required": False})))
+
+    plan = Engine(ssh_hosts=[]).generate_task_plan(
+        "将 source_one.txt 复制到 backup/one.txt 或 archive/two.txt", str(tmp_path))
+
+    assert plan.status == "need_clarification" and not plan.steps
+    assert not (tmp_path / "backup").exists() and not (tmp_path / "archive").exists()
+
+
+def test_full_target_normalization_is_shared_with_independent_reference(tmp_path, monkeypatch):
+    bad = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": {
+        "sources": ["source_one.txt"], "destination": "first_backup/first_copy.txt"}}]})
+    model = Mock(side_effect=[bad, bad, '{"commands":[]}'])
+    monkeypatch.setattr("core.engine.chat", model)
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({
+        "status": "ready", "operations": ["copy_files"],
+        "named_sources": ["source_one.txt"], "selection_required": False})))
+    monkeypatch.setattr("core.bash_queries.command_request", Mock(return_value=[
+        {"role": "system", "content": ""}, {"role": "user", "content": ""}]))
+    engine = Engine(ssh_hosts=[])
+    request = "将 source_one.txt 复制到 first_backup/first_copy.txt"
+
+    plan = engine.generate_task_plan(request, str(tmp_path))
+    assert plan.steps[0].parameters == {
+        "sources": ["source_one.txt"], "destination": "first_backup", "destination_name": "first_copy.txt"}
+    assert engine.generate_bash_commands(request, str(tmp_path), plan, {}, []) == {"commands": []}
+    assert engine.command_attempts[0]["review"] == "accepted"
+    assert model.call_count == 3
+
+
 def test_plain_copy_ignores_model_name_after_named_copies(tmp_path, monkeypatch):
     source = tmp_path / "copy_me.txt"
     source.write_bytes(b"unchanged source")
@@ -225,7 +412,12 @@ def test_copy_destination_name_cannot_drop_or_change_requested_name(tmp_path, mo
     model = Mock(return_value=json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": parameters}]}))
     monkeypatch.setattr("core.engine.chat", model)
     result = Engine(ssh_hosts=[]).generate_task_plan("将 copy_me.txt 复制为 copy_test.txt", str(tmp_path))
-    assert result.clarification and not result.steps
+    if name is None:
+        assert result.status == "ready"
+        assert result.steps[0].parameters == {
+            "sources": ["copy_me.txt"], "destination": ".", "destination_name": "copy_test.txt"}
+    else:
+        assert result.clarification and not result.steps
     model.assert_called_once()
 
 
@@ -265,9 +457,9 @@ def test_copy_destination_name_preserves_directory_source_and_path_boundary(tmp_
     assert (tmp_path / "backup/new folder/内容.txt").read_bytes() == (tmp_path / "folder/内容.txt").read_bytes()
     with pytest.raises(ValueError, match="工作目录之外"):
         prepare_plan(copy_plan(sources=["folder"], destination="..", destination_name="outside"), str(tmp_path))
-    with pytest.raises(ValueError, match="不支持的操作参数"):
+    with pytest.raises(ValueError, match="destination_name"):
         parse_operation_plan(json.dumps({"status": "ready", "steps": [{"operation": "move_files", "parameters": {
-            "sources": ["folder"], "destination": "backup", "destination_name": "other"}}]}))
+            "sources": ["folder", "other"], "destination": "backup", "destination_name": "renamed"}}]}))
 
 
 @pytest.mark.parametrize("changed", ["source.txt", "copy_test.txt"])

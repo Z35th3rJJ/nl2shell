@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass, replace
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from .llm import chat
 from .ssh_config import load_ssh_hosts
 from .task_plan import TaskPlan, TaskStep, READ_OPERATIONS, parse_operation_plan, plan_payload, validate_parameters
@@ -91,6 +91,8 @@ def _explicit_days(text: str) -> set[float]:
 
 
 _COPY_DESTINATION_PATTERN = re.compile(_TARGET_MARKER + r'''\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''')
+_ALTERNATE_TARGET_PATTERN = re.compile(
+    r'''\s*(?:或|或者)\s*(?:"[^"]+"|'[^']+'|[^\s，。；,;]+)''')
 
 
 def _explicit_targets(text: str) -> set[str]:
@@ -98,7 +100,12 @@ def _explicit_targets(text: str) -> set[str]:
     return {next(value for value in match if value) for match in matches}
 
 
-_COPY_NAME_PATTERN = re.compile(r'''(?:复制为|复制成|命名为|目标文件名(?:为|是|[:：]))\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''')
+def _has_alternate_target(text):
+    return any(_ALTERNATE_TARGET_PATTERN.match(text, match.end())
+               for match in _COPY_DESTINATION_PATTERN.finditer(text))
+
+
+_COPY_NAME_PATTERN = re.compile(r'''(?:复制为|复制成|移动为|移动成|命名为|目标文件名(?:为|是|[:：]))\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''')
 
 
 def _explicit_copy_names(text: str) -> set[str]:
@@ -118,17 +125,59 @@ def _copy_condition_fields(text):
     return sorted(fields, key=lambda field: field[0].start())
 
 
-def _copy_name_bindings(text, answers=()):
-    # 仅绑定明确的“将/把单个源复制…”子句；没有对应关系时不能按文件名集合猜测。
-    sources = list(re.finditer(r'''(?:将|把)\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;\n]+))\s*复制''', text))
+def _target_is_complete_path(text, match, cwd=None):
+    destination = next(value for value in match.groups() if value)
+    if ("/" not in destination and "\\" not in destination) or destination.endswith(("/", "\\")):
+        return False
+    if "目标目录" in match.group(0) or re.match(r"\s*(?:目录|文件夹)", text[match.end():]):
+        return False
+    if cwd is not None:
+        try:
+            existing = workspace_path(Path(cwd), destination)
+        except ValueError:
+            existing = None
+        if existing is not None and existing.exists():
+            return not existing.is_dir()
+    return True
+
+
+def _copy_target_parts(clause, cwd=None):
+    if _has_alternate_target(clause):
+        return None
+    fields = _copy_condition_fields(clause)
+    names = {value for _, kind, value in fields if kind == "name"}
+    destinations = [(match, value) for match, kind, value in fields if kind == "destination"]
+    if (len(names) > 1 or len({value for _, value in destinations}) > 1
+            or any(kind == "invalid_destination" for _, kind, _ in fields)):
+        return None
+    name = next(iter(names), None)
+    destination = destinations[0][1] if destinations else None
+    if destination and name is None:
+        match = destinations[0][0]
+        if _target_is_complete_path(clause, match, cwd):
+            target = PurePosixPath(destination.replace("\\", "/"))
+            if target.name not in {"", ".", ".."}:
+                destination = target.parent.as_posix()
+                name = target.name
+                if destination == ".":
+                    destination = "."
+    return destination, name
+
+
+def _copy_name_bindings(text, answers=(), cwd=None):
+    # 仅绑定明确的“将/把单个源复制/移动…”子句；没有对应关系时不能按文件名集合猜测。
+    sources = list(re.finditer(
+        r'''(?:将|把)\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;\n]+))\s*(复制|移动)''', text))
     bindings = []
     for index, source in enumerate(sources):
-        clause = "复制" + text[source.end():sources[index + 1].start() if index + 1 < len(sources) else len(text)]
+        verb = source.group(4)
+        clause = verb + text[source.end():sources[index + 1].start() if index + 1 < len(sources) else len(text)]
         names = _explicit_copy_names(clause)
         if len(names) > 1 or any(kind == "invalid_destination" for _, kind, _ in _copy_condition_fields(clause)):
             return []
-        bindings.append((next(value for value in source.groups() if value), next(iter(names), None), clause))
-    if {name for _, name, _ in bindings if name is not None} != _explicit_copy_names(text):
+        operation = "copy_files" if verb == "复制" else "move_files"
+        bindings.append((operation, next(value for value in source.groups()[:3] if value), clause))
+    if {name for _, _, clause in bindings for name in _explicit_copy_names(clause)} != _explicit_copy_names(text):
         return []
     # 回答单独处理：只接受明确的步骤号或源文件引用，不能延长最后一个原始子句。
     for answer in answers:
@@ -145,8 +194,8 @@ def _copy_name_bindings(text, answers=()):
             if any(value not in numbers or numbers[value] >= len(bindings) for value in ordinals):
                 return []
             indices = {numbers[value] for value in ordinals}
-            indices.update(index for index, (source, _, _) in enumerate(bindings) if re.search(
-                r'''(?:^|[\s，。；,;"']|将|把)''' + re.escape(source) + r'''(?=$|[\s，。；,;"']|的|复制)''', prefix))
+            indices.update(index for index, (_, source, _) in enumerate(bindings) if re.search(
+                r'''(?:^|[\s，。；,;"']|将|把)''' + re.escape(source) + r'''(?=$|[\s，。；,;"']|的|复制|移动)''', prefix))
             if not indices and current is not None and re.fullmatch(r"[\s，。；,;]*(?:并|并且)?[\s，。；,;]*", prefix):
                 indices.add(current)
             if len(indices) != 1:
@@ -158,7 +207,7 @@ def _copy_name_bindings(text, answers=()):
         if any(len(values) > 1 for update in updates.values() for values in update.values()):
             return []
         for index, update in updates.items():
-            source, name, clause = bindings[index]
+            operation, source, clause = bindings[index]
             for field, values in update.items():
                 if not values:
                     continue
@@ -167,36 +216,42 @@ def _copy_name_bindings(text, answers=()):
                         clause = clause[:match.start()] + clause[match.end():]
                 value = next(iter(values))
                 clause += "\n" + ("目标文件名为 " if field == "name" else "目标目录为 ") + json.dumps(value, ensure_ascii=False)
-                if field == "name":
-                    name = value
-            bindings[index] = (source, name, clause)
-    return bindings
+            bindings[index] = (operation, source, clause)
+    result = []
+    for operation, source, clause in bindings:
+        target = _copy_target_parts(clause, cwd)
+        if target is None:
+            return []
+        destination, name = target
+        result.append((operation, source, destination, name, clause))
+    return result
 
 
 def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list[str]) -> str:
     text = "\n".join([user_input, *answers])
     days = _explicit_days(text)
-    copies = [step for step in plan.steps if step.operation == "copy_files"]
-    bindings = _copy_name_bindings(user_input, answers)
+    transfers = [step for step in plan.steps if step.operation in {"copy_files", "move_files"}]
+    if transfers and _has_alternate_target(text):
+        return "请明确复制或移动的唯一目标路径"
+    bindings = _copy_name_bindings(user_input, answers, cwd)
     named_defaults = not answers or bool(bindings) and all(_copy_condition_fields(answer) for answer in answers)
     scopes = []
-    if _explicit_copy_names(text) and (bindings or len(copies) > 1):
+    if transfers and all("sources" in step.parameters for step in transfers) and (
+            bindings or _explicit_copy_names(text) and len(transfers) > 1):
         root = Path(cwd).resolve()
-        if len(bindings) != len(copies):
-            return "请明确每个复制源与目标文件名的对应关系，并保留该对应关系"
-        for step, (source, name, clause) in zip(copies, bindings):
-            if (step.parameters.get("sources") != [workspace_path(root, source).relative_to(root).as_posix()]
+        if len(bindings) != len(transfers):
+            return "请明确每个源对象与目标路径的对应关系，并保留该对应关系"
+        for step, (operation, source, directory, name, clause) in zip(transfers, bindings):
+            if (step.operation != operation
+                    or step.parameters.get("sources") != [workspace_path(root, source).relative_to(root).as_posix()]
                     or step.parameters.get("destination_name") != name):
-                return "请明确每个复制源与目标文件名的对应关系，并保留该对应关系"
-            directories = {value for _, kind, value in _copy_condition_fields(clause) if kind == "destination"}
-            if len(directories) > 1:
-                return "请明确每个复制步骤的唯一目标目录"
-            directory = next(iter(directories), "." if name and named_defaults else None)
+                return "请明确每个源对象与目标路径的对应关系，并保留该对应关系"
+            directory = directory if directory is not None else "." if name and named_defaults else None
             if directory is not None:
                 if directory in {"当前目录", "这里", "本目录", "此目录", "这个目录"}:
                     directory = "."
                 if step.parameters["destination"] != workspace_path(root, directory).relative_to(root).as_posix():
-                    return "请保留每个复制步骤明确指定的目标目录"
+                    return "请保留每个复制或移动步骤明确指定的目标目录"
             scopes.append((clause, directory is not None))
     scopes = iter(scopes)
     for step in plan.steps:
@@ -212,10 +267,14 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
                     destination in match.groups()[:2] for match in _COPY_DESTINATION_PATTERN.finditer(text)):
                 return "请明确复制或移动到哪个目录？"
             target_text = text
+            target_text, checked = next(scopes, (text, False))
+            if checked:
+                continue
+            targets = list(_COPY_DESTINATION_PATTERN.finditer(target_text))
+            if (len(parameters.get("sources", [])) != 1 and len(targets) == 1
+                    and _target_is_complete_path(target_text, targets[0], cwd)):
+                return "多个源对象只能复制或移动到目标目录，不能共享一个完整目标文件路径"
             if step.operation == "copy_files":
-                target_text, checked = next(scopes, (text, False))
-                if checked:
-                    continue
                 if any(kind == "invalid_destination" for _, kind, _ in _copy_condition_fields(target_text)):
                     return "请明确每个复制步骤的唯一目标目录"
                 copy_names = _explicit_copy_names(target_text)
@@ -298,7 +357,7 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 - create_file/create_directory 参数：path。创建文件只能创建空文件，不得猜测内容。
 - copy_files/move_files 参数：sources 路径列表或 source_step（前面的 find_files 编号，从 1 开始）；destination 是目录。
 - copy_files 可加 preserve_structure=true，保留查找起点内的相对目录。示例：查找符合条件的文件，再 source_step=1 复制到 backup。
-- copy_files 可加 destination_name，表示用户明确指定的单个目标文件名；destination 仍只表示目标目录。仅允许单个源对象，不能与 preserve_structure=true 同用。用户只明确新文件名而没有指定目标目录时 destination="."；同时指定目录和新文件名时保留两者。不得把目标文件名当作目录，也不得遗漏或猜测新文件名。
+- copy_files/move_files 可加 destination_name，表示用户明确指定的单个目标文件名；destination 仍只表示目标目录。仅允许单个源对象；copy_files 不能与 preserve_structure=true 同用。用户只明确新文件名而没有指定目标目录时 destination="."；同时指定目录和新文件名时保留两者。不得把完整目标文件路径或目标文件名当作目录，也不得遗漏或猜测新文件名。
 - sources 只表示用户指定的实际文件或目录。引用前一步查找结果时，必须写 source_step 数字，不得写 sources="1"、sources=["1"] 或把查找目录当成找到的文件。
 - rename 参数：source、destination（完整新路径）。
 - trash 参数：sources 或 source_step。删除只能移入回收区，绝不永久删除。
@@ -401,11 +460,11 @@ def _reference_format_payload(raw):
         return None
 
 
-def _plan_defaults(raw, user_input, answers):
+def _plan_defaults(raw, user_input, answers, cwd):
     # 主计划和独立参考只从完整需求补齐已确认条件，否则仅使用合法默认值。
     text = "\n".join([user_input, *answers])
     copy_answers = [answer.split("用户回答：", 1)[-1].strip() for answer in answers]
-    bindings = _copy_name_bindings(user_input, copy_answers)
+    bindings = _copy_name_bindings(user_input, copy_answers, cwd)
     named_defaults = not answers or bool(bindings) and all(_copy_condition_fields(answer) for answer in copy_answers)
     hidden_requested = re.search(r"隐藏|hidden|dot[ -]?files?|点(?:号)?开头|--all|\bls\s+-[a-zA-Z]*[aA]", text, re.I)
     hidden = None if hidden_requested else DEFAULT_INCLUDE_HIDDEN
@@ -426,11 +485,25 @@ def _plan_defaults(raw, user_input, answers):
             continue
         parameters = step.get("parameters")
         copy_text = text
-        if step.get("operation") == "copy_files" and isinstance(parameters, dict):
-            if copy_index < len(bindings) and parameters.get("sources") == [bindings[copy_index][0]]:
-                copy_text = bindings[copy_index][2]
+        copy_binding = None
+        if step.get("operation") in {"copy_files", "move_files"} and isinstance(parameters, dict):
+            if (copy_index < len(bindings) and step.get("operation") == bindings[copy_index][0]
+                    and parameters.get("sources") == [bindings[copy_index][1]]):
+                copy_binding = bindings[copy_index]
+                copy_text = copy_binding[4]
             copy_index += 1
-        if (step.get("operation") == "copy_files" and isinstance(parameters, dict)
+        if copy_binding is not None:
+            _, _, destination, name, _ = copy_binding
+            destination = destination if destination is not None else "." if name and named_defaults else None
+            raw_targets = _explicit_targets(copy_text)
+            if (name is not None and destination is not None
+                    and parameters.get("destination_name") in {None, name}
+                    and parameters.get("destination") in raw_targets | {destination, None}):
+                parameters["destination"] = destination
+                parameters["destination_name"] = name
+                changed = True
+        if (step.get("operation") in {"copy_files", "move_files"} and isinstance(parameters, dict)
+                and (copy_binding is None or copy_binding[3] is None)
                 and not _explicit_copy_names(copy_text) and "destination_name" in parameters):
             # 没有改名要求时沿用源名称，模型多填的可选字段不是用户条件。
             del parameters["destination_name"]
@@ -635,7 +708,7 @@ class Engine:
             plan = None
             path_error = None
             try:
-                plan = parse_operation_plan(_plan_defaults(raw, user_input, clarifications or []))
+                plan = parse_operation_plan(_plan_defaults(raw, user_input, clarifications or [], cwd))
                 if format_baseline is not None:
                     corrected = _reference_format_payload(raw)
                     if corrected is None or not _same_reference_fields(format_baseline, corrected):
@@ -791,7 +864,7 @@ class Engine:
             raw = chat(messages, backend=self._backend, json_mode=True)
             record["raw_output"] = redact_value(raw)
             try:
-                reference = parse_operation_plan(_plan_defaults(raw, user_input, clarifications))
+                reference = parse_operation_plan(_plan_defaults(raw, user_input, clarifications, cwd))
             except (ValueError, TypeError) as error:
                 detail = _model_output_error(error)
                 record["review"] = redact_value("rejected: 参考格式错误：" + detail)
