@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import json
 import re
 import math
+from pathlib import PureWindowsPath
 
 
 INTENTS = {
@@ -94,7 +95,7 @@ def validate_parameters(operation: str, p: dict, index: int, previous) -> None:
         "find_files": {"path", "recursive", "pattern", "modified_within_days", "size_gt_bytes"},
         "count_files": {"path", "recursive", "pattern", "modified_within_days", "size_gt_bytes"},
         "create_file": {"path"}, "create_directory": {"path"},
-        "copy_files": {"sources", "source_step", "destination", "preserve_structure"},
+        "copy_files": {"sources", "source_step", "destination", "destination_name", "preserve_structure"},
         "move_files": {"sources", "source_step", "destination"},
         "rename": {"source", "destination"}, "trash": {"sources", "source_step"},
         "restore": {"trash_id"}, "list_trash": set(),
@@ -116,7 +117,7 @@ def validate_parameters(operation: str, p: dict, index: int, previous) -> None:
     }
     if required.get(operation, set()) - set(p):
         raise ValueError("缺少关键操作参数，必须向用户追问")
-    for key in {"path", "source", "destination", "pattern", "trash_id", "query", "group_by", "metric", "end"} & p.keys():
+    for key in {"path", "source", "destination", "destination_name", "pattern", "trash_id", "query", "group_by", "metric", "end"} & p.keys():
         if not isinstance(p[key], str) or not p[key].strip() or "\0" in p[key]:
             raise ValueError(f"{key} 必须是非空字符串")
     for key in {"recursive", "preserve_structure", "include_hidden"} & p.keys():
@@ -137,6 +138,13 @@ def validate_parameters(operation: str, p: dict, index: int, previous) -> None:
             ref = p["source_step"]
             if type(ref) is not int or not 1 <= ref <= index or previous[ref - 1].operation != "find_files":
                 raise ValueError("source_step 只能引用前面的文件查找步骤，编号从 1 开始")
+    if "destination_name" in p:
+        name = p["destination_name"]
+        if (name in {".", ".."} or name[-1] in " ." or PureWindowsPath(name).is_reserved()
+                or any(char in name for char in '/\\<>:"|?*') or any(ord(char) < 32 for char in name)):
+            raise ValueError("destination_name 必须是单个合法文件名，不能包含目录路径")
+        if p.get("preserve_structure") or "sources" in p and len(p["sources"]) != 1:
+            raise ValueError("destination_name 仅支持单个源对象，不能保留多文件目录结构")
     if operation == "organize_files" and p["group_by"] != "extension":
         raise ValueError("第一版只支持按文件类型整理")
     if operation == "system_info" and p["query"] not in {"disk", "memory", "system"}:

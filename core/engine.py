@@ -87,6 +87,11 @@ def _explicit_targets(text: str) -> set[str]:
     return {next(value for value in match if value) for match in matches}
 
 
+def _explicit_copy_names(text: str) -> set[str]:
+    matches = re.findall(r'''(?:复制为|复制成|命名为|目标文件名(?:为|是|[:：]))\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''', text)
+    return {next(value for value in match if value) for match in matches}
+
+
 def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list[str]) -> str:
     text = "\n".join([user_input, *answers])
     days = _explicit_days(text)
@@ -98,6 +103,13 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
                 return "请明确时间范围，例如最近多少天？"
         if step.operation in {"copy_files", "move_files"}:
             destination = parameters["destination"]
+            if step.operation == "copy_files":
+                copy_names = _explicit_copy_names(text)
+                if copy_names or "destination_name" in parameters:
+                    if copy_names != {parameters.get("destination_name")}:
+                        return "请明确复制后的目标文件名，并保留该文件名条件"
+                    if destination == "." and not answers and not _explicit_targets(text):
+                        continue
             names = [destination, str(Path(cwd).resolve() / destination)]
             if destination == ".":
                 names = [str(Path(cwd).resolve()), "当前目录", "这里", "本目录", "此目录", "这个目录", "."]
@@ -170,6 +182,7 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 - create_file/create_directory 参数：path。创建文件只能创建空文件，不得猜测内容。
 - copy_files/move_files 参数：sources 路径列表或 source_step（前面的 find_files 编号，从 1 开始）；destination 是目录。
 - copy_files 可加 preserve_structure=true，保留查找起点内的相对目录。示例：查找符合条件的文件，再 source_step=1 复制到 backup。
+- copy_files 可加 destination_name，表示用户明确指定的单个目标文件名；destination 仍只表示目标目录。仅允许单个源对象，不能与 preserve_structure=true 同用。用户只明确新文件名而没有指定目标目录时 destination="."；同时指定目录和新文件名时保留两者。不得把目标文件名当作目录，也不得遗漏或猜测新文件名。
 - sources 只表示用户指定的实际文件或目录。引用前一步查找结果时，必须写 source_step 数字，不得写 sources="1"、sources=["1"] 或把查找目录当成找到的文件。
 - rename 参数：source、destination（完整新路径）。
 - trash 参数：sources 或 source_step。删除只能移入回收区，绝不永久删除。
@@ -280,9 +293,8 @@ def _count_request_recursive(user_input, answers):
 
 def _plan_defaults(raw, user_input, answers):
     # 显式隐藏项条件不使用默认值；主计划和独立参考均只依据原始需求及完整问答。
-    if re.search(r"隐藏|hidden|dot[ -]?files?|点(?:号)?开头|--all|\bls\s+-[a-zA-Z]*[aA]",
-                 "\n".join([user_input, *answers]), re.I):
-        return raw
+    text = "\n".join([user_input, *answers])
+    hidden_requested = re.search(r"隐藏|hidden|dot[ -]?files?|点(?:号)?开头|--all|\bls\s+-[a-zA-Z]*[aA]", text, re.I)
     try:
         value = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.I))
     except (ValueError, TypeError):
@@ -295,12 +307,18 @@ def _plan_defaults(raw, user_input, answers):
         if not isinstance(step, dict):
             continue
         parameters = step.get("parameters")
-        if (step.get("operation") == "count_files" and len(value["steps"]) == 1
+        if (step.get("operation") == "copy_files" and isinstance(parameters, dict)
+                and "destination" not in parameters and "destination_name" in parameters
+                and not answers and _explicit_copy_names(text) == {parameters["destination_name"]}
+                and not _explicit_targets(text)):
+            parameters["destination"] = "."
+            changed = True
+        if (step.get("operation") == "count_files" and not hidden_requested and len(value["steps"]) == 1
                 and recursive is not None and isinstance(parameters, dict)
                 and parameters.get("path") == "." and "recursive" not in parameters):
             parameters["recursive"] = recursive
             changed = True
-        if (step.get("operation") == "list_directory" and isinstance(parameters, dict)
+        if (step.get("operation") == "list_directory" and not hidden_requested and isinstance(parameters, dict)
                 and isinstance(parameters.get("path"), str)
                 and parameters["path"].strip() and "include_hidden" not in parameters):
             parameters["include_hidden"] = False

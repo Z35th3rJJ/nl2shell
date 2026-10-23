@@ -159,7 +159,10 @@ def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excl
     excluded = [Path(path).resolve(strict=False) for path in excluded_paths]
     for step in plan.steps:
         if step.operation == "copy_files" and "source_step" in step.parameters:
-            excluded.append(workspace_path(root, step.parameters["destination"]))
+            destination = workspace_path(root, step.parameters["destination"])
+            if "destination_name" in step.parameters:
+                destination = workspace_path(root, str(destination / step.parameters["destination_name"]))
+            excluded.append(destination)
     for index, step in enumerate(plan.steps, 1):
         _check_deadline(deadline)
         if step.command or step.verification:
@@ -188,6 +191,8 @@ def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excl
                 raise ValueError("源路径重复")
             if any(a != b and a in b.parents for a in sources for b in sources):
                 raise ValueError("源路径不能同时包含父目录及其子文件")
+            if "destination_name" in p and len(sources) != 1:
+                raise ValueError("destination_name 仅支持单个源对象")
         elif operation in {"create_file", "create_directory"}:
             destination = workspace_path(root, p["path"])
             if destination == root:
@@ -246,7 +251,8 @@ def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excl
                 directory = workspace_path(root, p["destination"])
                 if directory.exists() and not directory.is_dir():
                     raise ValueError("复制或移动的 destination 必须是目录")
-                relative = source.relative_to(base) if p.get("preserve_structure") else Path(source.name)
+                relative = (Path(p["destination_name"]) if "destination_name" in p else
+                            source.relative_to(base) if p.get("preserve_structure") else Path(source.name))
                 destination = unique_target(workspace_path(root, str(directory / relative)), reserved)
             if source == destination or source in destination.parents:
                 raise ValueError("目标不能位于源目录内部")
@@ -387,7 +393,8 @@ def execute_action(prepared: dict, action: dict, executor=None, *, timeout_secon
                 valid = destination.is_dir()
             elif operation == "copy_files":
                 _copy(source, destination, deadline)
-                valid = snapshot(destination, deadline) == item["identity"]["content"]
+                valid = (snapshot(destination, deadline) == item["identity"]["content"]
+                         and _identity(source, deadline) == item["identity"])
             else:
                 # ponytail: 同一工作区内重命名；跨文件系统移动明确失败，不做隐式复制删除。
                 _move_no_replace(source, destination)
