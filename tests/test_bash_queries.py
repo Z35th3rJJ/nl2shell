@@ -574,6 +574,8 @@ def test_directory_clarification_reaches_reference_and_history(
     (directory / ".hidden").write_text("fixture", encoding="utf-8")
     (directory / "visible.txt").write_text("fixture", encoding="utf-8")
     user_input = "列出 organize 目录的内容"
+    if answer is not None:
+        user_input += "，隐藏文件选项待确认"
     question = "隐藏文件是否包含？"
     clarifications = [] if answer is None else [f"问题：{question}；用户回答：{answer}"]
     value = plan("list_directory", path="organize", include_hidden=hidden)
@@ -595,8 +597,8 @@ def test_directory_clarification_reaches_reference_and_history(
     def intent_reply(messages, **kwargs):
         original = json.loads(messages[1]["content"])
         assert original["request"] == user_input
-        return json.dumps({"status": "ready", "operations": ["list_directory"]}
-                          if original["answers"] else {"status": "unsupported", "reason_code": "directory_selection"})
+        assert original["answers"] in ([], clarifications)
+        return json.dumps({"status": "ready", "operations": ["list_directory"]})
 
     monkeypatch.setattr("core.intent.chat", intent_reply)
     monkeypatch.setattr("core.engine.chat", reply)
@@ -630,16 +632,17 @@ def test_hidden_yes_clarification_missing_reference_flag_does_not_default_false(
     (tmp_path / "organize").mkdir()
     value = plan("list_directory", path="organize", include_hidden=True)
     prepared = prepare_queries(value, str(tmp_path))
-    chat = Mock(side_effect=[reference_json(plan("list_directory", path="organize")), reference_json(value),
-                             json.dumps(candidates(prepared))])
+    raw = reference_json(plan("list_directory", path="organize"))
+    chat = Mock(side_effect=[raw, json.dumps(candidates(prepared))])
     monkeypatch.setattr("core.engine.chat", chat)
     engine = Engine(ssh_hosts=[])
     result = engine.generate_bash_commands("列出 organize 目录的内容", str(tmp_path), value, prepared,
                                            ["问题：隐藏文件是否包含？；用户回答：是"])
     review_commands(prepared, result)
-    assert chat.call_count == 3
-    assert engine.command_attempts[0]["review"].startswith("rejected: 参考格式错误")
-    assert engine.command_attempts[1]["review"] == "accepted"
+    assert chat.call_count == 2
+    assert engine.command_attempts[0]["raw_output"] == raw
+    assert engine.command_attempts[0]["review"] == "accepted"
+    assert "-A" in result["commands"][0]["argv"]
 
 
 def test_directory_clarification_is_saved_even_when_reference_disagrees(
@@ -744,7 +747,7 @@ def test_plan_attempts_are_saved_redacted_across_clarification_rounds(
     monkeypatch.setattr("core.engine.chat", Mock(side_effect=outputs))
     executor, history = Mock(), HistoryStore(tmp_path / "history.jsonl")
     answers = iter(["否", "no"])
-    status = execute_request(Engine(ssh_hosts=[]), executor, history, "列出 organize 目录的内容",
+    status = execute_request(Engine(ssh_hosts=[]), executor, history, "列出 organize 目录的内容，隐藏文件选项待确认",
                              str(tmp_path), "confirm", input_fn=lambda _: next(answers))
     assert status == ("plan_failed" if fails else "cancelled")
     attempts = history.query(limit=1)[0]["plan_attempts"]
@@ -851,6 +854,7 @@ def test_valid_directory_reference_never_uses_refusal_recovery(
 
 
 @pytest.mark.parametrize("user_input,hidden,answers", [
+    ("列出 organize 目录的内容", False, []),
     ("列出 organize 目录的内容，包括隐藏文件", True, []),
     ("查看 organize 目录内容，不包含隐藏文件", False, []),
     ("浏览 organize 文件夹内容", True, ["问题：是否包含隐藏文件？；用户回答：是"]),
@@ -882,7 +886,6 @@ def test_known_directory_condition_does_not_repeat_reference_clarification(
 
 
 @pytest.mark.parametrize("user_input,answers", [
-    ("列出 organize 目录的内容", []),
     ("列出目录内容，包括隐藏文件", []),
     ("列出 organize 目录的内容，包括隐藏文件，只看文件夹", []),
     ("列出 organize 目录的内容，包括隐藏文件", ["问题：是否包含隐藏文件？；用户回答：否"]),
@@ -901,6 +904,7 @@ def test_uncertain_directory_condition_keeps_reference_clarification(
 
 
 @pytest.mark.parametrize("user_input,primary", [
+    ("列出 organize 目录的内容", plan("list_directory", path="organize", include_hidden=True)),
     ("列出 organize 目录的内容，包括隐藏文件", plan("list_directory", path="organize", include_hidden=False)),
     ("列出 organize 目录的内容，不包括隐藏文件", plan("list_directory", path="organize", include_hidden=True)),
     ("列出 organize 目录的内容，包括隐藏文件", plan("list_directory", path=".", include_hidden=True)),

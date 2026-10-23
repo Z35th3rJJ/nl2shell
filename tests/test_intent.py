@@ -199,14 +199,15 @@ def test_explicit_directory_listing_recovers_directory_selection_mistake(
 
     value = engine.generate_task_plan(user_input, str(tmp_path))
 
-    assert value.clarification == "隐藏文件是否包含？" and not value.refused
+    assert value.status == "ready" and not value.clarification and not value.refused
+    assert value.steps[0].parameters == {"path": "organize", "include_hidden": False}
     assert engine.request_intent == {"status": "ready", "operations": ["list_directory"]}
     assert engine.intent_attempts[0]["raw_output"] == raw
     assert "list_directory" in engine.intent_attempts[0]["resolution"]
     intent_model.assert_called_once()
     planner.assert_called_once()
     assert user_input in planner.call_args.args[0][1]["content"]
-    assert not value.steps and not engine.command_attempts
+    assert len(value.steps) == 1 and not engine.command_attempts
 
 
 @pytest.mark.parametrize("user_input,answers,code", [

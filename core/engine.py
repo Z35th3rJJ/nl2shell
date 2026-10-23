@@ -6,6 +6,7 @@ from .llm import chat
 from .ssh_config import load_ssh_hosts
 from .task_plan import TaskPlan, TaskStep, READ_OPERATIONS, parse_operation_plan, plan_payload, validate_parameters
 from .intent import analyze_request, DIRECTORY_RULES
+from .requirements import resolve_request, count_request_recursive, DEFAULT_INCLUDE_HIDDEN, UNSPECIFIED_DESTINATIONS
 from .redaction import redact_value
 from .operations import workspace_path
 
@@ -206,6 +207,10 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
                 return "请明确时间范围，例如最近多少天？"
         if step.operation in {"copy_files", "move_files"}:
             destination = parameters["destination"]
+            # 泛指目标不是路径；引号内明确命名的同名目录仍可使用。
+            if destination in UNSPECIFIED_DESTINATIONS and not any(
+                    destination in match.groups()[:2] for match in _COPY_DESTINATION_PATTERN.finditer(text)):
+                return "请明确复制或移动到哪个目录？"
             target_text = text
             if step.operation == "copy_files":
                 target_text, checked = next(scopes, (text, False))
@@ -336,10 +341,15 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 """ + "\n" + DIRECTORY_RULES
 
 
-def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str, required) -> list[str]:
+def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str, required, clarifications=()) -> list[str]:
     if plan.clarification or plan.refused:
         return []
     errors = []
+    expected = resolve_request(user_input, clarifications)
+    if expected is not None:
+        from .bash_queries import same_query_plan
+        if not same_query_plan(plan, _normalize_paths(expected, cwd)):
+            errors.append("计划与原始需求及统一默认规则不一致")
     operations = {step.operation for step in plan.steps}
     for operation in sorted(set(required) - operations):
         errors.append(f"用户要求的操作未出现在计划中：{operation}")
@@ -389,31 +399,24 @@ def _reference_format_payload(raw):
         return None
 
 
-def _count_request_recursive(user_input, answers):
-    # shortcut: 仅恢复完整、明确的当前目录统计句式；其他表达或补充回答仍由原流程处理。
-    scope = None if answers else re.fullmatch(
-        r"统计当前目录(?P<children>(?:及|和)(?:所有)?子目录)?(?P<level>当前层|这一层)?"
-        r"(?:中|下)?的(?:普通)?文件(?:数量|个数)(?P<include>[，,](?:包括|包含)(?:所有)?子目录)?",
-        user_input)
-    if scope is None or (scope["level"] and (scope["children"] or scope["include"])):
-        return None
-    return bool(scope["children"] or scope["include"])
-
-
 def _plan_defaults(raw, user_input, answers):
-    # 显式隐藏项条件不使用默认值；主计划和独立参考均只依据原始需求及完整问答。
+    # 主计划和独立参考只从完整需求补齐已确认条件，否则仅使用合法默认值。
     text = "\n".join([user_input, *answers])
     copy_answers = [answer.split("用户回答：", 1)[-1].strip() for answer in answers]
     bindings = _copy_name_bindings(user_input, copy_answers)
     named_defaults = not answers or bool(bindings) and all(_copy_condition_fields(answer) for answer in copy_answers)
     hidden_requested = re.search(r"隐藏|hidden|dot[ -]?files?|点(?:号)?开头|--all|\bls\s+-[a-zA-Z]*[aA]", text, re.I)
+    hidden = None if hidden_requested else DEFAULT_INCLUDE_HIDDEN
+    expected = resolve_request(user_input, answers)
+    if expected is not None and expected.steps[0].operation == "list_directory":
+        hidden = expected.steps[0].parameters["include_hidden"]
     try:
         value = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.I))
     except (ValueError, TypeError):
         return raw
     if not isinstance(value, dict) or value.get("status") != "ready" or not isinstance(value.get("steps"), list):
         return raw
-    recursive = _count_request_recursive(user_input, answers)
+    recursive = count_request_recursive(user_input, answers)
     changed = False
     copy_index = 0
     for step in value["steps"]:
@@ -441,42 +444,12 @@ def _plan_defaults(raw, user_input, answers):
                 and parameters.get("path") == "." and "recursive" not in parameters):
             parameters["recursive"] = recursive
             changed = True
-        if (step.get("operation") == "list_directory" and not hidden_requested and isinstance(parameters, dict)
+        if (step.get("operation") == "list_directory" and hidden is not None and isinstance(parameters, dict)
                 and isinstance(parameters.get("path"), str)
                 and parameters["path"].strip() and "include_hidden" not in parameters):
-            parameters["include_hidden"] = False
+            parameters["include_hidden"] = hidden
             changed = True
     return json.dumps(value, ensure_ascii=False) if changed else raw
-
-
-def _directory_reference_from_request(user_input, clarifications, *, require_explicit_hidden=False):
-    # shortcut: 仅接受完整单路径浏览语法及隐藏项问答；扩展表达前须增加无歧义解析测试。
-    request = re.fullmatch(
-        r'''(?:列出|查看|浏览)[ \t]+(?P<path>"[^"\r\n]+"|'[^'\r\n]+'|[A-Za-z0-9_./-]+)'''
-        r"[ \t]+(?:目录|文件夹)(?:的)?内容"
-        r"(?:[，,][ \t]*(?P<hidden>(?:包括|包含|显示|不包括|不包含|不显示)隐藏(?:文件|项)))?[。]?",
-        user_input.strip())
-    if request is None:
-        return None
-    hidden = None if request["hidden"] is None else not request["hidden"].startswith("不")
-    for clarification in clarifications:
-        answer = re.fullmatch(
-            r"问题：(?:是否包含隐藏(?:文件|项)|隐藏(?:文件|项)是否包含)[？?]?；用户回答："
-            r"(?P<answer>是|否|包含|不包含|包括|不包括|yes|no)", clarification, re.I)
-        if answer is None:
-            return None
-        confirmed = answer["answer"].lower() in {"是", "包含", "包括", "yes"}
-        if hidden is not None and hidden != confirmed:
-            return None
-        hidden = confirmed
-    if require_explicit_hidden and hidden is None:
-        return None
-    path = request["path"]
-    parameters = {"path": path[1:-1] if path[0] in "\"'" else path}
-    if hidden is not None:
-        parameters["include_hidden"] = hidden
-    raw = json.dumps({"status": "ready", "steps": [{"operation": "list_directory", "parameters": parameters}]})
-    return parse_operation_plan(_plan_defaults(raw, user_input, clarifications))
 
 
 def _same_reference_fields(before, after):
@@ -607,11 +580,12 @@ class Engine:
         if not clarifications and _AMBIGUOUS_DELETION.fullmatch(user_input.strip()):
             return TaskPlan((), "请明确要删除或清理的具体文件、目录或匹配范围",
                             "FILE_MODIFY", "delete", status="need_clarification")
-        self.request_intent = analyze_request(user_input, answers, self._backend, self.intent_attempts)
+        self.request_intent = analyze_request(user_input, clarifications or [], self._backend, self.intent_attempts)
         if self.request_intent["status"] != "ready":
             return parse_operation_plan(json.dumps({key: value for key, value in self.request_intent.items()
                                                     if key in {"status", "reason", "clarification"}}))
         required = self.request_intent["operations"]
+        expected = resolve_request(user_input, clarifications or [])
         request_text = "\n".join([user_input, *answers])
         system = _AGENT_SYSTEM + "\n独立识别的必要操作必须全部出现在计划中：" + json.dumps(required)
         if self.request_intent.get("named_sources") and self.request_intent.get("selection_required") is False:
@@ -659,6 +633,9 @@ class Engine:
                     corrected = _reference_format_payload(raw)
                     if corrected is None or not _same_reference_fields(format_baseline, corrected):
                         raise ValueError("字面搜索格式修正改变了操作、路径或搜索条件；未生成或执行命令")
+                if (plan.clarification or plan.refused) and expected is not None:
+                    plan = expected
+                    record["recovery"] = {"source": "original_request", "plan": plan_payload(plan)}
                 if plan.status == "ready":
                     plan = _normalize_paths(plan, cwd)
                     direct = _direct_named_copy(plan, self.request_intent, cwd)
@@ -669,7 +646,7 @@ class Engine:
                     if missing:
                         record["validation_errors"] = [missing]
                         return TaskPlan((), clarification=missing, status="need_clarification")
-                errors = _task_plan_errors(plan, user_input, cwd, required)
+                errors = _task_plan_errors(plan, user_input, cwd, required, clarifications or [])
                 if (attempt == 0 and plan.refused and set(required) == {"search_text"}
                         and re.search(r"字面(?:文本|字符串)", request_text)
                         and not re.search(r"正则|regex|regular\s+expression|递归|子目录", request_text, re.I)
@@ -678,7 +655,10 @@ class Engine:
                     errors = ["用户明确要求的是字面文本搜索，不是正则表达式搜索；.、*、[、]、+ 等应作为普通字符。"
                               "请重新生成 search_text 计划，原样保留用户的搜索字符串和单个文件路径，"
                               "不得为正则用途额外转义、扩大搜索范围或把字面搜索转换为正则搜索。"]
-            except (ValueError, TypeError, OSError) as error:
+            except OSError as error:
+                record["environment_error"] = redact_value(str(error))
+                raise
+            except (ValueError, TypeError) as error:
                 errors = [_model_output_error(error)]
                 if isinstance(error, PlanPathError):
                     path_error = error
@@ -782,6 +762,8 @@ class Engine:
         original = json.dumps({"cwd": cwd, "request": user_input, "answers": clarifications}, ensure_ascii=False)
         messages = [{"role": "system", "content": _AGENT_SYSTEM + "\n仅根据原始需求及用户回答独立提取条件，不检查文件事实。"
                      "answers 保留澄清问题及用户回答，必须结合问题理解是或否；已确认条件优先于默认值。"
+                     "list_directory 未指定隐藏项条件时使用 include_hidden=false，不要仅为是否包含隐藏文件而追问；"
+                     "原始需求或用户回答明确包含或排除隐藏项时，必须保留该条件，不得用默认值覆盖。"
                      "独立参考同样遵守统一默认值：当前目录及未指定深度的只读查询使用当前层 recursive=false，"
                      "不要仅为是否包含子目录而追问；用户明确要求递归时保留递归条件。"
                      "统一默认值是合法参数来源，不受只填写用户明确条件的限制；没有递归要求不属于缺少关键条件。"
@@ -828,8 +810,7 @@ class Engine:
                     record["review"] = "rejected: 格式修正改变原有语义"
                     raise ValueError("独立参考格式修正改变原有语义；未生成或执行命令")
             if not correction and (reference.clarification or reference.refused):
-                recovered = _directory_reference_from_request(user_input, clarifications,
-                    require_explicit_hidden=bool(reference.clarification))
+                recovered = resolve_request(user_input, clarifications)
                 if recovered is not None:
                     reference = recovered
                     record["recovery"] = {"source": "original_request", "reference": plan_payload(reference)}
@@ -875,16 +856,13 @@ class Engine:
                 record["review"] = redact_value("rejected: 参考路径检查失败：" + str(error))
                 raise ValueError("独立参考路径检查失败：" + str(error)) from error
             break
-        recursive = _count_request_recursive(user_input, answers)
-        if (recursive is not None and len(reference.steps) == 1
-                and reference.steps[0].operation == "count_files"
-                and (reference.steps[0].parameters["path"] != "."
-                     or reference.steps[0].parameters["recursive"] is not recursive)):
-            record["review"] = "rejected: 独立参考统计范围与原始请求不一致"
-            raise ValueError("独立参考统计范围与原始请求不一致；未生成或执行命令")
         if not same_query_plan(plan, reference):
             record["review"] = "rejected"
             raise ValueError("计划与独立需求契约不一致，可能遗漏条件或扩大范围；未生成或执行命令")
+        errors = _task_plan_errors(reference, user_input, cwd, (), clarifications)
+        if errors:
+            record["review"] = "rejected: " + "；".join(errors)
+            raise ValueError("独立参考与原始需求不一致：" + "；".join(errors) + "；未生成或执行命令")
         record["review"] = "accepted"
         messages = command_request(plan, prepared)
         messages[0]["content"] += (

@@ -402,12 +402,12 @@ def test_file_count_retries_wrong_operation(monkeypatch, tmp_path, intent_contra
 
 
 @pytest.mark.parametrize("bad", ["[]", "null", '{"steps":[{"command":"ls"}]}', reply(path=".", recursive=True)])
-def test_invalid_or_wrong_scope_plan_fails_after_one_retry(monkeypatch, bad):
+def test_invalid_or_wrong_scope_plan_fails_after_one_retry(monkeypatch, tmp_path, bad):
     from core.engine import Engine
     calls = []
     monkeypatch.setattr("core.engine.chat", lambda messages, backend=None: calls.append(messages.copy()) or bad)
     with pytest.raises(ValueError):
-        Engine(ssh_hosts=[]).generate_task_plan("查找当前目录文件", "/work")
+        Engine(ssh_hosts=[]).generate_task_plan("查找当前目录文件", str(tmp_path))
     assert len(calls) == 2
 
 

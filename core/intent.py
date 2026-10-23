@@ -4,6 +4,7 @@ import re
 
 from .llm import chat
 from .redaction import redact_value
+from .requirements import resolve_request
 from .task_plan import OPERATIONS
 
 REJECTION_REASONS = {
@@ -95,6 +96,7 @@ read_text：查看指定文本文件的前几行或后几行。
 
 
 def analyze_request(user_input, answers, backend, attempts):
+    expected = resolve_request(user_input, answers)
     messages = [{"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": json.dumps({"request": user_input, "answers": answers}, ensure_ascii=False)}]
     rejected = None
@@ -125,7 +127,8 @@ def analyze_request(user_input, answers, backend, attempts):
                     if key in result and type(result[key]) is not bool:
                         raise ValueError(f"{key} 必须是布尔值")
                 names = result.get("named_sources", [])
-                text = "\n".join([user_input, *answers])
+                # 问题用于解释回答，但问题中的示例路径不是用户授权的源文件。
+                text = "\n".join([user_input, *(answer.split("用户回答：", 1)[-1].strip() for answer in answers)])
                 if not isinstance(names, list) or any(not isinstance(name, str) or not name.strip() or name not in text for name in names):
                     raise ValueError("明确源文件必须逐字来自用户原文或补充回答")
                 if names and result.get("selection_required") is False and set(operations) == {"find_files", "copy_files"}:
@@ -134,11 +137,11 @@ def analyze_request(user_input, answers, backend, attempts):
                 code = result.get("reason_code")
                 if set(result) != {"status", "reason_code"} or code not in REJECTION_REASONS:
                     raise ValueError("拒绝必须提供受支持的 reason_code，不得使用自由文本理由")
-                if code == "directory_selection" and not answers and re.fullmatch(
-                        r"列出[ \t]+[A-Za-z0-9_./-]+[ \t]+目录的内容", user_input.strip()):
-                    record["resolution"] = "按原始请求恢复 list_directory：指定目录是浏览路径，不是目录类型筛选"
+                if expected is not None and (code == "unsupported_task" or
+                        code == "directory_selection" and expected.steps[0].operation == "list_directory"):
+                    record["resolution"] = "按完整原始需求及统一默认规则恢复 " + expected.steps[0].operation
                     record["validation_errors"] = []
-                    return {"status": "ready", "operations": ["list_directory"]}
+                    return {"status": "ready", "operations": [step.operation for step in expected.steps]}
                 if code == "directory_selection" and not answers and re.fullmatch(
                         r"递归查找(?:子目录|当前目录及子目录)中名为[ \t]+"
                         r"[A-Za-z0-9_.*?\[\]-]+[ \t]+的(?:普通)?文件", user_input.strip()):
@@ -152,12 +155,19 @@ def analyze_request(user_input, answers, backend, attempts):
                         or not isinstance(result.get(key), str) or not result[key].strip()):
                     raise ValueError("意图不明确或不支持时必须给出说明")
             record["validation_errors"] = []
+            if expected is not None and status == "ready":
+                if result["operations"] != [step.operation for step in expected.steps]:
+                    raise ValueError("意图与原始需求可确定的操作不一致")
+                return result
             if status == "unsupported":
                 rejected = result
             if status == "need_clarification":
                 if rejected is not None:
                     record["resolution"] = "复核仅提出泛泛追问，保留已有明确拒绝类别"
                     return rejected
+                if expected is not None:
+                    record["resolution"] = "完整原始需求及统一默认规则已满足条件，模型追问不是新增必需条件"
+                    return {"status": "ready", "operations": [step.operation for step in expected.steps]}
                 return result
             if attempt == 0:
                 record["review_requested"] = True
