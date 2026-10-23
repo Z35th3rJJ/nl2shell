@@ -4,7 +4,7 @@ import re
 
 from .llm import chat
 from .redaction import redact_value
-from .requirements import resolve_request
+from .requirements import resolve_request, explicit_transfer_operation
 from .task_plan import OPERATIONS
 
 REJECTION_REASONS = {
@@ -97,6 +97,7 @@ read_text：查看指定文本文件的前几行或后几行。
 
 def analyze_request(user_input, answers, backend, attempts):
     expected = resolve_request(user_input, answers)
+    transfer = explicit_transfer_operation(user_input, answers)
     messages = [{"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": json.dumps({"request": user_input, "answers": answers}, ensure_ascii=False)}]
     rejected = None
@@ -155,6 +156,10 @@ def analyze_request(user_input, answers, backend, attempts):
                         or not isinstance(result.get(key), str) or not result[key].strip()):
                     raise ValueError("意图不明确或不支持时必须给出说明")
             record["validation_errors"] = []
+            if transfer is not None and status in {"ready", "need_clarification"}:
+                if status == "need_clarification" or result["operations"] != [transfer]:
+                    raise ValueError("原始请求已明确单源传输动作 " + transfer +
+                                     "，不得改成其他动作或重复追问操作类型；保留原始路径，参数和安全条件仍由后续校验")
             if expected is not None and status == "ready":
                 if result["operations"] != [step.operation for step in expected.steps]:
                     raise ValueError("意图与原始需求可确定的操作不一致")

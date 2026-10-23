@@ -9,6 +9,18 @@ DEFAULT_INCLUDE_HIDDEN = False
 UNSPECIFIED_DESTINATIONS = {"合适的目录", "合适的文件夹", "合适的地方", "某个目录", "某个文件夹", "目标目录"}
 
 
+def explicit_transfer_operation(user_input, answers):
+    # shortcut: 仅核对完整的单源直接传输语法；条件、否定、多操作或补充回答交回原流程。
+    if answers:
+        return None
+    path = r'''(?:"[^"\r\n]+"|'[^'\r\n]+'|[\w./\\-]+)'''
+    request = re.fullmatch(r"(?:将|把)\s*(?P<source>" + path + r")\s*(?P<verb>复制|移动)到\s*"
+                           r"(?P<target>" + path + r")(?:\s+(?:目录|文件夹))?", user_input.strip())
+    if request is None or request["target"] in UNSPECIFIED_DESTINATIONS:
+        return None
+    return "copy_files" if request["verb"] == "复制" else "move_files"
+
+
 def count_request_recursive(user_input, answers):
     # shortcut: 仅恢复完整、明确的当前目录统计句式；其他表达或补充回答仍由原流程处理。
     scope = None if answers else re.fullmatch(
