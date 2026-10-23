@@ -29,6 +29,10 @@ class PlanPathError(ValueError):
     """计划中的路径被程序安全检查拒绝，区别于模型声明不支持。"""
 
 
+class PlanConditionError(ValueError):
+    """需求已经明确，模型参数不一致；应纠正计划而非追问用户。"""
+
+
 def _normalize_paths(plan: TaskPlan, cwd: str) -> TaskPlan:
     root = Path(cwd).resolve()
     steps = []
@@ -91,6 +95,8 @@ def _explicit_days(text: str) -> set[float]:
 
 
 _COPY_DESTINATION_PATTERN = re.compile(_TARGET_MARKER + r'''\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''')
+_DIRECTORY_QUESTION = re.compile(
+    r"(请问|请明确|请指定)?(?:(?:复制或移动|复制|移动)到(?:哪个目录|哪里)|目标目录(?:是|为|是什么|在哪里)?)[？?]?")
 _ALTERNATE_TARGET_PATTERN = re.compile(
     r'''\s*(?:或|或者)\s*(?:"[^"]+"|'[^']+'|[^\s，。；,;]+)''')
 
@@ -181,7 +187,14 @@ def _copy_name_bindings(text, answers=(), cwd=None):
         return []
     # 回答单独处理：只接受明确的步骤号或源文件引用，不能延长最后一个原始子句。
     for answer in answers:
-        answer = answer.split("用户回答：", 1)[-1].strip()
+        question, separator, reply = answer.partition("；用户回答：")
+        answer = reply.strip() if separator else answer.strip()
+        # 短回答只有在问题明确指向目录且只有一个待绑定步骤时才成为目录事实。
+        if (separator and len(bindings) == 1
+                and _DIRECTORY_QUESTION.fullmatch(question.removeprefix("问题："))
+                and re.fullmatch(r'''(?:"[^"\r\n]+"|'[^'\r\n]+'|[\w./\\-]+)''', answer)
+                and answer not in UNSPECIFIED_DESTINATIONS | {"不知道", "是", "否", "yes", "no"}):
+            answer = "目标目录为 " + answer
         start = 0
         updates, current = {}, None
         fields = _copy_condition_fields(answer)
@@ -198,6 +211,8 @@ def _copy_name_bindings(text, answers=(), cwd=None):
                 r'''(?:^|[\s，。；,;"']|将|把)''' + re.escape(source) + r'''(?=$|[\s，。；,;"']|的|复制|移动)''', prefix))
             if not indices and current is not None and re.fullmatch(r"[\s，。；,;]*(?:并|并且)?[\s，。；,;]*", prefix):
                 indices.add(current)
+            if not indices and len(bindings) == 1 and not prefix.strip():
+                indices.add(0)
             if len(indices) != 1:
                 return []
             index = indices.pop()
@@ -228,7 +243,8 @@ def _copy_name_bindings(text, answers=(), cwd=None):
 
 
 def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list[str]) -> str:
-    text = "\n".join([user_input, *answers])
+    replies = [answer.split("用户回答：", 1)[-1].strip() for answer in answers]
+    text = "\n".join([user_input, *replies])
     days = _explicit_days(text)
     transfers = [step for step in plan.steps if step.operation in {"copy_files", "move_files"}]
     if transfers and _has_alternate_target(text):
@@ -242,16 +258,18 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
         if len(bindings) != len(transfers):
             return "请明确每个源对象与目标路径的对应关系，并保留该对应关系"
         for step, (operation, source, directory, name, clause) in zip(transfers, bindings):
+            if directory in UNSPECIFIED_DESTINATIONS:
+                return "请明确复制或移动到哪个目录？"
             if (step.operation != operation
                     or step.parameters.get("sources") != [workspace_path(root, source).relative_to(root).as_posix()]
                     or step.parameters.get("destination_name") != name):
-                return "请明确每个源对象与目标路径的对应关系，并保留该对应关系"
+                raise PlanConditionError("模型计划未保留每个源对象与目标路径的对应关系")
             directory = directory if directory is not None else "." if name and named_defaults else None
             if directory is not None:
                 if directory in {"当前目录", "这里", "本目录", "此目录", "这个目录"}:
                     directory = "."
                 if step.parameters["destination"] != workspace_path(root, directory).relative_to(root).as_posix():
-                    return "请保留每个复制或移动步骤明确指定的目标目录"
+                    raise PlanConditionError("模型计划未保留每个复制或移动步骤明确指定的目标目录")
             scopes.append((clause, directory is not None))
     scopes = iter(scopes)
     for step in plan.steps:
@@ -290,7 +308,7 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
             explicit = re.search(_TARGET_MARKER + r"\s*[\"'`]?" +
                                  target + r"(?:目录)?(?![\w./-])", target_text)
             answered = any(re.fullmatch(r"\s*[\"'`]?" + target + r"[\"'`]?\s*(?:目录)?[。]?\s*", answer)
-                           for answer in answers)
+                           for answer in replies)
             # ponytail: conservative explicit target phrases; unfamiliar expressions ask rather than infer.
             if not explicit and not answered:
                 return "请明确复制或移动到哪个目录？"
@@ -464,7 +482,7 @@ def _plan_defaults(raw, user_input, answers, cwd):
     # 主计划和独立参考只从完整需求补齐已确认条件，否则仅使用合法默认值。
     text = "\n".join([user_input, *answers])
     copy_answers = [answer.split("用户回答：", 1)[-1].strip() for answer in answers]
-    bindings = _copy_name_bindings(user_input, copy_answers, cwd)
+    bindings = _copy_name_bindings(user_input, answers, cwd)
     named_defaults = not answers or bool(bindings) and all(_copy_condition_fields(answer) for answer in copy_answers)
     hidden_requested = re.search(r"隐藏|hidden|dot[ -]?files?|点(?:号)?开头|--all|\bls\s+-[a-zA-Z]*[aA]", text, re.I)
     hidden = None if hidden_requested else DEFAULT_INCLUDE_HIDDEN
@@ -716,14 +734,19 @@ class Engine:
                 if (plan.clarification or plan.refused) and expected is not None:
                     plan = expected
                     record["recovery"] = {"source": "original_request", "plan": plan_payload(plan)}
+                if plan.clarification and _DIRECTORY_QUESTION.fullmatch(plan.clarification):
+                    bindings = _copy_name_bindings(user_input, clarifications or [], cwd)
+                    if len(bindings) == 1 and bindings[0][2] and bindings[0][2] not in UNSPECIFIED_DESTINATIONS:
+                        raise PlanConditionError("目标目录已经由用户指定或确认，不得重复追问；请依据完整需求生成计划")
                 if plan.status == "ready":
                     plan = _normalize_paths(plan, cwd)
                     direct = _direct_named_copy(plan, self.request_intent, cwd)
                     if direct != plan:
                         record["normalization"] = "明确命名文件无需查找，改为直接复制"
                         plan = direct
-                    missing = _missing_conditions(plan, user_input, cwd, answers)
+                    missing = _missing_conditions(plan, user_input, cwd, clarifications or [])
                     if missing:
+                        record["failure_kind"] = "missing_requirement"
                         record["validation_errors"] = [missing]
                         return TaskPlan((), clarification=missing, status="need_clarification")
                 errors = _task_plan_errors(plan, user_input, cwd, required, clarifications or [])
@@ -740,6 +763,7 @@ class Engine:
                 raise
             except (ValueError, TypeError) as error:
                 errors = [_model_output_error(error)]
+                record["failure_kind"] = "path_safety" if isinstance(error, PlanPathError) else "model_plan"
                 if isinstance(error, PlanPathError):
                     path_error = error
                 if attempt == 1 and literal_retry and isinstance(error, json.JSONDecodeError):
@@ -932,9 +956,12 @@ class Engine:
                     raise ValueError("独立参考拒绝生成：" + detail + "；未生成或执行命令")
             try:
                 reference = _normalize_paths(reference, cwd)
+                missing = _missing_conditions(reference, user_input, cwd, clarifications)
+                if missing:
+                    raise ValueError("独立参考缺少用户条件：" + missing)
             except (ValueError, OSError) as error:
-                record["review"] = redact_value("rejected: 参考路径检查失败：" + str(error))
-                raise ValueError("独立参考路径检查失败：" + str(error)) from error
+                record["review"] = redact_value("rejected: 参考需求或路径检查失败：" + str(error))
+                raise ValueError("独立参考需求或路径检查失败：" + str(error)) from error
             break
         if not same_query_plan(plan, reference):
             record["review"] = "rejected"

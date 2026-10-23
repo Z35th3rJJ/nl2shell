@@ -214,10 +214,9 @@ def test_full_target_path_rejects_model_parameter_conflicts(tmp_path, monkeypatc
         "status": "ready", "operations": ["copy_files"],
         "named_sources": ["source_one.txt"], "selection_required": False})))
 
-    plan = Engine(ssh_hosts=[]).generate_task_plan(
-        "将 source_one.txt 复制到 first_backup/first_copy.txt", str(tmp_path))
-
-    assert plan.status == "need_clarification" and not plan.steps
+    with pytest.raises(ValueError, match="对应关系|目标目录"):
+        Engine(ssh_hosts=[]).generate_task_plan(
+            "将 source_one.txt 复制到 first_backup/first_copy.txt", str(tmp_path))
     assert not (tmp_path / "first_backup").exists()
 
 
@@ -350,7 +349,7 @@ def test_multiple_copy_names_remain_bound_to_their_sources(tmp_path, monkeypatch
     if case == "ordinary_second":
         steps[1]["parameters"]["destination"] = "backup"
         names[1] = "backup/missing.txt"
-    model = Mock(side_effect=[json.dumps({"status": "ready", "steps": steps})])
+    model = Mock(return_value=json.dumps({"status": "ready", "steps": steps}))
     monkeypatch.setattr("core.engine.chat", model)
     monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": ["copy_files"]})))
     engine, executor = Engine(ssh_hosts=[]), Mock()
@@ -365,7 +364,7 @@ def test_multiple_copy_names_remain_bound_to_their_sources(tmp_path, monkeypatch
 
     status = execute_request(engine, executor, history, user_input, str(tmp_path),
         "preview" if case in {"swapped", "unbound_names"} else "confirm", input_fn=confirm)
-    model.assert_called_once()
+    assert model.call_count == (2 if case == "swapped" else 1)
     record = history.query(limit=1)[0]
     if case in {"ready", "implicit_directories", "ordinary_second"}:
         assert status == "verified" and len(prompts) == 1
@@ -376,7 +375,7 @@ def test_multiple_copy_names_remain_bound_to_their_sources(tmp_path, monkeypatch
         assert (tmp_path / names[0]).read_bytes() == b"first source"
         assert (tmp_path / names[1]).read_bytes() == b"second source"
     else:
-        assert status == ("blocked" if case == "missing_source" else "needs_clarification")
+        assert status == ("blocked" if case == "missing_source" else "plan_failed" if case == "swapped" else "needs_clarification")
         assert not prompts and not record["executed"]
         assert not any((tmp_path / name).exists() for name in names)
     assert (tmp_path / "first.txt").read_bytes() == b"first source"
@@ -411,6 +410,11 @@ def test_copy_destination_name_cannot_drop_or_change_requested_name(tmp_path, mo
     monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": ["copy_files"]})))
     model = Mock(return_value=json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": parameters}]}))
     monkeypatch.setattr("core.engine.chat", model)
+    if name is not None:
+        with pytest.raises(ValueError, match="对应关系"):
+            Engine(ssh_hosts=[]).generate_task_plan("将 copy_me.txt 复制为 copy_test.txt", str(tmp_path))
+        assert model.call_count == 2
+        return
     result = Engine(ssh_hosts=[]).generate_task_plan("将 copy_me.txt 复制为 copy_test.txt", str(tmp_path))
     if name is None:
         assert result.status == "ready"

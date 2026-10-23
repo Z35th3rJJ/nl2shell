@@ -97,9 +97,14 @@ def test_clarified_copy_directory_and_name_must_both_match(tmp_path, monkeypatch
         raw = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": {
             "sources": [source], "destination": target, "destination_name": name}}
             for source, target, name in [("first.txt", directory, filename), ("second.txt", ".", "second_copy.txt")]]})
-        model = Mock(side_effect=[raw])
+        model = Mock(return_value=raw)
         monkeypatch.setattr("core.engine.chat", model)
         engine = Engine(ssh_hosts=[])
+        if reply == answer and expected != "ready":
+            with pytest.raises(ValueError, match="模型"):
+                engine.generate_task_plan(request, str(tmp_path), [f"问题：确认复制条件；用户回答：{reply}"])
+            assert model.call_count == 2
+            continue
         result = engine.generate_task_plan(request, str(tmp_path), [f"问题：确认复制条件；用户回答：{reply}"])
         assert result.status == expected, (reply, directory, filename)
         if expected == "ready":
@@ -121,9 +126,14 @@ def test_repeated_source_and_name_keep_independent_destination_bindings(tmp_path
         raw = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": {
             "sources": ["shared_source.txt"], "destination": directory, "destination_name": "shared_copy.txt"}}
             for directory in directories]})
-        model = Mock(side_effect=[raw])
+        model = Mock(return_value=raw)
         monkeypatch.setattr("core.engine.chat", model)
         engine = Engine(ssh_hosts=[])
+        if expected != "ready":
+            with pytest.raises(ValueError, match="目标目录"):
+                engine.generate_task_plan(request, str(tmp_path))
+            assert model.call_count == 2
+            continue
         result = engine.generate_task_plan(request, str(tmp_path))
         assert result.status == expected
         if expected == "ready":
