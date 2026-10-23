@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 from core.command_review import SAFE, WARN
 from core.diagnostics import diagnose_environment
-from core.engine import Engine
+from core.engine import Engine, PlanPathError
 from core.llm import model_configuration
 from core.execution import (
     BashExecutor, DockerExecutor, create_executor,
@@ -315,7 +315,12 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
 
     def ask(message):
         try:
-            return input_fn(message).strip()
+            answer = input_fn(message).strip()
+            if answer == "/exit":
+                finish("cancelled", "用户退出，当前任务已取消")
+                print("再见！")
+                raise SystemExit(0)
+            return answer
         except (EOFError, KeyboardInterrupt):
             return ""
 
@@ -430,10 +435,12 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             plan = generate_plan(clarifications=clarifications)
         if plan.clarification:
             return finish("needs_clarification", plan.clarification)
+    except PlanPathError as error:
+        return finish("blocked", "路径安全检查拒绝：" + str(error))
     except (ValueError, TypeError, RuntimeError, OSError) as error:
         return finish("plan_failed", str(error))
     if plan.refused:
-        return finish("unsupported", plan.reason or "暂不支持这项操作")
+        return finish("unsupported", "规划阶段拒绝（非路径检查结果）：" + (plan.reason or "暂不支持这项操作"))
     bash_query = uses_bash(plan)
     if not bash_query and any(step.operation in {"system_info", "working_directory", "list_directory",
                                                 "search_text", "text_stats", "read_text"} for step in plan.steps):

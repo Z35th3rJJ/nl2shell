@@ -145,6 +145,58 @@ def test_copy_name_normalization_shared_by_primary_and_reference(tmp_path, monke
     assert model.call_count == 3
 
 
+@pytest.mark.parametrize("case", ["ready", "implicit_directories", "swapped", "missing_source", "unbound_names", "ordinary_second"])
+def test_multiple_copy_names_remain_bound_to_their_sources(tmp_path, monkeypatch, case):
+    (tmp_path / "first.txt").write_bytes(b"first source")
+    if case != "missing_source":
+        (tmp_path / "missing.txt").write_bytes(b"second source")
+    names = ["atomic_first_copy.txt", "atomic_missing_copy.txt"]
+    user_input = "将 first.txt 复制为 atomic_first_copy.txt，然后将 missing.txt 复制为 atomic_missing_copy.txt"
+    if case == "unbound_names":
+        user_input = "复制 first.txt 和 missing.txt，目标文件名为 atomic_first_copy.txt，目标文件名为 atomic_missing_copy.txt"
+    elif case == "ordinary_second":
+        user_input = "将 first.txt 复制为 atomic_first_copy.txt，然后将 missing.txt 复制到 backup"
+    steps = [{"operation": "copy_files", "parameters": {"sources": [source],
+        "destination_name": names[1 - index] if case == "swapped" else names[index],
+        **({} if case == "implicit_directories" else {"destination": "."})}}
+        for index, source in enumerate(["first.txt", "missing.txt"])]
+    if case == "ordinary_second":
+        steps[1]["parameters"]["destination"] = "backup"
+        names[1] = "backup/missing.txt"
+    model = Mock(side_effect=[json.dumps({"status": "ready", "steps": steps})])
+    monkeypatch.setattr("core.engine.chat", model)
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": ["copy_files"]})))
+    engine, executor = Engine(ssh_hosts=[]), Mock()
+    # 准备阶段缺文件的解释建议是独立依赖，不能消耗计划模型的响应。
+    monkeypatch.setattr(engine, "suggest_fix", Mock(return_value="请核对源文件是否存在。"))
+    history, prompts = HistoryStore(tmp_path / "history.jsonl"), []
+
+    def confirm(prompt):
+        assert "请输入 yes 确认" in prompt
+        prompts.append(prompt)
+        return "yes"
+
+    status = execute_request(engine, executor, history, user_input, str(tmp_path),
+        "preview" if case in {"swapped", "unbound_names"} else "confirm", input_fn=confirm)
+    model.assert_called_once()
+    record = history.query(limit=1)[0]
+    if case in {"ready", "implicit_directories", "ordinary_second"}:
+        assert status == "verified" and len(prompts) == 1
+        assert record["clarifications"] == []
+        assert [(Path(item["items"][0]["source"]).as_posix(), Path(item["items"][0]["destination"]).as_posix())
+                for item in record["preview"]] == [("first.txt", names[0]), ("missing.txt", names[1])]
+        assert [item["status"] for item in record["verification"]] == ["verified", "verified"]
+        assert (tmp_path / names[0]).read_bytes() == b"first source"
+        assert (tmp_path / names[1]).read_bytes() == b"second source"
+    else:
+        assert status == ("blocked" if case == "missing_source" else "needs_clarification")
+        assert not prompts and not record["executed"]
+        assert not any((tmp_path / name).exists() for name in names)
+    assert (tmp_path / "first.txt").read_bytes() == b"first source"
+    executor.execute.assert_not_called()
+    executor.execute_query.assert_not_called()
+
+
 @pytest.mark.parametrize("before_preview", [True, False])
 def test_copy_destination_name_never_overwrites(tmp_path, before_preview):
     (tmp_path / "source.txt").write_bytes(b"source")

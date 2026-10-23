@@ -24,18 +24,25 @@ _UNSUPPORTED_CONTENT_SEARCH = re.compile(
 )
 
 
+class PlanPathError(ValueError):
+    """计划中的路径被程序安全检查拒绝，区别于模型声明不支持。"""
+
+
 def _normalize_paths(plan: TaskPlan, cwd: str) -> TaskPlan:
     root = Path(cwd).resolve()
     steps = []
-    for step in plan.steps:
-        parameters = dict(step.parameters)
-        for key in ("path", "source", "destination"):
-            if key in parameters:
-                parameters[key] = workspace_path(root, parameters[key]).relative_to(root).as_posix()
-        if "sources" in parameters:
-            parameters["sources"] = [workspace_path(root, path).relative_to(root).as_posix()
-                                     for path in parameters["sources"]]
-        steps.append(replace(step, parameters=parameters))
+    try:
+        for step in plan.steps:
+            parameters = dict(step.parameters)
+            for key in ("path", "source", "destination"):
+                if key in parameters:
+                    parameters[key] = workspace_path(root, parameters[key]).relative_to(root).as_posix()
+            if "sources" in parameters:
+                parameters["sources"] = [workspace_path(root, path).relative_to(root).as_posix()
+                                         for path in parameters["sources"]]
+            steps.append(replace(step, parameters=parameters))
+    except ValueError as error:
+        raise PlanPathError(str(error)) from error
     return replace(plan, steps=tuple(steps))
 
 
@@ -82,19 +89,115 @@ def _explicit_days(text: str) -> set[float]:
     return days
 
 
+_COPY_DESTINATION_PATTERN = re.compile(_TARGET_MARKER + r'''\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''')
+
+
 def _explicit_targets(text: str) -> set[str]:
-    matches = re.findall(_TARGET_MARKER + r'''\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''', text)
+    matches = _COPY_DESTINATION_PATTERN.findall(text)
     return {next(value for value in match if value) for match in matches}
+
+
+_COPY_NAME_PATTERN = re.compile(r'''(?:复制为|复制成|命名为|目标文件名(?:为|是|[:：]))\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''')
 
 
 def _explicit_copy_names(text: str) -> set[str]:
-    matches = re.findall(r'''(?:复制为|复制成|命名为|目标文件名(?:为|是|[:：]))\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''', text)
+    matches = _COPY_NAME_PATTERN.findall(text)
     return {next(value for value in match if value) for match in matches}
+
+
+def _copy_condition_fields(text):
+    fields = [(match, "name", next(value for value in match.groups() if value))
+              for match in _COPY_NAME_PATTERN.finditer(text)]
+    fields += [(match, "destination", next(value for value in match.groups() if value))
+               for match in _COPY_DESTINATION_PATTERN.finditer(text)
+               if not any(match.start() < name.end() and name.start() < match.end() for name, _, _ in fields)]
+    fields += [(match, "invalid_destination", None)
+               for match in re.finditer(_TARGET_MARKER + r"(?=\s*(?:[，。；,;]|$))", text)
+               if not any(field.start() <= match.start() < field.end() for field, _, _ in fields)]
+    return sorted(fields, key=lambda field: field[0].start())
+
+
+def _copy_name_bindings(text, answers=()):
+    # 仅绑定明确的“将/把单个源复制…”子句；没有对应关系时不能按文件名集合猜测。
+    sources = list(re.finditer(r'''(?:将|把)\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;\n]+))\s*复制''', text))
+    bindings = []
+    for index, source in enumerate(sources):
+        clause = "复制" + text[source.end():sources[index + 1].start() if index + 1 < len(sources) else len(text)]
+        names = _explicit_copy_names(clause)
+        if len(names) > 1 or any(kind == "invalid_destination" for _, kind, _ in _copy_condition_fields(clause)):
+            return []
+        bindings.append((next(value for value in source.groups() if value), next(iter(names), None), clause))
+    if {name for _, name, _ in bindings if name is not None} != _explicit_copy_names(text):
+        return []
+    # 回答单独处理：只接受明确的步骤号或源文件引用，不能延长最后一个原始子句。
+    for answer in answers:
+        answer = answer.split("用户回答：", 1)[-1].strip()
+        start = 0
+        updates, current = {}, None
+        fields = _copy_condition_fields(answer)
+        if any(kind == "invalid_destination" for _, kind, _ in fields):
+            return []
+        for target, field, value in fields:
+            prefix = answer[start:target.start()]
+            ordinals = re.findall(r"第([一二三四五六七八九十\d]+)步", prefix)
+            numbers = {"一": 0, "二": 1, "三": 2, "1": 0, "2": 1, "3": 2}
+            if any(value not in numbers or numbers[value] >= len(bindings) for value in ordinals):
+                return []
+            indices = {numbers[value] for value in ordinals}
+            indices.update(index for index, (source, _, _) in enumerate(bindings) if re.search(
+                r'''(?:^|[\s，。；,;"']|将|把)''' + re.escape(source) + r'''(?=$|[\s，。；,;"']|的|复制)''', prefix))
+            if not indices and current is not None and re.fullmatch(r"[\s，。；,;]*(?:并|并且)?[\s，。；,;]*", prefix):
+                indices.add(current)
+            if len(indices) != 1:
+                return []
+            index = indices.pop()
+            updates.setdefault(index, {"name": set(), "destination": set()})[field].add(value)
+            current = index
+            start = target.end()
+        if any(len(values) > 1 for update in updates.values() for values in update.values()):
+            return []
+        for index, update in updates.items():
+            source, name, clause = bindings[index]
+            for field, values in update.items():
+                if not values:
+                    continue
+                for match, kind, _ in reversed(_copy_condition_fields(clause)):
+                    if kind == field:
+                        clause = clause[:match.start()] + clause[match.end():]
+                value = next(iter(values))
+                clause += "\n" + ("目标文件名为 " if field == "name" else "目标目录为 ") + json.dumps(value, ensure_ascii=False)
+                if field == "name":
+                    name = value
+            bindings[index] = (source, name, clause)
+    return bindings
 
 
 def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list[str]) -> str:
     text = "\n".join([user_input, *answers])
     days = _explicit_days(text)
+    copies = [step for step in plan.steps if step.operation == "copy_files"]
+    bindings = _copy_name_bindings(user_input, answers)
+    named_defaults = not answers or bool(bindings) and all(_copy_condition_fields(answer) for answer in answers)
+    scopes = []
+    if _explicit_copy_names(text) and (bindings or len(copies) > 1):
+        root = Path(cwd).resolve()
+        if len(bindings) != len(copies):
+            return "请明确每个复制源与目标文件名的对应关系，并保留该对应关系"
+        for step, (source, name, clause) in zip(copies, bindings):
+            if (step.parameters.get("sources") != [workspace_path(root, source).relative_to(root).as_posix()]
+                    or step.parameters.get("destination_name") != name):
+                return "请明确每个复制源与目标文件名的对应关系，并保留该对应关系"
+            directories = {value for _, kind, value in _copy_condition_fields(clause) if kind == "destination"}
+            if len(directories) > 1:
+                return "请明确每个复制步骤的唯一目标目录"
+            directory = next(iter(directories), "." if name and named_defaults else None)
+            if directory is not None:
+                if directory in {"当前目录", "这里", "本目录", "此目录", "这个目录"}:
+                    directory = "."
+                if step.parameters["destination"] != workspace_path(root, directory).relative_to(root).as_posix():
+                    return "请保留每个复制步骤明确指定的目标目录"
+            scopes.append((clause, directory is not None))
+    scopes = iter(scopes)
     for step in plan.steps:
         parameters = step.parameters
         if step.operation in {"find_files", "count_files", "copy_files", "move_files", "trash", "organize_files"}:
@@ -103,19 +206,25 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
                 return "请明确时间范围，例如最近多少天？"
         if step.operation in {"copy_files", "move_files"}:
             destination = parameters["destination"]
+            target_text = text
             if step.operation == "copy_files":
-                copy_names = _explicit_copy_names(text)
+                target_text, checked = next(scopes, (text, False))
+                if checked:
+                    continue
+                if any(kind == "invalid_destination" for _, kind, _ in _copy_condition_fields(target_text)):
+                    return "请明确每个复制步骤的唯一目标目录"
+                copy_names = _explicit_copy_names(target_text)
                 if copy_names:
                     if copy_names != {parameters.get("destination_name")}:
                         return "请明确复制后的目标文件名，并保留该文件名条件"
-                    if destination == "." and not answers and not _explicit_targets(text):
+                    if destination == "." and named_defaults and not _explicit_targets(target_text):
                         continue
             names = [destination, str(Path(cwd).resolve() / destination)]
             if destination == ".":
                 names = [str(Path(cwd).resolve()), "当前目录", "这里", "本目录", "此目录", "这个目录", "."]
             target = "(?:" + "|".join(re.escape(name) for name in names) + ")"
             explicit = re.search(_TARGET_MARKER + r"\s*[\"'`]?" +
-                                 target + r"(?:目录)?(?![\w./-])", text)
+                                 target + r"(?:目录)?(?![\w./-])", target_text)
             answered = any(re.fullmatch(r"\s*[\"'`]?" + target + r"[\"'`]?\s*(?:目录)?[。]?\s*", answer)
                            for answer in answers)
             # ponytail: conservative explicit target phrases; unfamiliar expressions ask rather than infer.
@@ -294,7 +403,9 @@ def _count_request_recursive(user_input, answers):
 def _plan_defaults(raw, user_input, answers):
     # 显式隐藏项条件不使用默认值；主计划和独立参考均只依据原始需求及完整问答。
     text = "\n".join([user_input, *answers])
-    copy_names = _explicit_copy_names(text)
+    copy_answers = [answer.split("用户回答：", 1)[-1].strip() for answer in answers]
+    bindings = _copy_name_bindings(user_input, copy_answers)
+    named_defaults = not answers or bool(bindings) and all(_copy_condition_fields(answer) for answer in copy_answers)
     hidden_requested = re.search(r"隐藏|hidden|dot[ -]?files?|点(?:号)?开头|--all|\bls\s+-[a-zA-Z]*[aA]", text, re.I)
     try:
         value = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.I))
@@ -304,19 +415,25 @@ def _plan_defaults(raw, user_input, answers):
         return raw
     recursive = _count_request_recursive(user_input, answers)
     changed = False
+    copy_index = 0
     for step in value["steps"]:
         if not isinstance(step, dict):
             continue
         parameters = step.get("parameters")
+        copy_text = text
+        if step.get("operation") == "copy_files" and isinstance(parameters, dict):
+            if copy_index < len(bindings) and parameters.get("sources") == [bindings[copy_index][0]]:
+                copy_text = bindings[copy_index][2]
+            copy_index += 1
         if (step.get("operation") == "copy_files" and isinstance(parameters, dict)
-                and not copy_names and "destination_name" in parameters):
+                and not _explicit_copy_names(copy_text) and "destination_name" in parameters):
             # 没有改名要求时沿用源名称，模型多填的可选字段不是用户条件。
             del parameters["destination_name"]
             changed = True
         if (step.get("operation") == "copy_files" and isinstance(parameters, dict)
                 and "destination" not in parameters and "destination_name" in parameters
-                and not answers and copy_names == {parameters["destination_name"]}
-                and not _explicit_targets(text)):
+                and named_defaults and _explicit_copy_names(copy_text) == {parameters["destination_name"]}
+                and not any(kind != "name" for _, kind, _ in _copy_condition_fields(copy_text))):
             parameters["destination"] = "."
             changed = True
         if (step.get("operation") == "count_files" and not hidden_requested and len(value["steps"]) == 1
@@ -535,6 +652,7 @@ class Engine:
                 raise
             record["raw_output"] = redact_value(raw)
             plan = None
+            path_error = None
             try:
                 plan = parse_operation_plan(_plan_defaults(raw, user_input, clarifications or []))
                 if format_baseline is not None:
@@ -562,6 +680,8 @@ class Engine:
                               "不得为正则用途额外转义、扩大搜索范围或把字面搜索转换为正则搜索。"]
             except (ValueError, TypeError, OSError) as error:
                 errors = [_model_output_error(error)]
+                if isinstance(error, PlanPathError):
+                    path_error = error
                 if attempt == 1 and literal_retry and isinstance(error, json.JSONDecodeError):
                     closed = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.I) + "}"
                     baseline = _reference_format_payload(closed)
@@ -602,6 +722,8 @@ class Engine:
                 ])
             attempt += 1
         count = "三次" if max_attempts == 3 else "两次"
+        if path_error is not None:
+            raise path_error
         raise ValueError("模型" + count + "生成的计划均未满足任务约束：" + "；".join(errors))
 
     def suggest_fix(self, command: str, detail: str) -> str:

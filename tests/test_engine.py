@@ -76,7 +76,7 @@ def test_explicit_regex_and_recursive_text_search_stay_unsupported(monkeypatch, 
     assert status == "unsupported"
     record = history.records[-1]
     assert record["plan"] == {"status": "unsupported", "reason": reason}
-    assert record["block_reason"] == reason
+    assert record["block_reason"] == "规划阶段拒绝（非路径检查结果）：" + reason
     assert not record["preview"] and not record["executed"]
     assert len(calls) == model_calls and not engine.command_attempts
     executor.execute.assert_not_called()
