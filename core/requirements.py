@@ -7,15 +7,19 @@ from .task_plan import parse_operation_plan
 
 DEFAULT_INCLUDE_HIDDEN = False
 UNSPECIFIED_DESTINATIONS = {"合适的目录", "合适的文件夹", "合适的地方", "某个目录", "某个文件夹", "目标目录"}
+PATH_TOKEN = r'''(?:"[^"\r\n]+"|'[^'\r\n]+'|“[^”\r\n]+”|‘[^’\r\n]+’|[^\s，。；,;"'“”‘’]+)'''
+
+
+def path_value(token):
+    return token[1:-1] if (token[0], token[-1]) in {('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’")} else token
 
 
 def explicit_transfer_operation(user_input, answers):
     # shortcut: 仅核对完整的单源直接传输语法；条件、否定、多操作或补充回答交回原流程。
     if answers:
         return None
-    path = r'''(?:"[^"\r\n]+"|'[^'\r\n]+'|[\w./\\-]+)'''
-    request = re.fullmatch(r"(?:将|把)\s*(?P<source>" + path + r")\s*(?P<verb>复制|移动)到\s*"
-                           r"(?P<target>" + path + r")(?:\s+(?:目录|文件夹))?", user_input.strip())
+    request = re.fullmatch(r"(?:将|把)\s*(?P<source>" + PATH_TOKEN + r")\s*(?P<verb>复制|移动)到\s*"
+                           r"(?P<target>" + PATH_TOKEN + r")(?:\s+(?:目录|文件夹))?", user_input.strip())
     if request is None or request["target"] in UNSPECIFIED_DESTINATIONS:
         return None
     return "copy_files" if request["verb"] == "复制" else "move_files"
@@ -36,8 +40,7 @@ def count_request_recursive(user_input, answers):
 def _directory_request(user_input, clarifications):
     # shortcut: 仅接受完整单路径浏览语法及隐藏项问答；扩展表达前须增加无歧义解析测试。
     request = re.fullmatch(
-        r'''(?:列出|查看|浏览)[ \t]+(?P<path>"[^"\r\n]+"|'[^'\r\n]+'|[A-Za-z0-9_./-]+)'''
-        r"[ \t]+(?:目录|文件夹)(?:的)?内容"
+        r"(?:列出|查看|浏览)[ \t]+(?P<path>" + PATH_TOKEN + r")[ \t]+(?:目录|文件夹)(?:的)?内容"
         r"(?:[，,][ \t]*(?P<hidden>(?:包括|包含|显示|不包括|不包含|不显示)隐藏(?:文件|项)))?[。]?",
         user_input.strip())
     if request is None:
@@ -54,7 +57,7 @@ def _directory_request(user_input, clarifications):
             return None
         hidden = confirmed
     path = request["path"]
-    parameters = {"path": path[1:-1] if path[0] in "\"'" else path}
+    parameters = {"path": path_value(path)}
     parameters["include_hidden"] = DEFAULT_INCLUDE_HIDDEN if hidden is None else hidden
     raw = json.dumps({"status": "ready", "steps": [{"operation": "list_directory", "parameters": parameters}]})
     return parse_operation_plan(raw)

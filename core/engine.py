@@ -6,7 +6,7 @@ from .llm import chat
 from .ssh_config import load_ssh_hosts
 from .task_plan import TaskPlan, TaskStep, READ_OPERATIONS, parse_operation_plan, plan_payload, validate_parameters
 from .intent import analyze_request, DIRECTORY_RULES
-from .requirements import resolve_request, count_request_recursive, DEFAULT_INCLUDE_HIDDEN, UNSPECIFIED_DESTINATIONS
+from .requirements import resolve_request, count_request_recursive, DEFAULT_INCLUDE_HIDDEN, UNSPECIFIED_DESTINATIONS, PATH_TOKEN, path_value
 from .redaction import redact_value
 from .operations import workspace_path
 
@@ -101,16 +101,14 @@ def _explicit_days(text: str) -> set[float]:
     return days
 
 
-_COPY_DESTINATION_PATTERN = re.compile(_TARGET_MARKER + r'''\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''')
+_COPY_DESTINATION_PATTERN = re.compile(_TARGET_MARKER + r"\s*(?:名为\s*)?(?P<path>" + PATH_TOKEN + ")")
 _DIRECTORY_QUESTION = re.compile(
     r"(请问|请明确|请指定)?(?:(?:复制或移动|复制|移动)到(?:哪个目录|哪里)|目标目录(?:是|为|是什么|在哪里)?)[？?]?")
-_ALTERNATE_TARGET_PATTERN = re.compile(
-    r'''\s*(?:或|或者)\s*(?:"[^"]+"|'[^']+'|[^\s，。；,;]+)''')
+_ALTERNATE_TARGET_PATTERN = re.compile(r"\s*(?:或|或者)\s*" + PATH_TOKEN)
 
 
 def _explicit_targets(text: str) -> set[str]:
-    matches = _COPY_DESTINATION_PATTERN.findall(text)
-    return {next(value for value in match if value) for match in matches}
+    return {path_value(match["path"]) for match in _COPY_DESTINATION_PATTERN.finditer(text)}
 
 
 def _has_alternate_target(text):
@@ -118,18 +116,18 @@ def _has_alternate_target(text):
                for match in _COPY_DESTINATION_PATTERN.finditer(text))
 
 
-_COPY_NAME_PATTERN = re.compile(r'''(?:复制为|复制成|移动为|移动成|命名为|目标文件名(?:为|是|[:：]))\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;]+))''')
+_COPY_NAME_PATTERN = re.compile(r"(?:复制为|复制成|移动为|移动成|命名为|目标文件名(?:为|是|[:：]))\s*(?P<path>" + PATH_TOKEN + ")")
+_TRANSFER_SOURCE_PATTERN = re.compile(r"(?:将|把)\s*(?P<path>" + PATH_TOKEN + r")\s*(?P<verb>复制|移动)")
 
 
 def _explicit_copy_names(text: str) -> set[str]:
-    matches = _COPY_NAME_PATTERN.findall(text)
-    return {next(value for value in match if value) for match in matches}
+    return {path_value(match["path"]) for match in _COPY_NAME_PATTERN.finditer(text)}
 
 
 def _copy_condition_fields(text):
-    fields = [(match, "name", next(value for value in match.groups() if value))
+    fields = [(match, "name", path_value(match["path"]))
               for match in _COPY_NAME_PATTERN.finditer(text)]
-    fields += [(match, "destination", next(value for value in match.groups() if value))
+    fields += [(match, "destination", path_value(match["path"]))
                for match in _COPY_DESTINATION_PATTERN.finditer(text)
                if not any(match.start() < name.end() and name.start() < match.end() for name, _, _ in fields)]
     fields += [(match, "invalid_destination", None)
@@ -139,7 +137,7 @@ def _copy_condition_fields(text):
 
 
 def _target_is_complete_path(text, match, cwd=None):
-    destination = next(value for value in match.groups() if value)
+    destination = path_value(match["path"])
     if ("/" not in destination and "\\" not in destination) or destination.endswith(("/", "\\")):
         return False
     if "目标目录" in match.group(0) or re.match(r"\s*(?:目录|文件夹)", text[match.end():]):
@@ -179,17 +177,16 @@ def _copy_target_parts(clause, cwd=None):
 
 def _copy_name_bindings(text, answers=(), cwd=None):
     # 仅绑定明确的“将/把单个源复制/移动…”子句；没有对应关系时不能按文件名集合猜测。
-    sources = list(re.finditer(
-        r'''(?:将|把)\s*(?:"([^"]+)"|'([^']+)'|([^\s，。；,;\n]+))\s*(复制|移动)''', text))
+    sources = list(_TRANSFER_SOURCE_PATTERN.finditer(text))
     bindings = []
     for index, source in enumerate(sources):
-        verb = source.group(4)
+        verb = source["verb"]
         clause = verb + text[source.end():sources[index + 1].start() if index + 1 < len(sources) else len(text)]
         names = _explicit_copy_names(clause)
         if len(names) > 1 or any(kind == "invalid_destination" for _, kind, _ in _copy_condition_fields(clause)):
             return []
         operation = "copy_files" if verb == "复制" else "move_files"
-        bindings.append((operation, next(value for value in source.groups()[:3] if value), clause))
+        bindings.append((operation, path_value(source["path"]), clause))
     if {name for _, _, clause in bindings for name in _explicit_copy_names(clause)} != _explicit_copy_names(text):
         return []
     # 回答单独处理：只接受明确的步骤号或源文件引用，不能延长最后一个原始子句。
@@ -199,7 +196,7 @@ def _copy_name_bindings(text, answers=(), cwd=None):
         # 短回答只有在问题明确指向目录且只有一个待绑定步骤时才成为目录事实。
         if (separator and len(bindings) == 1
                 and _DIRECTORY_QUESTION.fullmatch(question.removeprefix("问题："))
-                and re.fullmatch(r'''(?:"[^"\r\n]+"|'[^'\r\n]+'|[\w./\\-]+)''', answer)
+                and re.fullmatch(PATH_TOKEN, answer)
                 and answer not in UNSPECIFIED_DESTINATIONS | {"不知道", "是", "否", "yes", "no"}):
             answer = "目标目录为 " + answer
         start = 0
@@ -215,11 +212,15 @@ def _copy_name_bindings(text, answers=(), cwd=None):
                 return []
             indices = {numbers[value] for value in ordinals}
             indices.update(index for index, (_, source, _) in enumerate(bindings) if re.search(
-                r'''(?:^|[\s，。；,;"']|将|把)''' + re.escape(source) + r'''(?=$|[\s，。；,;"']|的|复制|移动)''', prefix))
+                r'''(?:^|[\s，。；,;"'“”‘’]|将|把)''' + re.escape(source) + r'''(?=$|[\s，。；,;"'“”‘’]|的|复制|移动)''', prefix))
             if not indices and current is not None and re.fullmatch(r"[\s，。；,;]*(?:并|并且)?[\s，。；,;]*", prefix):
                 indices.add(current)
             if not indices and len(bindings) == 1 and not prefix.strip():
                 indices.add(0)
+            if not indices and len(bindings) == 1:
+                verb = "复制" if bindings[0][0] == "copy_files" else "移动"
+                if re.fullmatch(r"(?:执行" + verb + r"操作[，,]\s*)?(?:将|把)?(?:文件|源文件)?" + verb, prefix):
+                    indices.add(0)
             if len(indices) != 1:
                 return []
             index = indices.pop()
@@ -254,6 +255,9 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
     text = "\n".join([user_input, *replies])
     days = _explicit_days(text)
     transfers = [step for step in plan.steps if step.operation in {"copy_files", "move_files"}]
+    if (transfers and re.match(r'''(?:将|把)\s*["'“‘]''', user_input.strip())
+            and not _TRANSFER_SOURCE_PATTERN.match(user_input.strip())):
+        return "请使用配对引号明确源对象的完整路径"
     if transfers and _has_alternate_target(text):
         return "请明确复制或移动的唯一目标路径"
     bindings = _copy_name_bindings(user_input, answers, cwd)
@@ -289,7 +293,8 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
             destination = parameters["destination"]
             # 泛指目标不是路径；引号内明确命名的同名目录仍可使用。
             if destination in UNSPECIFIED_DESTINATIONS and not any(
-                    destination in match.groups()[:2] for match in _COPY_DESTINATION_PATTERN.finditer(text)):
+                    destination == path_value(match["path"]) and match["path"][0] in "\"'“‘"
+                    for match in _COPY_DESTINATION_PATTERN.finditer(text)):
                 return "请明确复制或移动到哪个目录？"
             target_text = text
             target_text, checked = next(scopes, (text, False))
@@ -311,11 +316,14 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
             names = [destination, str(Path(cwd).resolve() / destination)]
             if destination == ".":
                 names = [str(Path(cwd).resolve()), "当前目录", "这里", "本目录", "此目录", "这个目录", "."]
-            target = "(?:" + "|".join(re.escape(name) for name in names) + ")"
-            explicit = re.search(_TARGET_MARKER + r"\s*[\"'`]?" +
-                                 target + r"(?:目录)?(?![\w./-])", target_text)
-            answered = any(re.fullmatch(r"\s*[\"'`]?" + target + r"[\"'`]?\s*(?:目录)?[。]?\s*", answer)
-                           for answer in replies)
+            explicit = any(path_value(match["path"]) in names
+                           or match["path"] in {name + "目录" for name in names}
+                           for match in _COPY_DESTINATION_PATTERN.finditer(target_text))
+            answered = False
+            for answer in replies:
+                match = re.fullmatch(r"\s*(?P<path>" + PATH_TOKEN + r")\s*(?:目录)?[。]?\s*", answer)
+                if match and path_value(match["path"]) in names:
+                    answered = True
             # ponytail: conservative explicit target phrases; unfamiliar expressions ask rather than infer.
             if not explicit and not answered:
                 return "请明确复制或移动到哪个目录？"
