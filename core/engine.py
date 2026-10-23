@@ -245,6 +245,8 @@ class ConversationTurn:
     commands: tuple[str, ...]
     status: str
     executed: bool
+    execution_state: str = "unknown"
+    file_change_state: str = "unknown"
 
 
 def classify_output(text: str) -> str:
@@ -520,7 +522,7 @@ class Engine:
         self._history.append((user_input, command))
 
     def remember_task(self, user_input: str, cwd: str, plan: TaskPlan,
-                      status: str, executed: bool) -> None:
+                      status: str, executed: bool, *, execution_state="unknown", file_change_state="unknown") -> None:
         """记录最多五轮紧凑任务状态，仅用于当前进程的计划生成。"""
         turn = ConversationTurn(
             user_input=user_input,
@@ -528,6 +530,8 @@ class Engine:
             commands=tuple(json.dumps({"operation": step.operation, "parameters": step.parameters}, ensure_ascii=False) for step in plan.steps),
             status=status,
             executed=executed,
+            execution_state=execution_state,
+            file_change_state=file_change_state,
         )
         self._task_history = [*self._task_history, turn][-5:]
 
@@ -599,11 +603,14 @@ class Engine:
                     "commands": turn.commands,
                     "status": turn.status,
                     "executed": turn.executed,
+                    "execution_state": turn.execution_state,
+                    "file_change_state": turn.file_change_state,
                 }
                 for turn in self._task_history
             ]
             prompt = (
-                "最近任务上下文（仅用于理解指代；executed=false 表示没有发生）：\n"
+                "最近任务上下文（仅用于理解指代；executed=false 仅表示没有已确认的执行证据，"
+                "execution_state=not_started 才表示未开始；unknown 不得推断为未执行或未修改）：\n"
                 + json.dumps(context, ensure_ascii=False)
                 + f"\n\n当前目录：{cwd}\n当前请求：{user_input}"
             )

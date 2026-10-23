@@ -14,6 +14,7 @@ import time
 from uuid import uuid4
 
 from .task_plan import READ_OPERATIONS, TaskPlan, validate_parameters
+from .execution import ExecutionStartError
 
 TRASH = ".nl2shell-trash"
 
@@ -329,14 +330,22 @@ def execute_action(prepared: dict, action: dict, executor=None, *, timeout_secon
     operation = action["operation"]
     deadline = time.monotonic() + timeout_seconds
     outcome = {"step": action["step"], "operation": operation, "status": "verified",
-               "detail": "实际结果检查通过", "items": [], "executed": False}
+               "detail": "实际结果检查通过", "items": [], "executed": False,
+               "execution_state": "not_started", "file_change_state": "unchanged"}
     started = time.monotonic()
+    phase = "environment"
+    for item in action["items"]:
+        outcome["items"].append({**{key: value for key, value in item.items() if key != "identity"},
+                                 "status": "not_executed", "executed": False, "file_change_state": "unchanged"})
+    progress = None
     try:
         _check_deadline(deadline)
         if operation in {"find_files", "count_files"}:
-            outcome["executed"] = True
+            outcome.update(executed=True, execution_state="started")
+            phase = "execution"
             current = find_files(root, action["parameters"], prepared["now"],
                                  [Path(path) for path in prepared["excluded"]], deadline)
+            phase = "verification"
             if [str(path.relative_to(root)) for path in current] != action["files"]:
                 raise ValueError("查询文件清单已变化，请重新确认")
             outcome["files"] = action["files"]
@@ -345,25 +354,29 @@ def execute_action(prepared: dict, action: dict, executor=None, *, timeout_secon
                 if _identity(workspace_path(root, filename), deadline) != identity:
                     raise ValueError("查询结果已变化，请重新生成任务")
         elif operation == "list_trash":
+            outcome.update(executed=True, execution_state="started")
+            phase = "execution"
             outcome["entries"] = trash_entries(root)
-            outcome["executed"] = True
         elif operation == "system_info":
             commands = {"disk": "df -h", "memory": "free -h", "system": "uname -a"}
             if executor is None or not executor.is_available():
                 raise RuntimeError("系统查询需要可用的 Linux Bash")
+            phase = "execution"
+            outcome["execution_state"] = "unknown"
             result = executor.execute(commands[action["parameters"]["query"]], cwd=str(root),
                                       timeout_seconds=timeout_seconds)
-            outcome.update(executed=True, stdout=result.stdout, stderr=result.stderr,
+            outcome.update(executed=True, execution_state=("exited" if not result.timed_out and type(result.exit_code) is int else result.process_state),
+                           stdout=result.stdout, stderr=result.stderr,
                            timed_out=result.timed_out, output_truncated=result.output_truncated)
             if result.timed_out or result.exit_code != 0:
                 raise RuntimeError("系统查询失败或超时")
+            phase = "verification"
             if result.output_truncated or not result.stdout.strip():
                 outcome.update(status="unverified", detail="查询输出为空或被截断，尚未验证")
-        for item in action["items"]:
+        for item, progress in zip(action["items"], outcome["items"]):
+            phase = "environment"
             _check_deadline(deadline)
-            progress = {key: value for key, value in item.items() if key != "identity"}
             progress["status"] = "pending"
-            outcome["items"].append(progress)
             destination = workspace_path(root, item["destination"], internal=operation == "trash")
             if destination.exists() or destination.is_symlink():
                 raise FileExistsError("目标已存在，请重新确认新名称")
@@ -372,8 +385,17 @@ def execute_action(prepared: dict, action: dict, executor=None, *, timeout_secon
                 source = workspace_path(root, item["source"], internal=operation == "restore")
                 if _identity(source, deadline) != item["identity"]:
                     raise ValueError("源文件已变化，请重新确认")
+            parent_missing = not destination.parent.exists()
+            # 创建父目录和回收记录也是写入，必须在这些系统调用之前记录已进入执行。
+            phase = "execution"
+            outcome.update(executed=True, execution_state="started")
+            if outcome["file_change_state"] != "changed":
+                outcome["file_change_state"] = "unknown"
+            progress.update(status="executing", executed=True, file_change_state="unknown")
             if operation == "trash":
                 destination.parent.mkdir(parents=True, exist_ok=False)
+                outcome["file_change_state"] = "changed"
+                progress["file_change_state"] = "changed"
                 record = {"id": item["trash_id"], "original": item["source"],
                           "timestamp": datetime.now(timezone.utc).isoformat()}
                 record_path = workspace_path(root, str(destination.parent / "record.json"), internal=True)
@@ -381,35 +403,51 @@ def execute_action(prepared: dict, action: dict, executor=None, *, timeout_secon
                     json.dump(record, file, ensure_ascii=False)
             else:
                 destination.parent.mkdir(parents=True, exist_ok=True)
+                if parent_missing:
+                    outcome["file_change_state"] = "changed"
+                    progress["file_change_state"] = "changed"
             workspace_path(root, str(destination), internal=operation == "trash")
-            outcome["executed"] = True
-            progress["status"] = "executing"
             if operation == "create_file":
                 with destination.open("xb"):
                     pass
-                valid = destination.is_file() and destination.stat().st_size == 0
             elif operation == "create_directory":
                 destination.mkdir()
-                valid = destination.is_dir()
             elif operation == "copy_files":
                 _copy(source, destination, deadline)
-                valid = (snapshot(destination, deadline) == item["identity"]["content"]
-                         and _identity(source, deadline) == item["identity"])
             else:
                 # ponytail: 同一工作区内重命名；跨文件系统移动明确失败，不做隐式复制删除。
                 _move_no_replace(source, destination)
+            outcome["file_change_state"] = "changed"
+            progress["file_change_state"] = "changed"
+            phase = "verification"
+            if operation == "create_file":
+                valid = destination.is_file() and destination.stat().st_size == 0
+            elif operation == "create_directory":
+                valid = destination.is_dir()
+            elif operation == "copy_files":
+                valid = (snapshot(destination, deadline) == item["identity"]["content"]
+                         and _identity(source, deadline) == item["identity"])
+            else:
                 valid = not source.exists() and snapshot(destination, deadline) == item["identity"]["content"]
             if not valid:
                 raise RuntimeError("文件操作完成，但实际结果检查失败")
             progress["status"] = "verified"
         if action["items"] == [] and operation not in READ_OPERATIONS:
             outcome["detail"] = "没有符合条件的文件，未修改任何文件"
-    except (OSError, ValueError, RuntimeError, KeyboardInterrupt) as error:
-        outcome.update(status="execution_failed", detail=str(error), timed_out=isinstance(error, TimeoutError),
+    except (OSError, ValueError, RuntimeError, TypeError, KeyboardInterrupt) as error:
+        outcome.update(status="unverified" if phase == "verification" else "execution_failed",
+                       detail=str(error), timed_out=isinstance(error, TimeoutError),
                        error_type=type(error).__name__, error_number=getattr(error, "errno", None))
+        if getattr(error, "process_started", False):
+            outcome.update(executed=True, execution_state=getattr(error, "process_state", "unknown"))
+        elif isinstance(error, ExecutionStartError):
+            outcome["execution_state"] = "not_started"
         if isinstance(error, KeyboardInterrupt):
-            outcome.update(status="interrupted", detail="用户中断；已完成操作保留，未完成操作停止")
-        if outcome["items"]:
-            outcome["items"][-1]["status"] = "failed"
+            outcome.update(status="interrupted", detail="用户中断，停止后续操作；请核对实际结果")
+        if progress is not None:
+            progress["status"] = "unverified" if phase == "verification" else "failed"
+    if outcome["execution_state"] == "started":
+        outcome["execution_state"] = "completed" if outcome["status"] == "verified" else "stopped"
+    outcome["failure_phase"] = "" if outcome["status"] == "verified" else phase
     outcome["duration_seconds"] = time.monotonic() - started
     return outcome

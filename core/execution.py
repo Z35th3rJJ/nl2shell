@@ -141,17 +141,23 @@ class BashExecutor:
                 failure = ExecutionStartError(error.errno, str(error))
                 failure.attempted_argv = list(argv)
                 raise failure from error
-            timed_out = False
             try:
-                process.wait(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                _terminate_process_tree(process)
-            except KeyboardInterrupt:
-                _terminate_process_tree(process)
+                timed_out = False
+                try:
+                    process.wait(timeout=timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    _terminate_process_tree(process)
+                except KeyboardInterrupt:
+                    _terminate_process_tree(process)
+                    raise
+                stdout, stdout_truncated = _read_limited(stdout_file, self.output_limit)
+                stderr, stderr_truncated = _read_limited(stderr_file, self.output_limit)
+            except (OSError, RuntimeError, KeyboardInterrupt) as error:
+                error.process_started = True
+                error.process_state = "stopped" if type(process.poll()) is int else "unknown"
+                error.actual_argv = list(argv)
                 raise
-            stdout, stdout_truncated = _read_limited(stdout_file, self.output_limit)
-            stderr, stderr_truncated = _read_limited(stderr_file, self.output_limit)
         if timed_out:
             return ExecutionResult(None, stdout, stderr, time.monotonic() - start, True,
                                    stdout_truncated or stderr_truncated,

@@ -307,7 +307,7 @@ def execute_query(prepared, action, executor, *, timeout_seconds=60):
     outcome = {"step": action["step"], "operation": action["operation"], "status": "unverified",
                "execution_kind": "model_bash_argv", "candidate_argv": action.get("candidate_argv"),
                "review": action.get("review"), "items": [], "executed": False, "task_completed": False,
-               "execution_state": "not_started"}
+               "execution_state": "not_started", "file_change_state": "unchanged"}
     started = time.monotonic()
     phase = "review"
     try:
@@ -354,6 +354,9 @@ def execute_query(prepared, action, executor, *, timeout_seconds=60):
         if isinstance(error, ExecutionStartError):
             outcome["execution_state"] = "not_started"
             outcome["attempted_argv"] = getattr(error, "attempted_argv", [])
+        elif getattr(error, "process_started", False):
+            outcome.update(executed=True, execution_state=getattr(error, "process_state", "unknown"))
+            outcome["actual_argv"] = getattr(error, "actual_argv", [])
     outcome["failure_phase"] = phase
     outcome["duration_seconds"] = time.monotonic() - started
     return outcome

@@ -16,17 +16,20 @@ class ErrorAnalysis:
 
 
 def classify_error(result: ExecutionResult, *, status="execution_failed", operation="",
-                   error_type="", error_number=None, execution_state="") -> ErrorAnalysis | None:
+                   error_type="", error_number=None, execution_state="", failure_phase="") -> ErrorAnalysis | None:
     if status in {"verified", "no_matches", "cancelled"}:
         return None
     if status in {"blocked", "unsupported"}:
+        if failure_phase == "environment":
+            return ErrorAnalysis("environment_changed", "执行前环境检查未通过，当前操作未开始", ("核对实际文件与已确认预览",))
         return ErrorAnalysis("safety_rejected", "安全审查拒绝执行", ("核对支持范围与实际预览",))
     if status == "unverified":
-        return ErrorAnalysis("verification_failed", "命令已运行，但结果无法验证", ("检查输出是否截断或对象已变化", "停止，不报告任务完成"))
+        return ErrorAnalysis("verification_failed", "操作已运行，但结果无法验证", ("检查输出是否截断或对象已变化", "停止，不报告任务完成"))
     if status == "interrupted":
         return ErrorAnalysis("interrupted", "用户中断，执行状态不作成功推断", ("核对已完成操作", "不要重放任务"))
     if result.timed_out:
-        return ErrorAnalysis("timeout", "命令执行超时", ("检查命令是否等待输入或持续运行", "检查网络、锁和资源占用"))
+        return ErrorAnalysis("timeout", "准备或检查超时，未开始当前操作" if execution_state == "not_started" else "操作执行或验证超时",
+                             ("核对任务阶段和实际结果", "不要重放写操作"))
     if execution_state == "unknown":
         return ErrorAnalysis("state_unknown", "执行证据不完整，无法确定命令是否完成", ("保留错误和当前文件状态", "不要重放任务"))
     if result.exit_code == 0:
@@ -45,6 +48,8 @@ def classify_error(result: ExecutionResult, *, status="execution_failed", operat
     }
     if error_number in numbers:
         return ErrorAnalysis(*numbers[error_number])
+    if failure_phase == "preparation":
+        return ErrorAnalysis("preparation_failed", "任务准备失败，未进入执行阶段", ("核对原始路径与文件状态",))
     if error_number in {errno.EAGAIN, errno.EINTR, errno.EMFILE, errno.ENFILE}:
         return ErrorAnalysis("transient_error", "临时资源不足或系统调用中断", ("检查资源占用", "状态明确时仅允许一次原范围重试"))
     text = (result.stderr or result.stdout).lower()
@@ -62,7 +67,7 @@ def classify_error(result: ExecutionResult, *, status="execution_failed", operat
     for pattern, category, summary, checks in rules:
         if re.search(pattern, text):
             return ErrorAnalysis(category, summary, checks)
-    return ErrorAnalysis("unknown_error", "命令执行失败", ("检查退出码和 stderr",))
+    return ErrorAnalysis("unknown_error", "操作执行失败", ("检查错误信息与实际执行结果",))
 
 
 def inspect_failure_files(prepared, outcome):
@@ -114,7 +119,7 @@ def assess_failure(outcome, prepared):
                              outcome.get("output_truncated", False))
     analysis = classify_error(result, status=outcome["status"], operation=outcome.get("operation", ""),
                               error_type=outcome.get("error_type", ""), error_number=outcome.get("error_number"),
-                              execution_state=outcome.get("execution_state", ""))
+                              execution_state=outcome.get("execution_state", ""), failure_phase=outcome.get("failure_phase", ""))
     if analysis is None:
         return None
     files = inspect_failure_files(prepared, outcome)

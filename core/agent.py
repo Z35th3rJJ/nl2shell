@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .bash_queries import prepare_queries
 from .engine import _AGENT_SYSTEM, _missing_conditions, _normalize_paths, _task_plan_errors
+from .execution_evidence import summarize_execution, execution_description, change_description
 from .llm import request_deadline
 from .operations import snapshot, workspace_path
 from .redaction import redact_value
@@ -146,7 +147,7 @@ class _StepEngine:
     def suggest_fix(self, *args):
         return self.engine.suggest_fix(*args)
 
-    def remember_task(self, *args):
+    def remember_task(self, *args, **kwargs):
         pass
 
 
@@ -196,10 +197,11 @@ def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=inp
     token = request_deadline.set(context["deadline"])
 
     def finish(status, reason=""):
-        executed = any(row.get("executed") for row in trace)
+        records = [row["record"] for row in trace if "record" in row]
+        evidence = summarize_execution(records)
         try:
             save_history(history, user_input=user_input, cwd=cwd, command="", risk="WARN",
-                         status=status, executed=executed, run_mode=mode, agent=True,
+                         status=status, **evidence, run_mode=mode, agent=True,
                          goal_contract=contract, agent_trace=trace, block_reason=reason,
                          agent_attempts=getattr(engine, "agent_attempts", []),
                          verification=[outcome for row in trace for outcome in row.get("record", {}).get("verification", [])],
@@ -209,6 +211,8 @@ def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=inp
             status, reason = "audit_failed", f"Agent 记录保存失败，已停止：{error}"
             history.last_record.update(status=status, block_reason=reason, completion_verified=False)
         print(f"Agent 结果：{status}" + (f"，{reason}" if reason else ""))
+        print("执行状态：" + execution_description(evidence))
+        print("文件修改：" + change_description(evidence))
         return status
 
     try:
@@ -323,6 +327,13 @@ def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=inp
             row["observation"] = observations[rule["id"]]
             completed.add(rule["id"])
         return finish("blocked", "Agent 决策轮次已用完")
+    except SystemExit:
+        # /exit 已保存当前子任务；整体任务仍需保留此前工具的真实执行结果。
+        if trace and "record" not in trace[-1] and getattr(history, "last_record", {}).get("agent_step"):
+            trace[-1]["record"] = dict(history.last_record)
+            trace[-1]["executed"] = history.last_record.get("executed", False)
+        finish("cancelled", "用户退出，停止后续操作")
+        raise
     except (ValueError, TypeError, KeyError, RuntimeError, OSError) as error:
         return finish("blocked", str(error))
     except (KeyboardInterrupt, EOFError):

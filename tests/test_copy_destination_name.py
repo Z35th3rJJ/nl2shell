@@ -283,5 +283,7 @@ def test_copy_destination_name_independently_verifies_source_and_copy(tmp_path, 
 
     monkeypatch.setattr(operations, "_copy", corrupt)
     outcome = execute_action(prepared, prepared["actions"][0])
-    assert outcome["status"] == "execution_failed"
+    assert outcome["status"] == "unverified"
+    assert outcome["failure_phase"] == "verification" and outcome["executed"]
+    assert outcome["file_change_state"] == "changed"
     assert "实际结果检查失败" in outcome["detail"]
