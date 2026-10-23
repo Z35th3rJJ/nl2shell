@@ -161,7 +161,7 @@ def test_model_path_claim_is_not_a_verified_safety_rejection(tmp_path):
     executor.execute.assert_not_called()
 
 
-def test_actual_plan_path_violation_is_blocked_after_bounded_correction(tmp_path, monkeypatch):
+def test_explicit_request_path_violation_is_blocked_before_model(tmp_path, monkeypatch):
     from core.engine import Engine
 
     raw = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": {
@@ -172,8 +172,9 @@ def test_actual_plan_path_violation_is_blocked_after_bounded_correction(tmp_path
     executor, history = Mock(), History()
     assert execute_request(Engine(ssh_hosts=[]), executor, history, "将 a.txt 复制到 ../outside", str(tmp_path),
                            "confirm", input_fn=lambda _: pytest.fail("越界计划不能进入确认")) == "blocked"
-    assert model.call_count == 2
+    model.assert_not_called()
     assert "路径安全检查拒绝" in history.records[-1]["block_reason"]
+    assert "目标路径 '../outside'" in history.records[-1]["block_reason"]
     assert not history.records[-1]["executed"]
     executor.execute.assert_not_called()
 

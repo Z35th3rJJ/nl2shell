@@ -33,6 +33,13 @@ class PlanConditionError(ValueError):
     """需求已经明确，模型参数不一致；应纠正计划而非追问用户。"""
 
 
+def _checked_path(root, value, role):
+    try:
+        return workspace_path(root, value)
+    except ValueError as error:
+        raise PlanPathError(f"{role} {value!r}：{error}") from error
+
+
 def _normalize_paths(plan: TaskPlan, cwd: str) -> TaskPlan:
     root = Path(cwd).resolve()
     steps = []
@@ -666,6 +673,13 @@ class Engine:
         self.plan_attempts = []
         self.intent_attempts = []
         self.request_intent = {}
+        # 明确表达的传输路径先由程序检查，模型拒绝不能替代实际的安全检查证据。
+        root = Path(cwd).resolve()
+        for _, source, _, _, clause in _copy_name_bindings(user_input, clarifications or []):
+            _checked_path(root, source, "源路径")
+            for destination in _explicit_targets(clause):
+                if destination not in UNSPECIFIED_DESTINATIONS | {"当前目录", "这里", "本目录", "此目录", "这个目录"}:
+                    _checked_path(root, destination, "目标路径")
         answers = [answer.split("用户回答：", 1)[-1].strip() for answer in clarifications or []]
         content_search = _UNSUPPORTED_CONTENT_SEARCH.fullmatch(user_input.strip())
         # 只拦截明确的内容搜索范围；命名文件或否定范围的表达仍交给原意图流程。
