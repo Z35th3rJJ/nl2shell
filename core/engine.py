@@ -105,7 +105,7 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
             destination = parameters["destination"]
             if step.operation == "copy_files":
                 copy_names = _explicit_copy_names(text)
-                if copy_names or "destination_name" in parameters:
+                if copy_names:
                     if copy_names != {parameters.get("destination_name")}:
                         return "请明确复制后的目标文件名，并保留该文件名条件"
                     if destination == "." and not answers and not _explicit_targets(text):
@@ -294,6 +294,7 @@ def _count_request_recursive(user_input, answers):
 def _plan_defaults(raw, user_input, answers):
     # 显式隐藏项条件不使用默认值；主计划和独立参考均只依据原始需求及完整问答。
     text = "\n".join([user_input, *answers])
+    copy_names = _explicit_copy_names(text)
     hidden_requested = re.search(r"隐藏|hidden|dot[ -]?files?|点(?:号)?开头|--all|\bls\s+-[a-zA-Z]*[aA]", text, re.I)
     try:
         value = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.I))
@@ -308,8 +309,13 @@ def _plan_defaults(raw, user_input, answers):
             continue
         parameters = step.get("parameters")
         if (step.get("operation") == "copy_files" and isinstance(parameters, dict)
+                and not copy_names and "destination_name" in parameters):
+            # 没有改名要求时沿用源名称，模型多填的可选字段不是用户条件。
+            del parameters["destination_name"]
+            changed = True
+        if (step.get("operation") == "copy_files" and isinstance(parameters, dict)
                 and "destination" not in parameters and "destination_name" in parameters
-                and not answers and _explicit_copy_names(text) == {parameters["destination_name"]}
+                and not answers and copy_names == {parameters["destination_name"]}
                 and not _explicit_targets(text)):
             parameters["destination"] = "."
             changed = True

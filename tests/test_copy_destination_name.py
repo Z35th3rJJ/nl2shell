@@ -70,6 +70,81 @@ def test_copy_destination_name_complete_flow(tmp_path, monkeypatch, capsys, user
     executor.execute_query.assert_not_called()
 
 
+def test_plain_copy_ignores_model_name_after_named_copies(tmp_path, monkeypatch):
+    source = tmp_path / "copy_me.txt"
+    source.write_bytes(b"unchanged source")
+    (tmp_path / "backup").mkdir()
+    requests = [
+        ("将 copy_me.txt 复制为 copy_test.txt", ".", "copy_test.txt"),
+        ("将 copy_me.txt 复制到 backup 并命名为 copy_test.txt", "backup", "backup/copy_test.txt"),
+        ("将 copy_me.txt 复制到 backup", "backup", "backup/copy_me.txt"),
+    ]
+    model = Mock(side_effect=[json.dumps({"status": "ready", "steps": [{
+        "operation": "copy_files", "parameters": {"sources": ["copy_me.txt"],
+        "destination": directory, "destination_name": "copy_test.txt"}}]})
+        for _, directory, _ in requests])
+    monkeypatch.setattr("core.engine.chat", model)
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": ["copy_files"],
+        "named_sources": ["copy_me.txt"], "selection_required": False})))
+    engine, executor = Engine(ssh_hosts=[]), Mock()
+    history = HistoryStore(tmp_path / "history.jsonl")
+    for request, _, target in requests:
+        prompts = []
+
+        def confirm(prompt):
+            assert "请输入 yes 确认" in prompt
+            assert not (tmp_path / target).exists()
+            prompts.append(prompt)
+            return "yes"
+
+        assert execute_request(engine, executor, history, request, str(tmp_path), "confirm", input_fn=confirm) == "verified"
+        assert len(prompts) == 1
+        record = history.query(limit=1)[0]
+        assert record["clarifications"] == []
+        assert Path(record["preview"][0]["items"][0]["destination"]).as_posix() == target
+        assert record["verification"][0]["items"][0]["status"] == "verified"
+        assert (tmp_path / target).read_bytes() == source.read_bytes() == b"unchanged source"
+    assert "destination_name" not in record["plan"]["steps"][0]["parameters"]
+    assert len(engine._task_history) == 3 and model.call_count == 3
+    assert "copy_test.txt" in model.call_args.args[0][1]["content"]
+    executor.execute.assert_not_called()
+    executor.execute_query.assert_not_called()
+
+
+@pytest.mark.parametrize("user_input,answers,expected_name", [
+    ("将 copy_me.txt 复制到 backup", [], None),
+    ("将 copy_me.txt 复制为 copy_test.txt", [], "copy_test.txt"),
+    ("将 copy_me.txt 复制到 backup 并命名为 copy_test.txt", [], "copy_test.txt"),
+    ("复制 copy_me.txt", ["问题：复制到哪里？；用户回答：复制到当前目录，目标文件名为 copy_test.txt"], "copy_test.txt"),
+])
+def test_copy_name_normalization_shared_by_primary_and_reference(tmp_path, monkeypatch, user_input, answers, expected_name):
+    directory = "." if "复制为" in user_input or answers else "backup"
+    parameters = {"sources": ["copy_me.txt"], "destination": directory}
+    primary_raw = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": {
+        **parameters, "destination_name": "copy_test.txt"}}]})
+    reference_raw = json.dumps({"status": "ready", "steps": [{"operation": "copy_files", "parameters": {
+        **parameters, "destination_name": expected_name or "invented_by_reference.txt"}}]})
+    model = Mock(side_effect=[primary_raw, reference_raw, '{"commands":[]}'])
+    monkeypatch.setattr("core.engine.chat", model)
+    monkeypatch.setattr("core.intent.chat", Mock(return_value=json.dumps({"status": "ready", "operations": ["copy_files"]})))
+    # 仅隔离 Bash 候选构造；实际复制使用受保护的 Python 工具，不通过此接口执行。
+    command_request = Mock(return_value=[{"role": "system", "content": ""}, {"role": "user", "content": ""}])
+    monkeypatch.setattr("core.bash_queries.command_request", command_request)
+    engine = Engine(ssh_hosts=[])
+    primary = engine.generate_task_plan(user_input, str(tmp_path), answers)
+    expected = dict(parameters)
+    if expected_name is not None:
+        expected["destination_name"] = expected_name
+    assert primary.status == "ready" and primary.steps[0].parameters == expected
+    assert engine.generate_bash_commands(user_input, str(tmp_path), primary, {}, answers) == {"commands": []}
+    assert engine.command_attempts[0]["review"] == "accepted"
+    assert engine.command_attempts[0]["raw_output"] == reference_raw
+    assert json.loads(model.call_args_list[1].args[0][1]["content"]) == {
+        "cwd": str(tmp_path), "request": user_input, "answers": answers}
+    assert "steps" not in json.loads(model.call_args_list[1].args[0][1]["content"])
+    assert model.call_count == 3
+
+
 @pytest.mark.parametrize("before_preview", [True, False])
 def test_copy_destination_name_never_overwrites(tmp_path, before_preview):
     (tmp_path / "source.txt").write_bytes(b"source")
