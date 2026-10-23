@@ -41,18 +41,18 @@ def test_explicit_transfer_corrects_action_question_and_preserves_existing_targe
     request = f"将 source.txt {verb}到 archive/target.txt"
     assert execute_request(engine, Mock(), history, request, str(tmp_path), "confirm", input_fn=confirm) == "verified"
     record = history.query(limit=1)[0]
-    assert record["clarifications"] == [] and engine.intent_attempts[0]["validation_errors"]
+    assert record["clarifications"] == [] and engine.intent_attempts[0]["resolution"]
     assert Path(record["preview"][0]["items"][0]["destination"]).as_posix() == "archive/target_1.txt"
     assert record["verification"][0]["status"] == "verified"
     assert (tmp_path / "archive/target_1.txt").read_bytes() == b"new transfer content"
     assert target.read_bytes() == b"original target content"
     assert source.exists() is (operation == "copy_files")
-    assert intent.call_count == 2
+    assert intent.call_count == 1
     launch.assert_not_called()
 
 
-@pytest.mark.parametrize("response", [QUESTION, '{"status":"ready","operations":["copy_files"]}'])
-def test_repeated_action_conflict_stops_within_existing_limit(monkeypatch, response):
+def test_repeated_action_conflict_stops_within_existing_limit(monkeypatch):
+    response = '{"status":"ready","operations":["copy_files"]}'
     model = Mock(return_value=response)
     monkeypatch.setattr("core.intent.chat", model)
     attempts = []

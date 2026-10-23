@@ -157,7 +157,10 @@ def analyze_request(user_input, answers, backend, attempts):
                     raise ValueError("意图不明确或不支持时必须给出说明")
             record["validation_errors"] = []
             if transfer is not None and status in {"ready", "need_clarification"}:
-                if status == "need_clarification" or result["operations"] != [transfer]:
+                if status == "need_clarification":
+                    record["resolution"] = "从完整原始请求恢复明确动作 " + transfer + "；执行参数仍须独立规划及校验"
+                    return {"status": "ready", "operations": [transfer]}
+                if result["operations"] != [transfer]:
                     raise ValueError("原始请求已明确单源传输动作 " + transfer +
                                      "，不得改成其他动作或重复追问操作类型；保留原始路径，参数和安全条件仍由后续校验")
             if expected is not None and status == "ready":
