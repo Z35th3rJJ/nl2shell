@@ -56,6 +56,7 @@ read_text：查看指定文本文件的前几行或后几行。
 - 意图识别阶段只输出操作类型，不输出操作参数。ready 只允许 status、operations 及 named_sources、selection_required、action_explicit 元数据；不得输出 include_hidden、path、recursive、pattern 等操作参数。隐藏文件要求由后续计划生成设置 include_hidden=true。
 - 需要先筛选再复制时，必要操作为 find_files 和 copy_files。
 - count_files 自己完成筛选和计数；统计数量不额外要求 find_files。
+- 只有 find_files 或 count_files 的意图不输出 named_sources、selection_required。目录和通配符是后续计划的筛选参数，不是明确源文件；不得把目录与通配符拼接成 named_sources。
 - 单个文件名已明确时，直接复制、移动、改名或回收，不额外要求 find_files；按时间、类型等条件筛选后修改文件时才需要查找。
 - 普通删除默认可恢复回收。用户说明保留恢复能力时属于 trash，只有明确要求永久删除才不支持。
 - 列出所有必要操作，不重复，最多三个。不得猜测未要求的写操作。
@@ -128,9 +129,18 @@ def analyze_request(user_input, answers, backend, attempts):
                     if key in result and type(result[key]) is not bool:
                         raise ValueError(f"{key} 必须是布尔值")
                 names = result.get("named_sources", [])
+                if not isinstance(names, list) or any(not isinstance(name, str) or not name.strip() for name in names):
+                    raise ValueError("明确源文件必须逐字来自用户原文或补充回答")
+                # 单独筛选操作不绑定源对象，不能把模型拼出的路径传成无需筛选的源文件提示。
+                if operations in (["find_files"], ["count_files"]):
+                    if "named_sources" in result or "selection_required" in result:
+                        record["resolution"] = "忽略单独筛选操作的源对象元数据；路径和筛选条件仍须根据原始需求规划及校验"
+                        result.pop("named_sources", None)
+                        result.pop("selection_required", None)
+                        names = []
                 # 问题用于解释回答，但问题中的示例路径不是用户授权的源文件。
                 text = "\n".join([user_input, *(answer.split("用户回答：", 1)[-1].strip() for answer in answers)])
-                if not isinstance(names, list) or any(not isinstance(name, str) or not name.strip() or name not in text for name in names):
+                if any(name not in text for name in names):
                     raise ValueError("明确源文件必须逐字来自用户原文或补充回答")
                 if names and result.get("selection_required") is False and set(operations) == {"find_files", "copy_files"}:
                     result["operations"] = ["copy_files"]
