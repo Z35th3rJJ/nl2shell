@@ -217,7 +217,9 @@ def show_preview(prepared, *, show_cwd=True, request=""):
         print(_paint(f"工作目录：{prepared['cwd']}", GRAY))
     for action in prepared["actions"]:
         print("\n" + _paint(f"第 {action['step']} 步：{_OPERATION_NAMES[action['operation']]}", BOLD))
-        if action["explanation"] and action["explanation"] != request:
+        if action["items"]:
+            print(f"  说明：{_OPERATION_NAMES[action['operation']]}，实际操作路径如下方清单")
+        elif action["explanation"] and action["explanation"] != request:
             print(f"  说明：{action['explanation']}")
         if action.get("candidate_argv"):
             print("\n  候选命令：")
@@ -296,6 +298,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                     agent_context: dict | None = None) -> str:
     plan = TaskPlan(())
     clarifications = []
+    intent_attempts = []
     plan_attempts = []
     prepared, outcomes = None, []
     phase, authorized = "planning", False
@@ -333,6 +336,9 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         try:
             return engine.generate_task_plan(user_input, cwd, **options)
         finally:
+            attempts = getattr(engine, "intent_attempts", None)
+            if isinstance(attempts, list):
+                intent_attempts.extend(redact_value(attempts))
             attempts = getattr(engine, "plan_attempts", None)
             if isinstance(attempts, list):
                 plan_attempts.extend(redact_value(attempts))
@@ -393,7 +399,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                          verification=outcomes, block_reason=detail,
                          timed_out=any(item.get("timed_out") for item in outcomes),
                          command_attempts=initial_command_attempts or (getattr(engine, "command_attempts", []) if command_generation_started and isinstance(getattr(engine, "command_attempts", None), list) else []),
-                         candidates=candidates, plan_attempts=plan_attempts,
+                         candidates=candidates, intent_attempts=intent_attempts, plan_attempts=plan_attempts,
                          diagnoses=diagnoses, repairs=repairs, execution_repair_attempts=int(repair_used),
                          **({"agent_step": True} if agent_context is not None else {}),
                          **({"batch_id": batch_id, "batch_index": batch_index} if batch_id else {}))
@@ -538,7 +544,8 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     try:
         save_history(history, user_input=user_input, cwd=cwd, command="", risk=SAFE,
                      status="confirmed", **summarize_execution(outcomes, repairs), phase=phase, authorized=True, plan=plan_payload(plan),
-                     preview=preview(), run_mode=mode, clarifications=clarifications, plan_attempts=plan_attempts,
+                     preview=preview(), run_mode=mode, clarifications=clarifications,
+                     intent_attempts=intent_attempts, plan_attempts=plan_attempts,
                      **({"agent_step": True} if agent_context is not None else {}))
     except OSError as error:
         history.last_record.update(status="audit_failed", block_reason=str(error))
@@ -587,7 +594,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                          status="repair_confirmed", **summarize_execution(outcomes, repairs),
                          phase="authorization", authorized=True, plan=plan_payload(plan),
                          preview=query_preview(checked), repair_attempt=1, run_mode=mode, clarifications=clarifications,
-                         plan_attempts=plan_attempts,
+                         intent_attempts=intent_attempts, plan_attempts=plan_attempts,
                          **({"agent_step": True} if agent_context is not None else {}))
             repaired = run_action(checked, checked["actions"][action["step"] - 1])
             attempt.update(status=repaired["status"], executed=repaired["executed"], outcome=repaired)
