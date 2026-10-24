@@ -6,7 +6,7 @@ from .llm import chat
 from .ssh_config import load_ssh_hosts
 from .task_plan import TaskPlan, TaskStep, READ_OPERATIONS, parse_operation_plan, plan_payload, validate_parameters
 from .intent import analyze_request, DIRECTORY_RULES
-from .requirements import resolve_request, count_request_recursive, DEFAULT_INCLUDE_HIDDEN, UNSPECIFIED_DESTINATIONS, PATH_TOKEN, path_value
+from .requirements import resolve_request, count_request_recursive, DEFAULT_INCLUDE_HIDDEN, UNSPECIFIED_DESTINATIONS, PATH_TOKEN, path_value, transfer_expression
 from .redaction import redact_value
 from .operations import workspace_path
 
@@ -177,6 +177,10 @@ def _copy_target_parts(clause, cwd=None):
 
 def _copy_name_bindings(text, answers=(), cwd=None):
     # 仅绑定明确的“将/把单个源复制/移动…”子句；没有对应关系时不能按文件名集合猜测。
+    direct = transfer_expression(text)
+    if direct is not None and any(not re.fullmatch(PATH_TOKEN, direct[key]) for key in ("source", "target")):
+        text = ("将 " + json.dumps(path_value(direct["source"]), ensure_ascii=False) + " " + direct["verb"] + "到 "
+                + json.dumps(path_value(direct["target"]), ensure_ascii=False) + (" 目录" if direct["directory"] else ""))
     sources = list(_TRANSFER_SOURCE_PATTERN.finditer(text))
     bindings = []
     for index, source in enumerate(sources):
@@ -258,6 +262,11 @@ def _missing_conditions(plan: TaskPlan, user_input: str, cwd: str, answers: list
     if (transfers and re.match(r'''(?:将|把)\s*["'“‘]''', user_input.strip())
             and not _TRANSFER_SOURCE_PATTERN.match(user_input.strip())):
         return "请使用配对引号明确源对象的完整路径"
+    if (len(transfers) == 1 and len(transfers[0].parameters.get("sources", [])) == 1
+            and re.match(r"(?:将|把)\s+", user_input.strip())
+            and re.search(r"(?:复制|移动)到", user_input)
+            and not _TRANSFER_SOURCE_PATTERN.match(user_input.strip()) and transfer_expression(user_input) is None):
+        return "请明确完整源路径和目标路径，并用配对引号分别包住含空格的路径"
     if transfers and _has_alternate_target(text):
         return "请明确复制或移动的唯一目标路径"
     bindings = _copy_name_bindings(user_input, answers, cwd)

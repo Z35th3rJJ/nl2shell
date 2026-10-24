@@ -14,12 +14,29 @@ def path_value(token):
     return token[1:-1] if (token[0], token[-1]) in {('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’")} else token
 
 
+def transfer_expression(user_input):
+    # shortcut: 裸空格路径仅接受完整单源直接传输；连词、条件或额外动作必须继续澄清。
+    spaced_path = r"[\w./\\()\[\]+@%-]+(?:[ \t]+[\w./\\()\[\]+@%-]+)*?"
+    path = "(?:" + PATH_TOKEN + "|" + spaced_path + ")"
+    request = re.fullmatch(r"(?:将|把)\s*(?P<source>" + path + r")\s*(?P<verb>复制|移动)到\s*"
+                          r"(?P<target>" + path + r")(?P<directory>\s+(?:目录|文件夹))?", user_input.strip())
+    if request is None:
+        return None
+    for field in ("source", "target"):
+        fragment = request[field]
+        if fragment[0] in "\"'“‘":
+            continue
+        if not re.fullmatch(spaced_path, fragment) or re.search(
+                r"还是|命名为|改名|复制到|移动到|不要|如果|(?:^|\s)(?:和|或|或者|以及|并|并且|然后)(?:\s|$)", fragment):
+            return None
+    return request
+
+
 def explicit_transfer_operation(user_input, answers):
     # shortcut: 仅核对完整的单源直接传输语法；条件、否定、多操作或补充回答交回原流程。
     if answers:
         return None
-    request = re.fullmatch(r"(?:将|把)\s*(?P<source>" + PATH_TOKEN + r")\s*(?P<verb>复制|移动)到\s*"
-                           r"(?P<target>" + PATH_TOKEN + r")(?:\s+(?:目录|文件夹))?", user_input.strip())
+    request = transfer_expression(user_input)
     if request is None or request["target"] in UNSPECIFIED_DESTINATIONS:
         return None
     return "copy_files" if request["verb"] == "复制" else "move_files"
