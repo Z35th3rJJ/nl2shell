@@ -43,28 +43,30 @@ def explicit_transfer_operation(user_input, answers):
 
 
 def count_request_recursive(user_input, answers):
-    plan = _count_request(user_input, answers)
+    plan = _directory_query(user_input, answers, "count_files")
     return None if plan is None else plan.steps[0].parameters["recursive"]
 
 
-def _count_request(user_input, answers):
-    # shortcut: 只解析完整的单目录、无额外筛选的计数；未解释的条件和回答仍交回模型。
+def _directory_query(user_input, answers, operation):
+    # shortcut: 只解析完整的单目录、无额外筛选的计数或最大值；其他条件和回答仍交回模型。
+    verb = r"(?:查找|找一下|找出|找)" if operation == "largest_file" else "统计"
+    result = r"(?:的)?最大(?:的)?(?:普通)?文件" if operation == "largest_file" else r"的(?:普通)?文件(?:数量|个数)"
     scope = None if answers else re.fullmatch(
-        r"统计[ \t]*(?:(?P<current>当前目录)|(?P<path>" + PATH_TOKEN + r")[ \t]*(?:目录|文件夹))"
+        r"(?P<recursive>递归)?" + verb + r"[ \t]*(?:(?P<current>当前目录)|(?P<path>" + PATH_TOKEN + r")[ \t]*(?:目录|文件夹))"
         r"(?P<children>(?:及|和)(?:其|所有)?子目录)?(?P<level>当前层|这一层)?"
-        r"(?:中|下)?的(?:普通)?文件(?:数量|个数)"
+        r"(?:中|下)?" + result +
         r"(?:[，,](?P<include>包括|包含|不包括|不包含)(?:所有)?子目录)?[。]?", user_input.strip())
     if scope is None:
         return None
-    recursive = bool(scope["children"] or scope["include"] in {"包括", "包含"})
-    if (scope["level"] and recursive or scope["children"] and
+    recursive = bool(scope["recursive"] or scope["children"] or scope["include"] in {"包括", "包含"})
+    if (scope["level"] and recursive or (scope["recursive"] or scope["children"]) and
             scope["include"] in {"不包括", "不包含"}):
         return None
     path = "." if scope["current"] else path_value(scope["path"])
     if not path.strip():
         return None
     return parse_operation_plan(json.dumps({"status": "ready", "steps": [{
-        "operation": "count_files", "parameters": {"path": path, "recursive": recursive}}]}))
+        "operation": operation, "parameters": {"path": path, "recursive": recursive}}]}))
 
 
 
@@ -100,4 +102,8 @@ def resolve_request(user_input, clarifications=()):
     directory = _directory_request(user_input, clarifications)
     if directory is not None:
         return directory
-    return _count_request(user_input, clarifications)
+    for operation in ("count_files", "largest_file"):
+        plan = _directory_query(user_input, clarifications, operation)
+        if plan is not None:
+            return plan
+    return None
