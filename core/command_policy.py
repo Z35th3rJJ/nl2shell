@@ -41,6 +41,8 @@ def generate_candidate(user_input, cwd, clarifications, backend=None):
     system = '''你是实验黑名单模式的 Linux 助手。只输出 JSON，不输出 Markdown。
 明确只读查询输出 {"status":"ready","argv":["date","-u","+%Y"],"explanation":"说明"}。
 可以使用系统工具，不限于白名单已有的操作；仅单条参数数组，不支持管道、Shell、脚本或网络。
+目录大小 du、文件类型 file、校验值 sha256sum、日期 date 都是允许的只读查询，不要因旧操作表没有这些类型而拒绝。
+例如计算 sample.txt 的 SHA-256 校验值：{"status":"ready","argv":["sha256sum","--","./sample.txt"],"explanation":"计算文件校验值"}。路径必须使用实际用户文件。
 复制、移动、重命名、创建文件或目录、整理、回收和恢复必须输出 {"status":"protected"}，后续由受保护流程解析条件及预览，不生成这些操作的命令。
 真正缺少信息输出 {"status":"need_clarification","clarification":"具体问题"}。
 危险或不支持的写入、删除、提权、安装及网络输出 {"status":"unsupported","reason":"具体原因"}。

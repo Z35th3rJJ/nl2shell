@@ -13,6 +13,9 @@ from core.execution import BashExecutor
 from core.operations import prepare_plan, execute_action
 from core.settings import load_settings, save_settings, AppSettings
 from core.task_plan import parse_operation_plan
+from core.engine import Engine
+from core.history import HistoryStore
+from cli import execute_request
 
 
 class CommandPolicyTests(unittest.TestCase):
@@ -41,6 +44,65 @@ class CommandPolicyTests(unittest.TestCase):
             self.assertTrue(save_settings(AppSettings('confirm',True,'blacklist'), env))
             self.assertIn('COMMAND_POLICY=blacklist', env.read_text())
             self.assertIn('LOCAL_MODEL=test-model', env.read_text())
+
+    def test_cli_denial_never_starts_a_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine=Engine(ssh_hosts=[])
+            engine.command_policy='blacklist'
+            executor=Mock()
+            history=HistoryStore(Path(directory)/'history.jsonl')
+            raw=json.dumps({'status':'ready','argv':['rm','-rf','.'],'explanation':'危险'})
+            with patch('core.command_policy.chat',return_value=raw):
+                status=execute_request(engine,executor,history,'删除全部文件',directory,'confirm',input_fn=lambda _: 'yes')
+            self.assertEqual(status,'blocked')
+            self.assertFalse(history.last_record['executed'])
+            executor.execute_policy_query.assert_not_called()
+
+    def test_exit_at_clarification_is_not_saved_as_answer_or_retried(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine=Engine(ssh_hosts=[])
+            engine.command_policy='blacklist'
+            history=HistoryStore(Path(directory)/'history.jsonl')
+            raw=json.dumps({'status':'need_clarification','clarification':'查询哪个文件？'})
+            with patch('core.command_policy.chat',return_value=raw) as model, self.assertRaises(SystemExit):
+                execute_request(engine,Mock(),history,'查看一下',directory,'confirm',input_fn=lambda _: '/exit')
+            self.assertEqual(model.call_count,1)
+            self.assertEqual(history.last_record['status'],'cancelled')
+            self.assertEqual(history.last_record['clarifications'],[])
+            self.assertFalse(history.last_record['executed'])
+
+    @unittest.skipUnless(sys.platform == 'linux', '需要 Linux/bwrap')
+    def test_failed_authorization_audit_prevents_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'not_a_directory').write_bytes(b'fixture')
+            history=HistoryStore(root/'not_a_directory/history.jsonl')
+            engine=Engine(ssh_hosts=[])
+            engine.command_policy='blacklist'
+            executor=Mock()
+            raw=json.dumps({'status':'ready','argv':['date','-u','+%Y'],'explanation':'日期'})
+            with patch('core.command_policy.chat',return_value=raw):
+                status=execute_request(engine,executor,history,'显示年份',directory,'confirm',input_fn=lambda _: 'yes')
+            self.assertEqual(status,'audit_failed')
+            self.assertFalse(history.last_record['executed'])
+            executor.execute_policy_query.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == 'linux', '需要 Linux/bwrap')
+    def test_yes_flag_does_not_authorize_native_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'source.txt').write_bytes(b'fixture')
+            plan=parse_operation_plan(json.dumps({'status':'ready','steps':[{'operation':'copy_files',
+                'parameters':{'sources':['source.txt'],'destination':'backup'}}]}))
+            history=HistoryStore(root/'history.jsonl')
+            engine=Engine(ssh_hosts=[])
+            engine.command_policy='blacklist'
+            executor=Mock()
+            with patch('core.command_policy.chat',return_value='{"status":"protected"}'), patch.object(engine,'generate_task_plan',return_value=plan):
+                status=execute_request(engine,executor,history,'复制文件',directory,'confirm',input_fn=lambda _: '',assume_yes=True)
+            self.assertEqual(status,'cancelled')
+            self.assertFalse((root/'backup/source.txt').exists())
+            executor.execute_native_item.assert_not_called()
 
     @unittest.skipUnless(sys.platform == 'linux', '需要 Linux/bwrap')
     def test_real_sandbox_runs_query_without_exposing_sensitive_file(self):

@@ -312,6 +312,7 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
     from core.command_policy import generate_candidate, review_query, sandbox_argv
     started = time.monotonic()
     clarifications, attempts, outcomes = [], [], []
+    engine.policy_attempts = attempts
     argv, phase, authorized = [], 'planning', False
     excluded = [history.path]
     if os.environ.get('NL2SHELL_LOG_JSON'):
@@ -516,6 +517,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                          risk=SAFE if prepared and prepared["read_only"] else WARN,
                          status=status, **evidence, phase=phase, authorized=authorized, run_mode=mode, plan=payload, clarifications=clarifications,
                          command_policy=getattr(engine,'command_policy','whitelist'),
+                         **({'policy_attempts':redact_value(engine.policy_attempts)} if getattr(engine,'policy_attempts',None) else {}),
                          preview=(query_preview(prepared) if bash_query else preview_details(prepared)) if prepared else [],
                          verification=outcomes, block_reason=detail,
                          timed_out=any(item.get("timed_out") for item in outcomes),
