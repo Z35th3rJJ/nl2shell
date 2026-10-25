@@ -214,6 +214,8 @@ def command_request(plan, prepared):
         rule = {"step": action["step"], "operation": action["operation"], "parameters": p}
         if argv[0] in {"ls", "grep", "wc", "head", "tail", "df", "stat"}:
             rule["required_suffix"] = argv[-2:]
+        if action["operation"] == "file_inode":
+            rule["required_argv"] = argv
         # 固定安全槽位由程序规定；模型必须填写计划中的对象和全部筛选条件。
         if action["operation"] in {"find_files", "count_files"}:
             suffix_at = next((i for i, value in enumerate(argv) if value in {"-name", "-newermt", "-size", "-print0"}), len(argv))
@@ -230,7 +232,7 @@ find_files/count_files: 保留 mandatory_prefix；pattern 非 * 时追加 [-name
 search_text: ["grep","-F","-n","-e","PATTERN","--","PATH"]，字面匹配。
 text_stats: ["wc","METRIC","--","PATH"]，lines=-l、words=-w、bytes=-c。
 read_text: ["END","-n","LINES","--","PATH"]，END=head或tail，LINES 是计划行数的十进制字符串。
-file_inode: ["stat","-c","%i","--","PATH"]，只查询普通文件的 inode；不增加 -L 或其他格式及参数。
+file_inode: ["stat","-c","%i","--","PATH"]，必须逐项使用 required_argv，包括路径前缀 ./；不增加 -L 或其他格式及参数。
 system_info: disk=["df","-B1","--output=size,used,avail","--","PATH"]，没有 path 时 PATH 为 .；memory=["free","-b"]；system=["uname","-s","-r","-m"]。
 模板变量必须替换成计划实际值。"--" 是一个真实的独立参数，不是省略号，必须保留，不能遗漏。
 每步有 required_suffix 时，必须把这两个实际参数逐字放在 argv 的最后。不要改回 plan 中的路径，不要省略 ./ 或把 -- 写成 -。
