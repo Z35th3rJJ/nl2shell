@@ -129,6 +129,24 @@ class LargestFileTests(unittest.TestCase):
                 self.assertLessEqual(model.call_count, 2)
                 self.assertTrue(engine.plan_attempts[0]['validation_errors'])
 
+    def test_planner_receives_request_facts_and_returns_checked_parameters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory)/'tie').mkdir()
+            intent = json.dumps({'status': 'ready', 'operations': ['largest_file']})
+            response = json.dumps({'status': 'ready', 'steps': [{'operation': 'largest_file',
+                'parameters': {'path': 'tie', 'recursive': False}}]}, ensure_ascii=False)
+            def model(messages, **options):
+                system = messages[0]['content']
+                self.assertIn('以下完整需求约束由原始请求及统一规则解析', system)
+                self.assertIn('"path": "tie", "recursive": false', system)
+                return response
+            with patch('core.intent.chat', return_value=intent), patch('core.engine.chat', side_effect=model) as planner:
+                engine = Engine(ssh_hosts=[])
+                plan = engine.generate_task_plan('查找 tie 目录中最大的文件', directory)
+                self.assertEqual(plan.status, 'ready')
+                self.assertEqual(plan.steps[0].parameters, {'path': 'tie', 'recursive': False})
+                self.assertEqual(planner.call_count, 1)
+
     @unittest.skipUnless(sys.platform == 'linux', '需要 Linux/GNU find')
     def test_sensitive_and_audit_files_do_not_become_largest(self):
         with tempfile.TemporaryDirectory() as directory:

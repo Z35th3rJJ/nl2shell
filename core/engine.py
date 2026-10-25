@@ -750,6 +750,8 @@ class Engine:
         expected = resolve_request(user_input, clarifications or [])
         request_text = "\n".join([user_input, *answers])
         system = _AGENT_SYSTEM + "\n独立识别的必要操作必须全部出现在计划中：" + json.dumps(required)
+        if expected is not None:
+            system += "\n以下完整需求约束由原始请求及统一规则解析，不是其他模型计划。必须保留每个操作、路径和范围：" + json.dumps(plan_payload(expected), ensure_ascii=False)
         if (self.request_intent.get("named_sources") and self.request_intent.get("selection_required") is False
                 and set(required) <= {"copy_files", "move_files", "trash"}):
             system += "\n源文件已明确且无需筛选，直接使用 sources，不要先查找：" + json.dumps(self.request_intent["named_sources"])
