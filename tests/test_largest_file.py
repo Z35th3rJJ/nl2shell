@@ -124,8 +124,8 @@ class LargestFileTests(unittest.TestCase):
             intent = json.dumps({'status': 'ready', 'operations': ['largest_file']})
             with patch('core.intent.chat', return_value=intent), patch('core.engine.chat', return_value=wrong) as model:
                 engine = Engine(ssh_hosts=[])
-                plan = engine.generate_task_plan('查找 tie 目录中最大的文件', directory)
-                self.assertNotEqual(plan.status, 'ready')
+                with self.assertRaisesRegex(ValueError, '原始需求及统一默认规则不一致'):
+                    engine.generate_task_plan('查找 tie 目录中最大的文件', directory)
                 self.assertLessEqual(model.call_count, 2)
                 self.assertTrue(engine.plan_attempts[0]['validation_errors'])
 
