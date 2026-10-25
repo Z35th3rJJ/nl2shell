@@ -228,7 +228,9 @@ def test_explicit_directory_listing_recovery_keeps_real_rejections(
     monkeypatch.setattr("core.engine.chat", planner)
     engine = Engine(ssh_hosts=[])
     value = engine.generate_task_plan(user_input, str(tmp_path), clarifications=answers)
-    assert value.refused and value.reason == REJECTION_REASONS[code]
+    from core.engine import MODEL_REJECTION_REASON
+    assert value.refused and value.reason == MODEL_REJECTION_REASON
+    assert engine.request_intent["reason"] == REJECTION_REASONS[code]
     assert not value.steps and not engine.command_attempts
     planner.assert_not_called()
 
@@ -255,7 +257,9 @@ def test_recursive_filename_recovery_keeps_other_rejections(monkeypatch, tmp_pat
     value = engine.generate_task_plan(user_input, str(tmp_path), clarifications=answers)
 
     assert value.status == "unsupported" and value.refused and not value.steps
-    assert value.reason == REJECTION_REASONS[code]
+    from core.engine import MODEL_REJECTION_REASON
+    assert value.reason == MODEL_REJECTION_REASON
+    assert engine.request_intent["reason"] == REJECTION_REASONS[code]
     assert engine.request_intent["reason_code"] == code
     assert not engine.plan_attempts and not engine.command_attempts
     assert intent_model.call_count == 2

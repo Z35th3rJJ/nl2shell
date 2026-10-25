@@ -13,6 +13,7 @@ from .operations import workspace_path
 # 模型输出前缀常量（供 cli 和测试复用）
 CANNOT_GENERATE_PREFIX = "CANNOT_GENERATE:"
 CLARIFY_PREFIX         = "CLARIFY:"
+MODEL_REJECTION_REASON = "意图模型未能生成本版本支持的操作计划；任务未执行。"
 _AMBIGUOUS_DELETION = re.compile(r"^(?:请)?(?:帮我)?(?:删除|清理|移除)(?:一下)?[。！!\s]*$")
 _TARGET_MARKER = r"(?:到|进|入|至|放在|存放在|保存在|目标目录(?:为|是|[:：]))"
 _UNSUPPORTED_CONTENT_SEARCH = re.compile(
@@ -395,7 +396,7 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 - find_files/count_files 参数：path、recursive（必填），可选 pattern、modified_within_days、size_gt_bytes。
 - 当前目录指当前层，recursive=false；用户明确包含子目录才用 true。普通浏览与只读文件查询默认当前目录当前层；修改文件前的查找范围不明时询问。
 - 超过 10 MB 使用 size_gt_bytes=10000000；最近七天使用 modified_within_days=7。
-- 文件数量必须使用 count_files，不是查找或统计文件内部行数。
+- 文件数量必须使用单个 count_files，直接填写 path、recursive 及原始筛选条件；count_files 自行完成筛选和计数，不接受 source_step，不先生成 find_files。不是统计文件内部行数。
 - create_file/create_directory 参数：path。创建文件只能创建空文件，不得猜测内容。
 - copy_files/move_files 参数：sources 路径列表或 source_step（前面的 find_files 编号，从 1 开始）；destination 是目录。
 - copy_files 可加 preserve_structure=true，保留查找起点内的相对目录。示例：查找符合条件的文件，再 source_step=1 复制到 backup。
@@ -521,6 +522,25 @@ def _plan_defaults(raw, user_input, answers, cwd):
         return raw
     recursive = count_request_recursive(user_input, answers)
     changed = False
+    count_expected = (_normalize_paths(expected, cwd) if expected is not None
+                      and expected.steps[0].operation == "count_files" else None)
+    if count_expected is not None:
+        from .bash_queries import same_query_plan
+        steps = value["steps"]
+        linked_count = (len(steps) == 2 and isinstance(steps[1], dict)
+                        and not set(steps[1]) - {"operation", "parameters", "explanation"}
+                        and isinstance(steps[1].get("explanation", ""), str)
+                        and steps[1].get("operation") == "count_files"
+                        and steps[1].get("parameters") == {"source_step": 1}
+                        and type(steps[1]["parameters"]["source_step"]) is int)
+        if (steps and isinstance(steps[0], dict) and steps[0].get("operation") == "find_files"
+                and (len(steps) == 1 or linked_count)):
+            replacement = {**steps[0], "operation": "count_files"}
+            candidate = parse_operation_plan(json.dumps({**value, "steps": [replacement]}))
+            # 只接受与独立解析的原始条件完全等价的计数表达，不删除模型多加的筛选条件。
+            if same_query_plan(_normalize_paths(candidate, cwd), count_expected):
+                value["steps"] = [replacement]
+                changed = True
     copy_index = 0
     for step in value["steps"]:
         if not isinstance(step, dict):
@@ -557,10 +577,12 @@ def _plan_defaults(raw, user_input, answers, cwd):
             parameters["destination"] = "."
             changed = True
         if (step.get("operation") == "count_files" and not hidden_requested and len(value["steps"]) == 1
-                and recursive is not None and isinstance(parameters, dict)
-                and parameters.get("path") == "." and "recursive" not in parameters):
-            parameters["recursive"] = recursive
-            changed = True
+                and count_expected is not None and recursive is not None and isinstance(parameters, dict)
+                and isinstance(parameters.get("path"), str) and "recursive" not in parameters):
+            partial = TaskPlan((TaskStep(operation="count_files", parameters=parameters),))
+            if _normalize_paths(partial, cwd).steps[0].parameters["path"] == count_expected.steps[0].parameters["path"]:
+                parameters["recursive"] = recursive
+                changed = True
         if (step.get("operation") == "list_directory" and hidden is not None and isinstance(parameters, dict)
                 and isinstance(parameters.get("path"), str)
                 and parameters["path"].strip() and "include_hidden" not in parameters):
@@ -708,8 +730,12 @@ class Engine:
                             "FILE_MODIFY", "delete", status="need_clarification")
         self.request_intent = analyze_request(user_input, clarifications or [], self._backend, self.intent_attempts)
         if self.request_intent["status"] != "ready":
-            return parse_operation_plan(json.dumps({key: value for key, value in self.request_intent.items()
-                                                    if key in {"status", "reason", "clarification"}}))
+            decision = {key: value for key, value in self.request_intent.items()
+                        if key in {"status", "reason", "clarification"}}
+            if self.request_intent["status"] == "unsupported":
+                # 模型的分类保留在意图证据中，不能冒充程序确认的拒绝原因。
+                decision["reason"] = MODEL_REJECTION_REASON
+            return parse_operation_plan(json.dumps(decision))
         required = self.request_intent["operations"]
         expected = resolve_request(user_input, clarifications or [])
         request_text = "\n".join([user_input, *answers])
@@ -717,7 +743,7 @@ class Engine:
         if self.request_intent.get("named_sources") and self.request_intent.get("selection_required") is False:
             system += "\n源文件已明确且无需筛选，直接使用 sources，不要先查找：" + json.dumps(self.request_intent["named_sources"])
         prompt = f"当前目录：{cwd}\n{user_input}"
-        if self._task_history:
+        if self._task_history and expected is None:
             context = [
                 {
                     "user_input": turn.user_input,
@@ -757,7 +783,10 @@ class Engine:
             plan = None
             path_error = None
             try:
-                plan = parse_operation_plan(_plan_defaults(raw, user_input, clarifications or [], cwd))
+                normalized = _plan_defaults(raw, user_input, clarifications or [], cwd)
+                plan = parse_operation_plan(normalized)
+                if normalized != raw and expected is not None and expected.steps[0].operation == "count_files":
+                    record["normalization"] = "依据原始需求规范化等价计数表达或缺失的递归默认值"
                 if format_baseline is not None:
                     corrected = _reference_format_payload(raw)
                     if corrected is None or not _same_reference_fields(format_baseline, corrected):
@@ -919,7 +948,11 @@ class Engine:
             raw = chat(messages, backend=self._backend, json_mode=True)
             record["raw_output"] = redact_value(raw)
             try:
-                reference = parse_operation_plan(_plan_defaults(raw, user_input, clarifications, cwd))
+                normalized = _plan_defaults(raw, user_input, clarifications, cwd)
+                reference = parse_operation_plan(normalized)
+                expected = resolve_request(user_input, clarifications)
+                if normalized != raw and expected is not None and expected.steps[0].operation == "count_files":
+                    record["normalization"] = "依据原始需求规范化等价计数表达或缺失的递归默认值"
             except (ValueError, TypeError) as error:
                 detail = _model_output_error(error)
                 record["review"] = redact_value("rejected: 参考格式错误：" + detail)

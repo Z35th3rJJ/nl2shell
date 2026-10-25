@@ -43,14 +43,28 @@ def explicit_transfer_operation(user_input, answers):
 
 
 def count_request_recursive(user_input, answers):
-    # shortcut: 仅恢复完整、明确的当前目录统计句式；其他表达或补充回答仍由原流程处理。
+    plan = _count_request(user_input, answers)
+    return None if plan is None else plan.steps[0].parameters["recursive"]
+
+
+def _count_request(user_input, answers):
+    # shortcut: 只解析完整的单目录、无额外筛选的计数；未解释的条件和回答仍交回模型。
     scope = None if answers else re.fullmatch(
-        r"统计当前目录(?P<children>(?:及|和)(?:所有)?子目录)?(?P<level>当前层|这一层)?"
-        r"(?:中|下)?的(?:普通)?文件(?:数量|个数)(?P<include>[，,](?:包括|包含)(?:所有)?子目录)?",
-        user_input)
-    if scope is None or (scope["level"] and (scope["children"] or scope["include"])):
+        r"统计[ \t]*(?:(?P<current>当前目录)|(?P<path>" + PATH_TOKEN + r")[ \t]*(?:目录|文件夹))"
+        r"(?P<children>(?:及|和)(?:其|所有)?子目录)?(?P<level>当前层|这一层)?"
+        r"(?:中|下)?的(?:普通)?文件(?:数量|个数)"
+        r"(?:[，,](?P<include>包括|包含|不包括|不包含)(?:所有)?子目录)?[。]?", user_input.strip())
+    if scope is None:
         return None
-    return bool(scope["children"] or scope["include"])
+    recursive = bool(scope["children"] or scope["include"] in {"包括", "包含"})
+    if (scope["level"] and recursive or scope["children"] and
+            scope["include"] in {"不包括", "不包含"}):
+        return None
+    path = "." if scope["current"] else path_value(scope["path"])
+    if not path.strip():
+        return None
+    return parse_operation_plan(json.dumps({"status": "ready", "steps": [{
+        "operation": "count_files", "parameters": {"path": path, "recursive": recursive}}]}))
 
 
 
@@ -86,8 +100,4 @@ def resolve_request(user_input, clarifications=()):
     directory = _directory_request(user_input, clarifications)
     if directory is not None:
         return directory
-    recursive = count_request_recursive(user_input, clarifications)
-    if recursive is not None:
-        return parse_operation_plan(json.dumps({"status": "ready", "steps": [{
-            "operation": "count_files", "parameters": {"path": ".", "recursive": recursive}}]}))
-    return None
+    return _count_request(user_input, clarifications)
