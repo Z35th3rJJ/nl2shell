@@ -1038,7 +1038,7 @@ def entrypoint() -> None:
         parser.error("--timeout 必须是有限正数")
     if parsed_args.agent and (not parsed_args.task or parsed_args.batch):
         parser.error("--agent 需要一个明确目标，不能与 --batch 同用")
-    if parsed_args.agent and (parsed_args.policy or os.environ.get('COMMAND_POLICY')) == 'blacklist':
+    if parsed_args.agent and (parsed_args.policy or os.environ.get('COMMAND_POLICY','whitelist')).lower() == 'blacklist':
         parser.error('实验黑名单暂不支持 Agent；请使用单任务入口')
     main(args=parsed_args)
 
