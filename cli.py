@@ -204,6 +204,7 @@ _OPERATION_NAMES = {
     "search_text": "搜索文本", "text_stats": "统计文本", "read_text": "查看文本首尾",
     "file_inode": "查询文件 inode",
     "largest_file": "查找最大文件",
+    'blacklist_query': '扩展命令查询',
 }
 _STATUS_NAMES = {"verified": "已验证成功", "preview": "仅预览", "needs_clarification": "需要补充信息",
                  "unsupported": "暂不支持", "blocked": "已停止", "cancelled": "已取消",
@@ -232,6 +233,11 @@ def show_preview(prepared, *, show_cwd=True, request=""):
             review = action["review"]
             text = "通过（尚未执行）" if review == "accepted" else "拒绝（未执行）" if review == "rejected" else review
             print(_paint(f"  审查：{text}", GREEN if review == "accepted" else RED if review == "rejected" else YELLOW))
+        elif action.get('execution_kind') == 'blacklist_native':
+            print(_paint('  执行方式：受控 Linux 写命令（黑名单模式）', GRAY))
+            for item in action['items']:
+                if item.get('native_argv'):
+                    print('    ' + shlex.join(item['native_argv']))
         else:
             print(_paint("  执行方式：受保护的 Python 工具", GRAY))
         if "path" in action["parameters"]:
@@ -271,6 +277,8 @@ def show_outcome(outcome):
     if outcome.get("actual_argv"):
         print("  实际命令：")
         print(_paint("    " + shlex.join(outcome["actual_argv"]), CYAN))
+    for argv in outcome.get('actual_commands', []):
+        print('  实际 Linux 命令：' + shlex.join(argv))
     if "count" in outcome:
         print(f"  文件数量：{outcome['count']}")
     if outcome.get("largest_files"):
@@ -299,13 +307,117 @@ def show_outcome(outcome):
             print(_paint(f"    恢复编号：{item['trash_id']}", GRAY))
 
 
+def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, input_fn,
+                              timeout_seconds=60, assume_yes=False, batch_id='', batch_index=None):
+    from core.command_policy import generate_candidate, review_query, sandbox_argv
+    started = time.monotonic()
+    clarifications, attempts, outcomes = [], [], []
+    argv, phase, authorized = [], 'planning', False
+    excluded = [history.path]
+    if os.environ.get('NL2SHELL_LOG_JSON'):
+        excluded.append(Path(os.environ['NL2SHELL_LOG_JSON']).expanduser())
+    def finish(status, detail=''):
+        evidence = summarize_execution(outcomes)
+        try:
+            save_history(history, user_input=user_input, cwd=cwd, command=shlex.join(argv), risk=WARN,
+                status=status, **evidence, command_policy='blacklist', run_mode=mode, phase=phase,
+                authorized=authorized, clarifications=clarifications, command_attempts=attempts,
+                verification=outcomes, block_reason=detail,
+                **({'batch_id':batch_id,'batch_index':batch_index} if batch_id else {}))
+        except OSError as error:
+            status, detail = 'audit_failed', '历史记录无法保存：' + str(error)
+            history.last_record.update(status=status, block_reason=detail)
+        _section(3, '执行与验证')
+        print('任务结果：' + _STATUS_NAMES.get(status, status))
+        print('执行状态：' + execution_description(evidence))
+        print('文件修改：' + change_description(evidence))
+        if detail:
+            print('说明：' + detail)
+        return status
+    def ask(prompt):
+        try:
+            answer = input_fn(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return ''
+        if answer == '/exit':
+            finish('cancelled', '用户退出，当前任务已取消')
+            print('再见！')
+            raise SystemExit(0)
+        return answer
+    try:
+        for _ in range(3):
+            candidate, raw = generate_candidate(user_input, cwd, clarifications, engine._backend)
+            attempts.append({'phase':'blacklist_candidate','raw_output':redact_value(raw)})
+            if candidate['status'] == 'protected':
+                return execute_request(engine, executor, history, user_input, cwd, mode, input_fn,
+                    timeout_seconds=max(.01,timeout_seconds-(time.monotonic()-started)), assume_yes=assume_yes,
+                    batch_id=batch_id, batch_index=batch_index, _policy_routed=True, _policy_answers=clarifications)
+            if candidate['status'] == 'unsupported':
+                return finish('unsupported', str(candidate['reason']))
+            if candidate['status'] != 'need_clarification':
+                break
+            if mode == BATCH:
+                return finish('needs_clarification', str(candidate['clarification']))
+            print(str(candidate['clarification']))
+            answer = ask('你的回答> ')
+            if not answer:
+                return finish('cancelled')
+            clarifications.append('问题：'+str(candidate['clarification'])+'；用户回答：'+answer)
+        else:
+            return finish('needs_clarification', '仍有必要条件未明确，任务停止')
+        argv = review_query(candidate['argv'], cwd)
+        launcher = sandbox_argv(argv, cwd, excluded=excluded)
+        _section(1, '执行预览')
+        print('黑名单扩展命令：' + shlex.join(argv))
+        print('运行环境：只读工作区、无网络、无提权的 Linux 沙箱。系统查询反映沙箱视图。')
+        print('此扩展命令没有独立的任务结果验证器；退出码 0 不等于任务目标已验证。')
+        if mode == PREVIEW:
+            return finish('preview')
+        if mode == BATCH or assume_yes:
+            return finish('cancelled', '实验扩展命令必须人工确认；--yes 和批处理不代替授权')
+        phase = 'confirmation'
+        _section(2, '等待确认')
+        if ask('是否执行以上命令？请输入 yes 确认 > ').lower() != 'yes':
+            return finish('cancelled')
+        if time.monotonic()-started >= timeout_seconds:
+            return finish('blocked', '任务时限已用完，未执行')
+        if sandbox_argv(argv, cwd, excluded=excluded) != launcher:
+            return finish('blocked', '沙箱范围已变化，请重新提交任务')
+        save_history(history, user_input=user_input, cwd=cwd, command=shlex.join(argv), risk=WARN,
+            status='confirmed', executed=False, execution_state='not_started', file_change_state='unchanged',
+            authorized=True, command_policy='blacklist', run_mode=mode, clarifications=clarifications)
+        authorized, phase = True, 'execution'
+        result, actual = executor.execute_policy_query(argv, cwd, excluded,
+            timeout_seconds=max(.01,timeout_seconds-(time.monotonic()-started)))
+        outcome = redact_value({'step':1,'operation':'blacklist_query','execution_kind':'blacklist_sandbox',
+            'status':'unverified' if result.exit_code == 0 and not result.timed_out else 'execution_failed',
+            'executed':True,'execution_state':result.process_state,'file_change_state':'unchanged',
+            'actual_argv':argv,'launcher_argv':actual,'exit_code':result.exit_code,'stdout':result.stdout,
+            'stderr':result.stderr,'timed_out':result.timed_out,'output_truncated':result.output_truncated,
+            'task_completed':False,'duration_seconds':result.duration_seconds,'items':[],
+            'detail':'命令已退出；扩展命令未进行独立目标验证，不宣称任务成功'})
+        outcomes.append(outcome)
+        show_outcome(outcome)
+        return finish(outcome['status'], outcome['detail'])
+    except (ValueError, TypeError, OSError, RuntimeError, KeyboardInterrupt) as error:
+        if phase == 'execution':
+            outcomes.append({'step':1,'operation':'blacklist_query','status':'execution_failed',
+                'executed':getattr(error,'process_started',False),
+                'execution_state':getattr(error,'process_state','not_started'),
+                'file_change_state':'unchanged','detail':str(error),'items':[]})
+        return finish('interrupted' if isinstance(error, KeyboardInterrupt) else 'blocked', str(error))
+
+
 def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStore,
                     user_input: str, cwd: str, mode: str, input_fn=input,
                     timeout_seconds: float = 60, batch_id: str = "",
                     batch_index: int | None = None, assume_yes: bool = False,
-                    agent_context: dict | None = None) -> str:
+                    agent_context: dict | None = None, _policy_routed=False, _policy_answers=()) -> str:
+    if getattr(engine, 'command_policy', 'whitelist') == 'blacklist' and not _policy_routed:
+        return execute_blacklist_request(engine, executor, history, user_input, cwd, mode, input_fn,
+            timeout_seconds=timeout_seconds, assume_yes=assume_yes, batch_id=batch_id, batch_index=batch_index)
     plan = TaskPlan(())
-    clarifications = []
+    clarifications = list(_policy_answers)
     intent_attempts = []
     plan_attempts = []
     prepared, outcomes = None, []
@@ -403,6 +515,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                          command=json.dumps(payload, ensure_ascii=False),
                          risk=SAFE if prepared and prepared["read_only"] else WARN,
                          status=status, **evidence, phase=phase, authorized=authorized, run_mode=mode, plan=payload, clarifications=clarifications,
+                         command_policy=getattr(engine,'command_policy','whitelist'),
                          preview=(query_preview(prepared) if bash_query else preview_details(prepared)) if prepared else [],
                          verification=outcomes, block_reason=detail,
                          timed_out=any(item.get("timed_out") for item in outcomes),
@@ -483,6 +596,9 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         if prepared is not None:
             options["now"] = prepared["now"]
         value = (prepare_queries if bash_query else prepare_plan)(plan, cwd, **options)
+        if not bash_query and getattr(engine, 'command_policy', 'whitelist') == 'blacklist':
+            from core.command_policy import prepare_native
+            prepare_native(value)
         if bash_query and candidates is not None:
             review_commands(value, candidates)
         return value
@@ -619,7 +735,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     for action in prepared["actions"]:
         outcome = run_action(prepared, action)
         if not bash_query:
-            outcome["execution_kind"] = "python_tool"
+            outcome["execution_kind"] = action.get('execution_kind', 'python_tool')
         outcomes.append(outcome)
         show_outcome(outcome)
         if outcome["status"] not in {"verified", "no_matches"}:
@@ -784,6 +900,7 @@ def main(input_session=None, args=None) -> None:
         print(_paint(f"执行后端配置错误：{error}", RED))
         return
     engine, history = Engine(), HistoryStore()
+    engine.command_policy = getattr(args, 'policy', None) or settings.command_policy
     if args.batch:
         try:
             run_batch(engine, executor, history, Path(args.batch), args.timeout)
@@ -823,6 +940,7 @@ def main(input_session=None, args=None) -> None:
     input_session = input_session or create_input_session()
     print("\n" + _paint("智能 Shell 助手", BOLD, CYAN))
     print(f"运行方式：{mode_name(mode)}")
+    print('命令策略：' + ('白名单（默认）' if engine.command_policy == 'whitelist' else '黑名单（实验；扩展查询隔离运行，写入仍需确认）'))
     print(_paint("输入中文需求开始任务；输入 /help 查看命令，/exit 退出。", GRAY))
     last_cwd, _ = recover_working_directory()
     while True:
@@ -862,7 +980,7 @@ def main(input_session=None, args=None) -> None:
         if user_input == "/config":
             selected = choose_mode(mode)
             if selected is not None:
-                saved = save_settings(AppSettings(selected, True))
+                saved = save_settings(AppSettings(selected, True, settings.command_policy))
                 if saved:
                     mode = selected
                     print(f"默认运行方式已保存并切换为：{mode_name(mode)}。")
@@ -914,11 +1032,14 @@ def entrypoint() -> None:
     parser.add_argument("--yes", action="store_true", help="仅对受支持的只读任务跳过确认")
     parser.add_argument("--json", action="store_true", help="输出稳定 JSON 结果（适合脚本调用）")
     parser.add_argument("--agent", action="store_true", help="按真实观察逐步决策，最多五次受控工具调用")
+    parser.add_argument('--policy', choices=('whitelist','blacklist'), help='命令策略；默认 whitelist，blacklist 为实验模式')
     parsed_args = parser.parse_args()
     if not math.isfinite(parsed_args.timeout) or parsed_args.timeout <= 0:
         parser.error("--timeout 必须是有限正数")
     if parsed_args.agent and (not parsed_args.task or parsed_args.batch):
         parser.error("--agent 需要一个明确目标，不能与 --batch 同用")
+    if parsed_args.agent and (parsed_args.policy or os.environ.get('COMMAND_POLICY')) == 'blacklist':
+        parser.error('实验黑名单暂不支持 Agent；请使用单任务入口')
     main(args=parsed_args)
 
 

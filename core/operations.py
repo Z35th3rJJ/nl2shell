@@ -407,7 +407,15 @@ def execute_action(prepared: dict, action: dict, executor=None, *, timeout_secon
                     outcome["file_change_state"] = "changed"
                     progress["file_change_state"] = "changed"
             workspace_path(root, str(destination), internal=operation == "trash")
-            if operation == "create_file":
+            if item.get('native_argv'):
+                result, launcher = executor.execute_native_item(prepared, action, item,
+                    timeout_seconds=max(0.01, deadline - time.monotonic()))
+                progress.update(actual_argv=item['native_argv'], launcher_argv=launcher, exit_code=result.exit_code,
+                                stdout=result.stdout, stderr=result.stderr, output_truncated=result.output_truncated)
+                outcome.setdefault('actual_commands', []).append(item['native_argv'])
+                if result.timed_out or result.exit_code != 0 or result.stderr or result.output_truncated:
+                    raise RuntimeError('原生文件命令失败、超时或输出不完整：' + result.stderr)
+            elif operation == "create_file":
                 with destination.open("xb"):
                     pass
             elif operation == "create_directory":
@@ -417,8 +425,9 @@ def execute_action(prepared: dict, action: dict, executor=None, *, timeout_secon
             else:
                 # ponytail: 同一工作区内重命名；跨文件系统移动明确失败，不做隐式复制删除。
                 _move_no_replace(source, destination)
-            outcome["file_change_state"] = "changed"
-            progress["file_change_state"] = "changed"
+            if not item.get('native_argv'):
+                outcome["file_change_state"] = "changed"
+                progress["file_change_state"] = "changed"
             phase = "verification"
             if operation == "create_file":
                 valid = destination.is_file() and destination.stat().st_size == 0
@@ -431,6 +440,7 @@ def execute_action(prepared: dict, action: dict, executor=None, *, timeout_secon
                 valid = not source.exists() and snapshot(destination, deadline) == item["identity"]["content"]
             if not valid:
                 raise RuntimeError("文件操作完成，但实际结果检查失败")
+            outcome['file_change_state'] = progress['file_change_state'] = 'changed'
             progress["status"] = "verified"
         if action["items"] == [] and operation not in READ_OPERATIONS:
             outcome["detail"] = "没有符合条件的文件，未修改任何文件"

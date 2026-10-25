@@ -18,6 +18,7 @@ _LEGACY_KEYS = {"AGENT_MODE", "EXECUTION_POLICY", "DRY_RUN", "AUTO_EXECUTE"}
 class AppSettings:
     run_mode: str
     setup_complete: bool
+    command_policy: str = 'whitelist'
 
 
 def _truthy(value: str | None) -> bool:
@@ -36,7 +37,10 @@ def load_settings() -> AppSettings:
     mode = mode.lower()
     if mode not in RUN_MODES:
         raise ValueError(f"RUN_MODE 必须是：{', '.join(RUN_MODES)}")
-    return AppSettings(mode, _truthy(os.environ.get("SETUP_COMPLETE")))
+    policy = os.environ.get('COMMAND_POLICY', 'whitelist').lower()
+    if policy not in {'whitelist','blacklist'}:
+        raise ValueError('COMMAND_POLICY 必须是 whitelist 或 blacklist')
+    return AppSettings(mode, _truthy(os.environ.get("SETUP_COMPLETE")), policy)
 
 
 def mode_name(mode: str) -> str:
@@ -78,7 +82,7 @@ def choose_mode(current: str, input_fn: Callable[[str], str] = input,
 def save_settings(settings: AppSettings, env_path: Path = ENV_PATH) -> bool:
     if not env_path.exists():
         return False
-    values = {"RUN_MODE": settings.run_mode, "SETUP_COMPLETE": "true"}
+    values = {"RUN_MODE": settings.run_mode, "SETUP_COMPLETE": "true", 'COMMAND_POLICY': settings.command_policy}
     lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
     updated, seen = [], set()
     for line in lines:
@@ -111,7 +115,7 @@ def first_run_setup(settings: AppSettings, input_fn: Callable[[str], str] = inpu
     mode = choose_mode(settings.run_mode, input_fn, output_fn)
     if mode is None:
         return None
-    selected = AppSettings(mode, True)
+    selected = AppSettings(mode, True, settings.command_policy)
     if save_settings(selected, env_path):
         output_fn(f"默认方式已保存：{mode_name(mode)}。")
     else:

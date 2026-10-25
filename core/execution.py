@@ -125,6 +125,25 @@ class BashExecutor:
         result = self._execute_argv(actual, timeout_seconds, cwd, env=environment)
         return result, actual
 
+    def execute_policy_query(self, argv, cwd, excluded=(), *, timeout_seconds=60):
+        from .command_policy import review_query, sandbox_argv
+        if type(self) is not BashExecutor:
+            raise RuntimeError('黑名单模式仅支持原生 Linux 沙箱，不降级到其他后端')
+        actual = sandbox_argv(review_query(argv, cwd), cwd, excluded=excluded)
+        return self._execute_argv(actual, timeout_seconds, cwd), actual
+
+    def execute_native_item(self, prepared, action, item, *, timeout_seconds=60):
+        from .command_policy import native_argv, sandbox_argv
+        from .operations import workspace_path
+        argv = native_argv(action['operation'], item)
+        if type(self) is not BashExecutor or argv is None or item.get('native_argv') != argv:
+            raise ValueError('原生写入参数未通过保护流程')
+        destination = workspace_path(Path(prepared['cwd']), item['destination'])
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError('原生写入目标已存在，未执行命令')
+        actual = sandbox_argv(argv, prepared['cwd'], writable=True, excluded=prepared['excluded'])
+        return self._execute_argv(actual, timeout_seconds, prepared['cwd']), actual
+
     def _execute_argv(self, argv: list[str], timeout_seconds: float | None,
                       cwd: str | None = None, *, env=None) -> ExecutionResult:
 
