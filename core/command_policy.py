@@ -105,10 +105,10 @@ def native_argv(operation, item):
     if operation == 'create_directory':
         return ['mkdir','--',destination]
     if operation == 'copy_files':
-        return ['cp','--no-clobber','--no-target-directory','--recursive','--no-dereference',
+        return ['cp','--update=none','--no-target-directory','--recursive','--no-dereference',
                 '--','./' + item['source'],destination]
     if operation in {'move_files','rename'}:
-        return ['mv','--no-clobber','--no-copy','--no-target-directory','--','./' + item['source'],destination]
+        return ['mv','--update=none','--no-copy','--no-target-directory','--','./' + item['source'],destination]
     return None
 
 

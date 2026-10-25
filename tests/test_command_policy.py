@@ -48,10 +48,13 @@ class CommandPolicyTests(unittest.TestCase):
             root=Path(directory)
             (root/'sample.txt').write_bytes(b'fixture')
             (root/'.env').write_bytes(b'test-placeholder')
-            result, actual=BashExecutor().execute_policy_query(['cat','.env'], directory)
+            result, actual=BashExecutor().execute_policy_query(['cat','sample.txt'], directory)
             self.assertEqual(result.exit_code,0,result.stderr)
-            self.assertEqual(result.stdout,'')
+            self.assertEqual(result.stdout,'fixture')
             self.assertIn('/usr/bin/bwrap', actual)
+            result, _=BashExecutor().execute_policy_query(['cat','.env'], directory)
+            self.assertIn(result.exit_code,(0,1))
+            self.assertEqual(result.stdout,'')
             self.assertEqual((root/'.env').read_bytes(),b'test-placeholder')
 
     @unittest.skipUnless(sys.platform == 'linux', '需要 Linux/bwrap')
@@ -59,6 +62,7 @@ class CommandPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             result=subprocess.run(sandbox_argv(['touch','unauthorized.txt'],directory),capture_output=True)
             self.assertNotEqual(result.returncode,0)
+            self.assertIn(b'Read-only file system',result.stderr)
             self.assertFalse((Path(directory)/'unauthorized.txt').exists())
 
     @unittest.skipUnless(sys.platform == 'linux', '需要 Linux/bwrap')
