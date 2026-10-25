@@ -12,7 +12,7 @@ from core.task_plan import TaskPlan, TaskStep, parse_operation_plan
 
 
 REQUEST = "统计 logs 目录及子目录中的文件数量"
-MODEL_REJECTION = "意图模型未能生成本版本支持的操作计划；任务未执行。"
+MODEL_REJECTION = "意图模型未能将请求识别为受支持的操作；任务未执行。"
 
 
 def payload(steps):
@@ -59,17 +59,18 @@ class CountContractTests(unittest.TestCase):
         self.assertEqual(plan.steps[0].parameters, {'path': './logs', 'recursive': True})
 
     def test_recorded_find_then_count_is_normalized(self):
-        raw = payload([step('find_files', path='logs', recursive=True), step('count_files', source_step=1)])
         intent = json.dumps({'status': 'ready', 'operations': ['count_files']})
-        with patch('core.intent.chat', return_value=intent), patch('core.engine.chat', return_value=raw) as model:
-            engine = Engine(ssh_hosts=[])
-            plan = engine.generate_task_plan(REQUEST, self.cwd)
-        self.assertEqual(len(plan.steps), 1)
-        self.assertEqual(plan.steps[0].operation, 'count_files')
-        self.assertEqual(plan.steps[0].parameters, {'path': 'logs', 'recursive': True})
-        self.assertEqual(model.call_count, 1)
-        self.assertEqual(engine.plan_attempts[0]['raw_output'], raw)
-        self.assertIn('normalization', engine.plan_attempts[0])
+        for parameters in ({'source_step': 1}, {'path': 'logs', 'recursive': True}):
+            raw = payload([step('find_files', path='logs', recursive=True), step('count_files', **parameters)])
+            with self.subTest(parameters=parameters), patch('core.intent.chat', return_value=intent), patch('core.engine.chat', return_value=raw) as model:
+                engine = Engine(ssh_hosts=[])
+                plan = engine.generate_task_plan(REQUEST, self.cwd)
+                self.assertEqual(len(plan.steps), 1)
+                self.assertEqual(plan.steps[0].operation, 'count_files')
+                self.assertEqual(plan.steps[0].parameters, {'path': 'logs', 'recursive': True})
+                self.assertEqual(model.call_count, 1)
+                self.assertEqual(engine.plan_attempts[0]['raw_output'], raw)
+                self.assertIn('normalization', engine.plan_attempts[0])
 
     def test_reference_find_is_checked_against_original_count_request(self):
         plan = TaskPlan((TaskStep(operation='count_files', parameters={'path': 'logs', 'recursive': True}),))
@@ -124,6 +125,15 @@ class CountContractTests(unittest.TestCase):
             raw = payload([step('find_files', path='logs', recursive=True), step('count_files', **parameters)])
             with self.subTest(parameters=parameters), self.assertRaises(ValueError):
                 parse_operation_plan(_plan_defaults(raw, REQUEST, [], self.cwd))
+
+    def test_redundant_count_cannot_drop_conflicting_second_step(self):
+        for parameters in ({'path': 'logs', 'recursive': False},
+                           {'path': 'logs', 'recursive': True, 'pattern': '*.log'},
+                           {'path': '.', 'recursive': True}):
+            raw = payload([step('find_files', path='logs', recursive=True), step('count_files', **parameters)])
+            with self.subTest(parameters=parameters), patch('core.intent.chat', return_value='{"status":"ready","operations":["count_files"]}'), patch('core.engine.chat', return_value=raw):
+                with self.assertRaises(ValueError):
+                    Engine(ssh_hosts=[]).generate_task_plan(REQUEST, self.cwd)
 
     def test_model_rejection_category_is_not_presented_as_program_fact(self):
         for request, code in [('我们挂载了几个硬盘', 'network'),

@@ -13,7 +13,7 @@ from .operations import workspace_path
 # 模型输出前缀常量（供 cli 和测试复用）
 CANNOT_GENERATE_PREFIX = "CANNOT_GENERATE:"
 CLARIFY_PREFIX         = "CLARIFY:"
-MODEL_REJECTION_REASON = "意图模型未能生成本版本支持的操作计划；任务未执行。"
+MODEL_REJECTION_REASON = "意图模型未能将请求识别为受支持的操作；任务未执行。"
 _AMBIGUOUS_DELETION = re.compile(r"^(?:请)?(?:帮我)?(?:删除|清理|移除)(?:一下)?[。！!\s]*$")
 _TARGET_MARKER = r"(?:到|进|入|至|放在|存放在|保存在|目标目录(?:为|是|[:：]))"
 _UNSUPPORTED_CONTENT_SEARCH = re.compile(
@@ -527,12 +527,17 @@ def _plan_defaults(raw, user_input, answers, cwd):
     if count_expected is not None:
         from .bash_queries import same_query_plan
         steps = value["steps"]
-        linked_count = (len(steps) == 2 and isinstance(steps[1], dict)
-                        and not set(steps[1]) - {"operation", "parameters", "explanation"}
-                        and isinstance(steps[1].get("explanation", ""), str)
-                        and steps[1].get("operation") == "count_files"
-                        and steps[1].get("parameters") == {"source_step": 1}
-                        and type(steps[1]["parameters"]["source_step"]) is int)
+        linked_count = False
+        if (len(steps) == 2 and isinstance(steps[1], dict)
+                and not set(steps[1]) - {"operation", "parameters", "explanation"}
+                and isinstance(steps[1].get("explanation", ""), str)
+                and steps[1].get("operation") == "count_files"):
+            second_parameters = steps[1].get("parameters")
+            if second_parameters == {"source_step": 1}:
+                linked_count = type(second_parameters["source_step"]) is int
+            elif isinstance(second_parameters, dict) and "source_step" not in second_parameters:
+                second_count = parse_operation_plan(json.dumps({**value, "steps": [steps[1]]}))
+                linked_count = same_query_plan(_normalize_paths(second_count, cwd), count_expected)
         if (steps and isinstance(steps[0], dict) and steps[0].get("operation") == "find_files"
                 and (len(steps) == 1 or linked_count)):
             replacement = {**steps[0], "operation": "count_files"}
