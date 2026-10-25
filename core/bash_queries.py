@@ -14,8 +14,8 @@ from .task_plan import plan_payload, validate_parameters
 from .redaction import redact_text
 
 QUERY_OPERATIONS = {"working_directory", "list_directory", "find_files", "count_files",
-                    "search_text", "text_stats", "read_text", "system_info"}
-COMMANDS = {"pwd", "ls", "find", "grep", "wc", "head", "tail", "df", "free", "uname"}
+                    "search_text", "text_stats", "read_text", "system_info", "file_inode"}
+COMMANDS = {"pwd", "ls", "find", "grep", "wc", "head", "tail", "df", "free", "uname", "stat"}
 SENSITIVE = (".git", ".ssh", ".aws", ".config", ".nl2shell-trash", ".env", ".env.*",
              "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*",
              "credentials", ".netrc", ".npmrc")
@@ -110,6 +110,8 @@ def required_argv(operation, p, now, excluded=()):
         return ["wc", {"lines": "-l", "words": "-w", "bytes": "-c"}[p["metric"]], "--", path]
     if operation == "read_text":
         return [p["end"], "-n", str(p["lines"]), "--", path]
+    if operation == "file_inode":
+        return ["stat", "-c", "%i", "--", path]
     if operation == "system_info":
         return {"disk": ["df", "-B1", "--output=size,used,avail", "--", path],
                 "memory": ["free", "-b"], "system": ["uname", "-s", "-r", "-m"]}[p["query"]]
@@ -165,6 +167,11 @@ def prepare_queries(plan, cwd, *, now=None, timeout_seconds=60, excluded_paths=(
                         raise ValueError("查询范围包含链接或换行名称")
                     names.append(value.name)
             action["_expected"] = sorted(names)
+        elif operation == "file_inode":
+            if not path.is_file():
+                raise ValueError("inode 查询需要普通文件路径")
+            action["_identities"][p["path"]] = _identity(path)
+            action["_expected"] = path.stat().st_ino
         elif operation in {"search_text", "text_stats", "read_text"}:
             if not path.is_file() or path.stat().st_size > TEXT_LIMIT:
                 raise ValueError("只读取不超过 1 MiB 的普通 UTF-8 文本文件")
@@ -205,7 +212,7 @@ def command_request(plan, prepared):
         argv = action["_required_argv"]
         p = action["parameters"]
         rule = {"step": action["step"], "operation": action["operation"], "parameters": p}
-        if argv[0] in {"ls", "grep", "wc", "head", "tail", "df"}:
+        if argv[0] in {"ls", "grep", "wc", "head", "tail", "df", "stat"}:
             rule["required_suffix"] = argv[-2:]
         # 固定安全槽位由程序规定；模型必须填写计划中的对象和全部筛选条件。
         if action["operation"] in {"find_files", "count_files"}:
@@ -223,6 +230,7 @@ find_files/count_files: 保留 mandatory_prefix；pattern 非 * 时追加 [-name
 search_text: ["grep","-F","-n","-e","PATTERN","--","PATH"]，字面匹配。
 text_stats: ["wc","METRIC","--","PATH"]，lines=-l、words=-w、bytes=-c。
 read_text: ["END","-n","LINES","--","PATH"]，END=head或tail，LINES 是计划行数的十进制字符串。
+file_inode: ["stat","-c","%i","--","PATH"]，只查询普通文件的 inode；不增加 -L 或其他格式及参数。
 system_info: disk=["df","-B1","--output=size,used,avail","--","PATH"]，没有 path 时 PATH 为 .；memory=["free","-b"]；system=["uname","-s","-r","-m"]。
 模板变量必须替换成计划实际值。"--" 是一个真实的独立参数，不是省略号，必须保留，不能遗漏。
 每步有 required_suffix 时，必须把这两个实际参数逐字放在 argv 的最后。不要改回 plan 中的路径，不要省略 ./ 或把 -- 写成 -。
@@ -284,6 +292,8 @@ def _verify_output(prepared, action, result):
     if operation == "text_stats":
         match = re.fullmatch(r"\s*(\d+)\s+" + re.escape(_operand(p["path"])) + r"\n", output)
         return bool(match) and int(match[1]) == action["_expected"]
+    if operation == "file_inode":
+        return output == str(action["_expected"]) + "\n"
     if p["query"] == "system":
         system = os.uname()
         return output == f"{system.sysname} {system.release} {system.machine}\n"
@@ -346,6 +356,8 @@ def execute_query(prepared, action, executor, *, timeout_seconds=60):
                            detail="没有匹配结果" if empty else "实际命令输出与独立检查一致")
             if action["operation"] == "count_files":
                 outcome["count"] = len(action["files"])
+            elif action["operation"] == "file_inode":
+                outcome["inode"] = action["_expected"]
     except (OSError, ValueError, RuntimeError, TypeError, KeyboardInterrupt) as error:
         status = "unverified" if phase == "verification" else "blocked" if phase in {"review", "environment"} and isinstance(error, ValueError) else "execution_failed"
         outcome.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else status,

@@ -49,10 +49,10 @@ class TaskPlan:
 OPERATIONS = {
     "find_files", "count_files", "create_file", "create_directory", "copy_files",
     "move_files", "rename", "trash", "restore", "list_trash", "organize_files", "system_info",
-    "working_directory", "list_directory", "search_text", "text_stats", "read_text",
+    "working_directory", "list_directory", "search_text", "text_stats", "read_text", "file_inode",
 }
 READ_OPERATIONS = {"find_files", "count_files", "list_trash", "system_info", "working_directory",
-                   "list_directory", "search_text", "text_stats", "read_text"}
+                   "list_directory", "search_text", "text_stats", "read_text", "file_inode"}
 
 
 def parse_operation_plan(raw: str) -> TaskPlan:
@@ -103,6 +103,7 @@ def validate_parameters(operation: str, p: dict, index: int, previous) -> None:
         "working_directory": set(), "list_directory": {"path", "include_hidden"},
         "search_text": {"path", "pattern"}, "text_stats": {"path", "metric"},
         "read_text": {"path", "end", "lines"},
+        "file_inode": {"path"},
     }
     if operation not in allowed or set(p) - allowed[operation]:
         raise ValueError("不支持的操作参数")
@@ -114,6 +115,7 @@ def validate_parameters(operation: str, p: dict, index: int, previous) -> None:
         "organize_files": {"path", "recursive", "group_by"}, "system_info": {"query"},
         "list_directory": {"path", "include_hidden"}, "search_text": {"path", "pattern"},
         "text_stats": {"path", "metric"}, "read_text": {"path", "end", "lines"},
+        "file_inode": {"path"},
     }
     if required.get(operation, set()) - set(p):
         raise ValueError("缺少关键操作参数，必须向用户追问")

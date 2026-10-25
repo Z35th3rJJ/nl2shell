@@ -414,6 +414,7 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 - 递归文本搜索仍不支持；不得把递归或多文件文本搜索缩小成单文件搜索后返回 ready。
 - text_stats 参数：path（单个文本文件）、metric=lines/words/bytes。统计文件行数不是 count_files。
 - read_text 参数：path、end=head/tail、lines（明确的1到1000行）；没有说明首尾位置或行数时追问，不默认十行。
+- file_inode 参数：path（单个普通文件路径）。只查询 inode 元数据，不读取文件内容；不使用 system_info 或 read_text 代替。
 - 条件不能用以上参数准确表达时，必须追问或返回 unsupported 并说明限制，不得忽略条件后返回 ready。
 - 用户明确给出文件名就是已给出路径，相对名称以当前工作目录为基准；不要要求确认名称是否正确。文件存在性和安全边界由程序检查。
 - 当前目录使用 path="."；子目录和文件优先使用相对路径。用户明确指定 organize 时，path="organize"，不能改成当前目录。
@@ -436,6 +437,7 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 统计 note.txt 的字节数：{"status":"ready","steps":[{"operation":"text_stats","parameters":{"path":"note.txt","metric":"bytes"}}]}
 查看 note.txt 的前两行：{"status":"ready","steps":[{"operation":"read_text","parameters":{"path":"note.txt","end":"head","lines":2}}]}
 查看 note.txt 的最后一行：{"status":"ready","steps":[{"operation":"read_text","parameters":{"path":"note.txt","end":"tail","lines":1}}]}
+显示 note.txt 的 inode：{"status":"ready","steps":[{"operation":"file_inode","parameters":{"path":"note.txt"}}]}
 递归备份最近三天的日志到 archive 并保留层次：{"status":"ready","steps":[{"operation":"find_files","parameters":{"path":".","recursive":true,"pattern":"*.log","modified_within_days":3},"explanation":"查找日志文件"},{"operation":"copy_files","parameters":{"source_step":1,"destination":"archive","preserve_structure":true},"explanation":"复制查找结果并保留目录层次"}]}
 移动到工作目录外的 ../archive：{"status":"unsupported","reason":"目标位于工作目录外，不能执行"}
 把 note.txt 复制一下：{"status":"need_clarification","clarification":"复制到哪个目录？"}
@@ -745,7 +747,8 @@ class Engine:
         expected = resolve_request(user_input, clarifications or [])
         request_text = "\n".join([user_input, *answers])
         system = _AGENT_SYSTEM + "\n独立识别的必要操作必须全部出现在计划中：" + json.dumps(required)
-        if self.request_intent.get("named_sources") and self.request_intent.get("selection_required") is False:
+        if (self.request_intent.get("named_sources") and self.request_intent.get("selection_required") is False
+                and set(required) <= {"copy_files", "move_files", "trash"}):
             system += "\n源文件已明确且无需筛选，直接使用 sources，不要先查找：" + json.dumps(self.request_intent["named_sources"])
         prompt = f"当前目录：{cwd}\n{user_input}"
         if self._task_history and expected is None:

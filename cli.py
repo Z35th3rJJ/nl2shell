@@ -202,6 +202,7 @@ _OPERATION_NAMES = {
     "list_trash": "查看回收区", "organize_files": "按文件类型整理", "system_info": "查询系统信息",
     "working_directory": "显示当前目录", "list_directory": "列出目录内容",
     "search_text": "搜索文本", "text_stats": "统计文本", "read_text": "查看文本首尾",
+    "file_inode": "查询文件 inode",
 }
 _STATUS_NAMES = {"verified": "已验证成功", "preview": "仅预览", "needs_clarification": "需要补充信息",
                  "unsupported": "暂不支持", "blocked": "已停止", "cancelled": "已取消",
@@ -468,7 +469,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         return finish("unsupported", "规划阶段拒绝（非路径检查结果）：" + (plan.reason or "暂不支持这项操作"))
     bash_query = uses_bash(plan)
     if not bash_query and any(step.operation in {"system_info", "working_directory", "list_directory",
-                                                "search_text", "text_stats", "read_text"} for step in plan.steps):
+                                                "search_text", "text_stats", "read_text", "file_inode"} for step in plan.steps):
         return finish("blocked", "首版请把命令查询和文件写入分开提交；未执行任何步骤")
     def prepare():
         options = {"timeout_seconds": remaining_time(), "excluded_paths": excluded}
