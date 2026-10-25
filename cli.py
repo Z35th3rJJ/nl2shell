@@ -203,6 +203,7 @@ _OPERATION_NAMES = {
     "working_directory": "显示当前目录", "list_directory": "列出目录内容",
     "search_text": "搜索文本", "text_stats": "统计文本", "read_text": "查看文本首尾",
     "file_inode": "查询文件 inode",
+    "largest_file": "查找最大文件",
 }
 _STATUS_NAMES = {"verified": "已验证成功", "preview": "仅预览", "needs_clarification": "需要补充信息",
                  "unsupported": "暂不支持", "blocked": "已停止", "cancelled": "已取消",
@@ -249,6 +250,8 @@ def show_preview(prepared, *, show_cwd=True, request=""):
             print(_paint(f"  查看范围：{'前' if p['end'] == 'head' else '后'} {p['lines']} 行", GRAY))
         if action["operation"] == "text_stats":
             print(_paint("  统计内容：" + {"lines": "行数", "words": "单词数", "bytes": "字节数"}[p["metric"]], GRAY))
+        if action["operation"] == "largest_file":
+            print(_paint("  按字节数比较，列出全部并列最大文件。", GRAY))
         if action["files"]:
             print(f"  找到 {len(action['files'])} 个文件：")
             for name in action["files"]:
@@ -270,9 +273,13 @@ def show_outcome(outcome):
         print(_paint("    " + shlex.join(outcome["actual_argv"]), CYAN))
     if "count" in outcome:
         print(f"  文件数量：{outcome['count']}")
+    if outcome.get("largest_files"):
+        print("  最大文件：")
+        for item in outcome["largest_files"]:
+            print(f"    {json.dumps(item['path'], ensure_ascii=False)} | {item['size_bytes']} 字节")
     if outcome.get("stdout"):
         print(_paint("  命令输出：", GRAY))
-        if outcome["operation"] in {"find_files", "count_files"}:
+        if outcome["operation"] in {"find_files", "count_files", "largest_file"}:
             for name in outcome["stdout"].split("\0"):
                 if name:
                     print(json.dumps(name, ensure_ascii=False) if "\n" in name or "\r" in name else name)
@@ -469,7 +476,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         return finish("unsupported", "规划阶段拒绝（非路径检查结果）：" + (plan.reason or "暂不支持这项操作"))
     bash_query = uses_bash(plan)
     if not bash_query and any(step.operation in {"system_info", "working_directory", "list_directory",
-                                                "search_text", "text_stats", "read_text", "file_inode"} for step in plan.steps):
+                                                "search_text", "text_stats", "read_text", "file_inode", "largest_file"} for step in plan.steps):
         return finish("blocked", "首版请把命令查询和文件写入分开提交；未执行任何步骤")
     def prepare():
         options = {"timeout_seconds": remaining_time(), "excluded_paths": excluded}

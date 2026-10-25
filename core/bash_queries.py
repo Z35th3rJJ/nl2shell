@@ -14,7 +14,7 @@ from .task_plan import plan_payload, validate_parameters
 from .redaction import redact_text
 
 QUERY_OPERATIONS = {"working_directory", "list_directory", "find_files", "count_files",
-                    "search_text", "text_stats", "read_text", "system_info", "file_inode"}
+                    "search_text", "text_stats", "read_text", "system_info", "file_inode", "largest_file"}
 COMMANDS = {"pwd", "ls", "find", "grep", "wc", "head", "tail", "df", "free", "uname", "stat"}
 SENSITIVE = (".git", ".ssh", ".aws", ".config", ".nl2shell-trash", ".env", ".env.*",
              "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*",
@@ -87,7 +87,7 @@ def required_argv(operation, p, now, excluded=()):
         return ["pwd", "-P"]
     if operation == "list_directory":
         return ["ls", "-1", "--color=never", "--quoting-style=literal", *(["-A"] if p["include_hidden"] else []), "--", path]
-    if operation in {"find_files", "count_files"}:
+    if operation in {"find_files", "count_files", "largest_file"}:
         argv = ["find", path, "-mindepth", "1"]
         if not p["recursive"]:
             argv += ["-maxdepth", "1"]
@@ -103,7 +103,7 @@ def required_argv(operation, p, now, excluded=()):
             argv += ["-newermt", _timestamp(lower - 1), "!", "-newermt", _timestamp(upper)]
         if "size_gt_bytes" in p:
             argv += ["-size", "+" + str(math.floor(p["size_gt_bytes"])) + "c"]
-        return argv + ["-print0"]
+        return argv + (["-printf", r"%s %p\0"] if operation == "largest_file" else ["-print0"])
     if operation == "search_text":
         return ["grep", "-F", "-n", "-e", p["pattern"], "--", path]
     if operation == "text_stats":
@@ -143,7 +143,7 @@ def prepare_queries(plan, cwd, *, now=None, timeout_seconds=60, excluded_paths=(
         action = {"step": index, "operation": operation, "parameters": p,
                   "explanation": step.explanation, "items": [], "files": [],
                   "execution_kind": "model_bash_argv", "_identities": {}}
-        if operation in {"find_files", "count_files"}:
+        if operation in {"find_files", "count_files", "largest_file"}:
             query = {k: v for k, v in p.items() if k != "modified_within_days"}
             files = find_files(root, query, now, excluded, deadline)
             files = [value for value in files if not _sensitive(value, root)]
@@ -156,6 +156,12 @@ def prepare_queries(plan, cwd, *, now=None, timeout_seconds=60, excluded_paths=(
                 name = value.relative_to(root).as_posix()
                 action["files"].append(name)
                 action["_identities"][name] = _identity(value)
+            if operation == "largest_file":
+                sizes = {name: identity[2] for name, identity in action["_identities"].items()}
+                action["_expected"] = sorted(f"{size} {_operand(name)}" for name, size in sizes.items())
+                maximum = max(sizes.values(), default=None)
+                action["_largest_files"] = [{"path": name, "size_bytes": size}
+                                            for name, size in sizes.items() if size == maximum]
         elif operation == "list_directory":
             if not path.is_dir():
                 raise ValueError("列出内容需要目录路径")
@@ -214,7 +220,7 @@ def command_request(plan, prepared):
         rule = {"step": action["step"], "operation": action["operation"], "parameters": p}
         if argv[0] in {"ls", "grep", "wc", "head", "tail", "df", "stat"}:
             rule["required_suffix"] = argv[-2:]
-        if action["operation"] == "file_inode":
+        if action["operation"] in {"file_inode", "largest_file"}:
             rule["required_argv"] = argv
         # 固定安全槽位由程序规定；模型必须填写计划中的对象和全部筛选条件。
         if action["operation"] in {"find_files", "count_files"}:
@@ -233,6 +239,7 @@ search_text: ["grep","-F","-n","-e","PATTERN","--","PATH"]，字面匹配。
 text_stats: ["wc","METRIC","--","PATH"]，lines=-l、words=-w、bytes=-c。
 read_text: ["END","-n","LINES","--","PATH"]，END=head或tail，LINES 是计划行数的十进制字符串。
 file_inode: ["stat","-c","%i","--","PATH"]，必须逐项使用 required_argv，包括路径前缀 ./；不增加 -L 或其他格式及参数。
+largest_file: 必须逐项使用 required_argv。find 以 NUL 分隔输出字节大小和路径；程序独立核对后计算最大值，保留全部并列结果。禁止管道、sort、head 和额外筛选。
 system_info: disk=["df","-B1","--output=size,used,avail","--","PATH"]，没有 path 时 PATH 为 .；memory=["free","-b"]；system=["uname","-s","-r","-m"]。
 模板变量必须替换成计划实际值。"--" 是一个真实的独立参数，不是省略号，必须保留，不能遗漏。
 每步有 required_suffix 时，必须把这两个实际参数逐字放在 argv 的最后。不要改回 plan 中的路径，不要省略 ./ 或把 -- 写成 -。
@@ -278,6 +285,8 @@ def _verify_output(prepared, action, result):
         if _identity(path) != identity:
             raise ValueError("查询对象已变化，实际结果尚未验证")
     output = result.stdout
+    if operation == "largest_file":
+        return (not output or output.endswith("\0")) and sorted(output[:-1].split("\0") if output else []) == action["_expected"]
     if operation in {"find_files", "count_files"}:
         if output and not output.endswith("\0"):
             return False
@@ -360,6 +369,8 @@ def execute_query(prepared, action, executor, *, timeout_seconds=60):
                 outcome["count"] = len(action["files"])
             elif action["operation"] == "file_inode":
                 outcome["inode"] = action["_expected"]
+            elif action["operation"] == "largest_file":
+                outcome["largest_files"] = action["_largest_files"]
     except (OSError, ValueError, RuntimeError, TypeError, KeyboardInterrupt) as error:
         status = "unverified" if phase == "verification" else "blocked" if phase in {"review", "environment"} and isinstance(error, ValueError) else "execution_failed"
         outcome.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else status,

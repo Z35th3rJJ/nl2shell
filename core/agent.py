@@ -125,6 +125,9 @@ def observed_result(rule, prepared, outcome, include_files):
             observation.update(files=files[:30], files_truncated=len(files) > 30)
     elif outcome["operation"] == "file_inode":
         observation["inode"] = outcome["inode"]
+    elif outcome["operation"] == "largest_file":
+        files = outcome["largest_files"]
+        observation.update(largest_files=files[:30], files_truncated=len(files) > 30)
     elif outcome["operation"] in {"read_text", "search_text", "system_info", "text_stats"}:
         observation["output_untrusted"] = outcome.get("stdout", "")[:500]
     if outcome.get("items"):

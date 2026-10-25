@@ -48,6 +48,7 @@ working_directory：显示当前工作目录。list_directory：列出目录内�
 search_text：在指定文件中搜索字面文本。text_stats：统计指定文件的行数、单词数或字节数。
 read_text：查看指定文本文件的前几行或后几行。
 file_inode：查询单个普通文件的 inode 编号，属于文件元数据查询，不是文件内容或系统信息查询。
+largest_file：查询指定目录中按字节大小最大的普通文件；支持明确的递归范围，不用 find_files 或 count_files 代替。
 规则：
 - 根据整句话的含义识别动作，不要求用户使用操作名称或固定动词。
 - 回收区、回收站、垃圾箱表示可恢复移除，属于 trash，不属于 move_files。
@@ -57,7 +58,7 @@ file_inode：查询单个普通文件的 inode 编号，属于文件元数据查
 - 意图识别阶段只输出操作类型，不输出操作参数。ready 只允许 status、operations 及 named_sources、selection_required、action_explicit 元数据；不得输出 include_hidden、path、recursive、pattern 等操作参数。隐藏文件要求由后续计划生成设置 include_hidden=true。
 - 需要先筛选再复制时，必要操作为 find_files 和 copy_files。
 - count_files 自己完成筛选和计数；统计数量不额外要求 find_files。
-- 只有 find_files 或 count_files 的意图不输出 named_sources、selection_required。目录和通配符是后续计划的筛选参数，不是明确源文件；不得把目录与通配符拼接成 named_sources。
+- 只有 find_files、count_files 或 largest_file 的意图不输出 named_sources、selection_required。目录和通配符是后续计划的筛选参数，不是明确源文件；不得把目录与通配符拼接成 named_sources。
 - 单个文件名已明确时，直接复制、移动、改名或回收，不额外要求 find_files；按时间、类型等条件筛选后修改文件时才需要查找。
 - 普通删除默认可恢复回收。用户说明保留恢复能力时属于 trash，只有明确要求永久删除才不支持。
 - 列出所有必要操作，不重复，最多三个。不得猜测未要求的写操作。
@@ -84,6 +85,7 @@ file_inode：查询单个普通文件的 inode 编号，属于文件元数据查
 统计指定文件的行数或字节数：{"status":"ready","operations":["text_stats"]}
 查看文件开头或结尾的指定行数：{"status":"ready","operations":["read_text"]}
 查询指定普通文件的 inode：{"status":"ready","operations":["file_inode"]}
+查询目录中最大的文件：{"status":"ready","operations":["largest_file"]}
 想知道有多少份文档：{"status":"ready","operations":["count_files"]}
 挑出昨天改过的文档，把副本放在另一个目录：{"status":"ready","operations":["find_files","copy_files"]}
 将原件搬到另一个文件夹：{"status":"ready","operations":["move_files"]}
@@ -134,7 +136,7 @@ def analyze_request(user_input, answers, backend, attempts):
                 if not isinstance(names, list) or any(not isinstance(name, str) or not name.strip() for name in names):
                     raise ValueError("明确源文件必须逐字来自用户原文或补充回答")
                 # 单独筛选操作不绑定源对象，不能把模型拼出的路径传成无需筛选的源文件提示。
-                if operations in (["find_files"], ["count_files"]):
+                if operations in (["find_files"], ["count_files"], ["largest_file"]):
                     if "named_sources" in result or "selection_required" in result:
                         record["resolution"] = "忽略单独筛选操作的源对象元数据；路径和筛选条件仍须根据原始需求规划及校验"
                         result.pop("named_sources", None)
