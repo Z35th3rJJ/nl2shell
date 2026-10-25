@@ -354,7 +354,7 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
                     timeout_seconds=max(.01,timeout_seconds-(time.monotonic()-started)), assume_yes=assume_yes,
                     batch_id=batch_id, batch_index=batch_index, _policy_routed=True, _policy_answers=clarifications)
             if candidate['status'] == 'unsupported':
-                return finish('unsupported', str(candidate['reason']))
+                return finish('unsupported', '黑名单模型拒绝（非程序安全检查结果）：' + str(candidate['reason']))
             if candidate['status'] != 'need_clarification':
                 break
             if mode == BATCH:
@@ -366,6 +366,7 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
             clarifications.append('问题：'+str(candidate['clarification'])+'；用户回答：'+answer)
         else:
             return finish('needs_clarification', '仍有必要条件未明确，任务停止')
+        phase = 'policy_review'
         argv = review_query(candidate['argv'], cwd)
         launcher = sandbox_argv(argv, cwd, excluded=excluded)
         _section(1, '执行预览')
@@ -406,7 +407,8 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
                 'executed':getattr(error,'process_started',False),
                 'execution_state':getattr(error,'process_state','not_started'),
                 'file_change_state':'unchanged','detail':str(error),'items':[]})
-        return finish('interrupted' if isinstance(error, KeyboardInterrupt) else 'blocked', str(error))
+        status = 'plan_failed' if phase == 'planning' else 'execution_failed' if phase == 'execution' else 'blocked'
+        return finish('interrupted' if isinstance(error, KeyboardInterrupt) else status, str(error))
 
 
 def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStore,
