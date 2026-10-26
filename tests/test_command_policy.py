@@ -130,7 +130,7 @@ class CommandPolicyTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == 'linux', '需要 Linux/bwrap')
     def test_readonly_mount_blocks_write_even_without_command_filter(self):
         with tempfile.TemporaryDirectory() as directory:
-            result=subprocess.run(sandbox_argv(['touch','unauthorized.txt'],directory),capture_output=True)
+            result=subprocess.run(sandbox_argv(['sort','-o','unauthorized.txt','/dev/null'],directory),capture_output=True)
             self.assertNotEqual(result.returncode,0)
             self.assertIn(b'Read-only file system',result.stderr)
             self.assertFalse((Path(directory)/'unauthorized.txt').exists())

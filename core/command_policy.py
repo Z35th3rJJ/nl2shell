@@ -68,7 +68,7 @@ def review_query(argv, cwd):
     if argv[0] == 'lsblk':
         argv = _bind_view(argv, ('--sysroot',), SYSTEM_VIEW)
     elif argv[0] == 'findmnt':
-        if any(value == '-N' or value.startswith('--task') for value in argv):
+        if any(value.startswith(('-N','--task')) for value in argv):
             raise ValueError('不切换到其他进程的挂载命名空间')
         argv = _bind_view(argv, ('--tab-file','-F'), SYSTEM_VIEW+'/proc/self/mountinfo')
     return argv
@@ -80,8 +80,10 @@ def generate_candidate(user_input, cwd, clarifications, backend=None):
 可以使用系统工具，不限于白名单已有的操作；仅单条参数数组，不支持管道、Shell、脚本或网络。
 目录大小 du、文件类型 file、校验值 sha256sum、日期 date 都是允许的只读查询，不要因旧操作表没有这些类型而拒绝。
 系统挂载、块设备、CPU、内存等元数据也是允许的低风险查询，不限固定操作表。未指定其他环境时，默认查询当前运行的 Linux/WSL，不因“硬盘”的措辞反复追问；说明可见设备不等于主机物理硬盘。
+区分询问现状和修改状态：“我们挂载了几个硬盘”“现在有哪些挂载点”是在查询现状，应输出 lsblk 或 findmnt 的 ready 参数数组；“挂载一个硬盘”“重新挂载”是在修改状态，必须拒绝。不要把疑问句中的“挂载了”当成执行挂载操作。
 挂载与设备可用 findmnt、lsblk、mount（仅列出信息）。程序会绑定当前 Linux 的只读元数据快照，不需要挂载磁盘或读取 /dev 设备。
 可以使用 /proc、/sys 中的只读系统信息；支持 awk 单行文本过滤及 sed --sandbox。不支持执行脚本、system()、重定向写入或修改系统状态。
+argv 是直接传给程序的参数数组，不能加入 Shell 的包裹引号。例如 awk 过滤用 ["awk","{print $1}","sample.txt"]；sed 前两行用 ["sed","--sandbox","-n","1,2p","sample.txt"]，不要把单引号字符放进过滤表达式。
 例如计算 sample.txt 的 SHA-256 校验值：{"status":"ready","argv":["sha256sum","--","./sample.txt"],"explanation":"计算文件校验值"}。路径必须使用实际用户文件。
 复制、移动、重命名、创建文件或目录、整理、回收和恢复必须输出 {"status":"protected"}，后续由受保护流程解析条件及预览，不生成这些操作的命令。
 真正缺少信息输出 {"status":"need_clarification","clarification":"具体问题"}。
@@ -132,13 +134,16 @@ def sandbox_argv(argv, cwd, *, writable=False, excluded=(), system_root=None):
         raise ValueError('系统程序解析到运行库目录外，未执行')
     if not writable and (binary.name in DENIED or binary.name.startswith(('mkfs','python','pip'))):
         raise ValueError('系统程序别名指向黑名单命令，未执行')
+    if not writable and binary.name != argv[0]:
+        review_query([binary.name,*argv[1:]],cwd)
     command = ['/usr/bin/prlimit', '--as=536870912', '--cpu=20', '--nproc=256', '--nofile=64',
                '--fsize=' + str(1024**3 if writable else 1024**2), '--', '/usr/bin/bwrap',
                '--unshare-all', '--die-with-parent', '--new-session', '--cap-drop', 'ALL', '--clearenv',
                '--ro-bind', '/usr', '/usr', '--ro-bind', '/lib', '/lib']
     if Path('/lib64').exists():
         command += ['--ro-bind', '/lib64', '/lib64']
-    command += ['--symlink','usr/bin','/bin','--proc','/proc','--dev','/dev','--tmpfs','/tmp',
+    proc = ['--proc','/proc'] if system_root is None else ['--ro-bind',str(system_root/'proc'),'/proc']
+    command += ['--symlink','usr/bin','/bin',*proc,'--dev','/dev','--tmpfs','/tmp',
                 '--bind' if writable else '--ro-bind',str(root),'/workspace']
     if not writable:
         command += ['--ro-bind','/sys','/sys','--remount-ro','/proc']

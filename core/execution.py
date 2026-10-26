@@ -132,7 +132,9 @@ class BashExecutor:
         if os.name != 'posix' or type(self) is not BashExecutor:
             raise RuntimeError('黑名单模式仅支持原生 Linux 沙箱，不降级到其他后端')
         argv = review_query(argv, cwd)
-        if argv[0] not in {'lsblk','findmnt','mount'} and not any(SYSTEM_VIEW in value for value in argv):
+        proc_metadata = {'/proc/mounts','/proc/self/mountinfo','/proc/swaps','/proc/partitions'}
+        if (argv[0] not in {'lsblk','findmnt','mount'} and not any(SYSTEM_VIEW in value for value in argv)
+                and not proc_metadata.intersection(argv[1:])):
             actual = sandbox_argv(argv, cwd, excluded=excluded)
             return self._execute_argv(actual, timeout_seconds, cwd), actual
         with system_view() as (view, summary):
