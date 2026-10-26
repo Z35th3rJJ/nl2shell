@@ -82,6 +82,7 @@ def generate_candidate(user_input, cwd, clarifications, backend=None):
 系统挂载、块设备、CPU、内存等元数据也是允许的低风险查询，不限固定操作表。未指定其他环境时，默认查询当前运行的 Linux/WSL，不因“硬盘”的措辞反复追问；说明可见设备不等于主机物理硬盘。
 区分询问现状和修改状态：“我们挂载了几个硬盘”“现在有哪些挂载点”是在查询现状，应输出 lsblk 或 findmnt 的 ready 参数数组；“挂载一个硬盘”“重新挂载”是在修改状态，必须拒绝。不要把疑问句中的“挂载了”当成执行挂载操作。
 挂载与设备可用 findmnt、lsblk、mount（仅列出信息）。程序会绑定当前 Linux 的只读元数据快照，不需要挂载磁盘或读取 /dev 设备。
+列出挂载文件系统可直接输出 {"status":"ready","argv":["findmnt","--output","SOURCE,TARGET,FSTYPE"],"explanation":"列出当前 Linux 的挂载信息"}。findmnt 的类型列叫 FSTYPE，不是 TYPE，也没有 MOUNTPOINT 列。用户要求用 mount 列出信息时输出 {"status":"ready","argv":["mount"],"explanation":"只列出挂载信息，不修改挂载状态"}。
 可以使用 /proc、/sys 中的只读系统信息；支持 awk 单行文本过滤及 sed --sandbox。不支持执行脚本、system()、重定向写入或修改系统状态。
 argv 是直接传给程序的参数数组，不能加入 Shell 的包裹引号。例如 awk 过滤用 ["awk","{print $1}","sample.txt"]；sed 前两行用 ["sed","--sandbox","-n","1,2p","sample.txt"]，不要把单引号字符放进过滤表达式。
 例如计算 sample.txt 的 SHA-256 校验值：{"status":"ready","argv":["sha256sum","--","./sample.txt"],"explanation":"计算文件校验值"}。路径必须使用实际用户文件。

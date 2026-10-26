@@ -282,7 +282,7 @@ def show_outcome(outcome):
     if outcome.get('system_metadata'):
         metadata = outcome['system_metadata']
         print('  系统范围：' + metadata['scope'])
-        print(f"  可见块设备：{metadata['block_device_count']}；有文件系统挂载的块设备：{metadata['mounted_block_device_count']}（按设备编号去重，不含交换设备）")
+        print(f"  内核登记块设备：{metadata['block_device_count']}（含 loop、ram 和分区）；有文件系统挂载的块设备：{metadata['mounted_block_device_count']}（按设备编号去重，不含交换设备）")
         print(f"  文件系统挂载记录：{metadata['mount_record_count']}（含伪文件系统及重复挂载点，不等于硬盘数）")
     if "count" in outcome:
         print(f"  文件数量：{outcome['count']}")
