@@ -56,7 +56,7 @@ def check_result(case, policy, record, before, after, root):
     if case.get('pairs'):
         expected_kind='受控 Linux 写命令' if policy=='blacklist' else '受保护的 Python 工具'
         return expected_kind in record['_terminal'] and (not case.get('answers') or
-                [row['answer'] for row in record.get('clarifications',[])]==case['answers'])
+                [row.split('用户回答：',1)[-1].strip() for row in record.get('clarifications',[])]==case['answers'])
     output=outputs[-1]
     stdout=output.get('stdout','')
     if case['oracle']=='browse':
