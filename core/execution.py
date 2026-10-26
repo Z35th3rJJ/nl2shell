@@ -22,6 +22,7 @@ class ExecutionResult:
     output_truncated: bool = False
     process_state: str = "unknown"
     system_metadata: dict | None = None
+    launcher_argv: list[str] | None = None
 
 
 class ExecutionStartError(OSError):
@@ -106,7 +107,7 @@ class BashExecutor:
             [self.bash_path, "-lc", command], timeout_seconds=timeout_seconds, cwd=cwd,
         )
 
-    def execute_query(self, argv, operation, parameters, cwd, now, excluded_paths=(), *, timeout_seconds=60):
+    def execute_query(self, argv, operation, parameters, cwd, now, excluded_paths=(), *, timeout_seconds=60, sandboxed=False):
         from .bash_queries import prepare_queries
         from .task_plan import TaskPlan, TaskStep
         if os.name != "posix" or type(self) is not BashExecutor:
@@ -122,6 +123,12 @@ class BashExecutor:
         if not binary.is_file():
             raise RuntimeError("系统没有对应的受支持命令")
         actual = [str(binary), *argv[1:]]
+        if sandboxed:
+            from .command_policy import sandbox_argv
+            launcher = sandbox_argv(argv,cwd,excluded=excluded_paths)
+            result = self._execute_argv(launcher,timeout_seconds,cwd)
+            result.launcher_argv = launcher
+            return result,actual
         locale = "C.UTF-8"
         environment = {"PATH": "/usr/bin:/bin", "LC_ALL": locale, "LANG": locale, "POSIXLY_CORRECT": "1"}
         result = self._execute_argv(actual, timeout_seconds, cwd, env=environment)

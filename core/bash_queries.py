@@ -323,10 +323,10 @@ def _verify_output(prepared, action, result):
     return total == info.f_blocks * info.f_frsize and 0 <= used <= total and 0 <= available <= total
 
 
-def execute_query(prepared, action, executor, *, timeout_seconds=60):
+def execute_query(prepared, action, executor, *, timeout_seconds=60, sandboxed=False):
     from .execution import ExecutionStartError
     outcome = {"step": action["step"], "operation": action["operation"], "status": "unverified",
-               "execution_kind": "model_bash_argv", "candidate_argv": action.get("candidate_argv"),
+               "execution_kind": "blacklist_sandbox_query" if sandboxed else "model_bash_argv", "candidate_argv": action.get("candidate_argv"),
                "review": action.get("review"), "items": [], "executed": False, "task_completed": False,
                "execution_state": "not_started", "file_change_state": "unchanged"}
     started = time.monotonic()
@@ -346,7 +346,9 @@ def execute_query(prepared, action, executor, *, timeout_seconds=60):
         outcome["execution_state"] = "unknown"
         result, actual = executor.execute_query(action["candidate_argv"], action["operation"], action["parameters"],
                                                prepared["cwd"], prepared["now"], prepared["excluded"],
-                                               timeout_seconds=timeout_seconds)
+                                               timeout_seconds=timeout_seconds, **({'sandboxed':True} if sandboxed else {}))
+        if getattr(result,'launcher_argv',None) is not None:
+            outcome['launcher_argv'] = result.launcher_argv
         outcome.update(executed=True, actual_argv=actual, exit_code=result.exit_code,
                        stdout=result.stdout, stderr=result.stderr, timed_out=result.timed_out,
                        output_truncated=result.output_truncated, command_succeeded=result.exit_code == 0,

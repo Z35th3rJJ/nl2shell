@@ -36,6 +36,7 @@ from core.bash_queries import uses_bash, prepare_queries, review_commands, query
 from core.error_analysis import assess_failure
 from core.execution_evidence import summarize_execution, execution_description, change_description
 from core.measurements import measure_task, snapshot
+from core.requirements import resolve_request
 
 load_dotenv(ENV_PATH)
 
@@ -234,7 +235,9 @@ def show_preview(prepared, *, show_cwd=True, request=""):
             print(_paint(f"    {action['command']}", CYAN))
             if action["candidate_explanation"] != action["explanation"]:
                 print(_paint(f"  命令解释：{action['candidate_explanation']}", GRAY))
-            print(_paint("  执行方式：模型命令，受审查参数数组", GRAY))
+            print(_paint("  执行方式：程序生成命令，受审查参数数组（只读 Linux 沙箱）"
+                         if action.get('candidate_source') == 'request_rules'
+                         else "  执行方式：模型命令，受审查参数数组", GRAY))
             review = action["review"]
             text = "通过（尚未执行）" if review == "accepted" else "拒绝（未执行）" if review == "rejected" else review
             print(_paint(f"  审查：{text}", GREEN if review == "accepted" else RED if review == "rejected" else YELLOW))
@@ -357,6 +360,13 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
         return answer
     try:
         for _ in range(3):
+            resolved = resolve_request(user_input, clarifications)
+            if resolved is not None and uses_bash(resolved):
+                attempts.append({'phase':'supported_query_routing','source':'original_request',
+                                 'requirements':plan_payload(resolved)})
+                return execute_request(engine, executor, history, user_input, cwd, mode, input_fn,
+                    timeout_seconds=max(.01,timeout_seconds-(time.monotonic()-started)), assume_yes=assume_yes,
+                    batch_id=batch_id, batch_index=batch_index, _policy_routed=True, _policy_answers=clarifications)
             candidate, raw = generate_candidate(user_input, cwd, clarifications, engine._backend)
             attempts.append({'phase':'blacklist_candidate','raw_output':redact_value(raw)})
             if candidate['status'] == 'protected':
@@ -453,6 +463,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     _TASK_SERIAL += 1
     task_number = _TASK_SERIAL
     result_section_printed = False
+    query_contract = None
 
     def show_result_section():
         nonlocal result_section_printed
@@ -472,6 +483,12 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             return ""
 
     def generate_plan(**options):
+        nonlocal query_contract
+        if getattr(engine,'command_policy','whitelist') == 'blacklist':
+            query_contract = resolve_request(user_input,options.get('clarifications',clarifications))
+            if query_contract is not None:
+                plan_attempts.append({'source':'original_request','status':'ready','plan':plan_payload(query_contract)})
+                return query_contract
         try:
             return engine.generate_task_plan(user_input, cwd, **options)
         finally:
@@ -507,8 +524,10 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                     "failure_phase": phase, "detail": str(error)}
         phase = "execution"
         try:
-            result = (execute_query if bash_query else execute_action)(value, action, executor,
-                timeout_seconds=max(0, deadline - time.monotonic()))
+            options = {'timeout_seconds':max(0, deadline - time.monotonic())}
+            if bash_query and getattr(engine,'command_policy','whitelist') == 'blacklist':
+                options['sandboxed'] = True
+            result = (execute_query if bash_query else execute_action)(value, action, executor, **options)
         except (ValueError, OSError, RuntimeError, TypeError, KeyboardInterrupt) as error:
             # 已调用运行器但没有返回结果；没有启动证据时不能声称未执行。
             result = {**base, "status": "interrupted" if isinstance(error, KeyboardInterrupt) else "execution_failed",
@@ -616,6 +635,12 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         if prepared is not None:
             options["now"] = prepared["now"]
         value = (prepare_queries if bash_query else prepare_plan)(plan, cwd, **options)
+        if bash_query and getattr(engine,'command_policy','whitelist') == 'blacklist':
+            from core.command_policy import sandbox_argv
+            for action in value['actions']:
+                sandbox_argv(action['_required_argv'],cwd,excluded=excluded)
+                if query_contract is not None:
+                    action['candidate_source'] = 'request_rules'
         if not bash_query and getattr(engine, 'command_policy', 'whitelist') == 'blacklist':
             from core.command_policy import prepare_native
             prepare_native(value)
@@ -630,9 +655,19 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         prepared = prepare()
         if bash_query:
             command_generation_started = True
-            candidates = engine.generate_bash_commands(user_input, cwd, plan, prepared, clarifications)
+            if query_contract is not None:
+                from core.bash_queries import same_query_plan
+                reference = resolve_request(user_input,clarifications)
+                if reference is None or not same_query_plan(plan,reference):
+                    raise ValueError('计划与原始查询需求不一致，未生成命令')
+                candidates = {'commands':[{'step':action['step'],'argv':action['_required_argv'],
+                    'explanation':'依据完整原始需求与固定参数规则生成'} for action in prepared['actions']]}
+                initial_command_attempts = [{'phase':'request_contract','source':'original_request',
+                                             'reference':plan_payload(reference),'candidates':candidates}]
+            else:
+                candidates = engine.generate_bash_commands(user_input, cwd, plan, prepared, clarifications)
             review_commands(prepared, candidates)
-            if isinstance(getattr(engine, "command_attempts", None), list):
+            if query_contract is None and isinstance(getattr(engine, "command_attempts", None), list):
                 initial_command_attempts = list(engine.command_attempts)
     except KeyboardInterrupt:
         return finish("interrupted", "准备被中断，未进入执行阶段")
@@ -648,6 +683,8 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     show_preview(prepared, show_cwd=False, request=user_input)
     if mode == PREVIEW:
         return finish("preview")
+    if query_contract is not None and (mode == BATCH or assume_yes):
+        return finish('cancelled','黑名单查询必须人工确认；--yes 和批处理不代替授权')
     if isinstance(executor, DockerExecutor) and not prepared["read_only"]:
         return finish("blocked", "固定文件操作在本机执行；Docker 后端不执行本机写入")
     if mode == BATCH and not prepared["read_only"]:
@@ -700,7 +737,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         nonlocal repair_used, phase
         if repair_used and diagnosis is not None and diagnosis["repair_eligible"]:
             print(_paint("本任务的一次修复预算已用完，已停止。", YELLOW))
-        if (repair_used or not bash_query or diagnosis is None or not diagnosis["repair_eligible"]
+        if (query_contract is not None or repair_used or not bash_query or diagnosis is None or not diagnosis["repair_eligible"]
                 or mode == BATCH or time.monotonic() >= deadline):
             return failed
         # 先消耗整项任务的唯一预算；候选被拒绝或用户取消也不能再次申请。

@@ -73,8 +73,9 @@ def _directory_query(user_input, answers, operation):
 def _directory_request(user_input, clarifications):
     # shortcut: 仅接受完整单路径浏览语法及隐藏项问答；扩展表达前须增加无歧义解析测试。
     request = re.fullmatch(
-        r"(?:列出|查看|浏览)[ \t]+(?P<path>" + PATH_TOKEN + r")[ \t]+(?:目录|文件夹)(?:的)?内容"
-        r"(?:[，,][ \t]*(?P<hidden>(?:包括|包含|显示|不包括|不包含|不显示)隐藏(?:文件|项)))?[。]?",
+        r"(?:列出|查看|浏览)[ \t]*(?:(?P<current>当前目录|本目录|这里)(?:这一层|当前层)?(?:的)?(?:内容|文件和文件夹)|"
+        r"(?P<path>" + PATH_TOKEN + r")[ \t]+(?:目录|文件夹)(?:的)?内容)"
+        r"(?:[，,][ \t]*(?P<hidden>(?:包括|包含|显示|列出|不包括|不包含|不显示|不列)隐藏(?:文件|项)))?[。]?",
         user_input.strip())
     if request is None:
         return None
@@ -89,11 +90,27 @@ def _directory_request(user_input, clarifications):
         if hidden is not None and hidden != confirmed:
             return None
         hidden = confirmed
-    path = request["path"]
-    parameters = {"path": path_value(path)}
+    parameters = {"path": '.' if request['current'] else path_value(request['path'])}
     parameters["include_hidden"] = DEFAULT_INCLUDE_HIDDEN if hidden is None else hidden
     raw = json.dumps({"status": "ready", "steps": [{"operation": "list_directory", "parameters": parameters}]})
     return parse_operation_plan(raw)
+
+
+def _file_query(user_input, clarifications):
+    if clarifications:
+        return None
+    inode = re.fullmatch(r"(?:显示|查看|查询)[ \t]*(?P<path>" + PATH_TOKEN +
+                         r")[ \t]*的[ \t]*inode", user_input.strip(), re.I)
+    literal = re.fullmatch(r"在[ \t]*(?P<path>" + PATH_TOKEN +
+                           r")[ \t]*中搜索字面(?:文本|字符串)[ \t]+(?P<pattern>" + PATH_TOKEN + r")", user_input.strip())
+    if inode:
+        operation, parameters = 'file_inode', {'path':path_value(inode['path'])}
+    elif literal:
+        operation, parameters = 'search_text', {'path':path_value(literal['path']),
+                                                'pattern':path_value(literal['pattern'])}
+    else:
+        return None
+    return parse_operation_plan(json.dumps({'status':'ready','steps':[{'operation':operation,'parameters':parameters}]}))
 
 
 
@@ -102,6 +119,9 @@ def resolve_request(user_input, clarifications=()):
     directory = _directory_request(user_input, clarifications)
     if directory is not None:
         return directory
+    file_query = _file_query(user_input, clarifications)
+    if file_query is not None:
+        return file_query
     for operation in ("count_files", "largest_file"):
         plan = _directory_query(user_input, clarifications, operation)
         if plan is not None:
