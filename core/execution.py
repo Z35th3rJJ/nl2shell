@@ -20,6 +20,7 @@ class ExecutionResult:
     timed_out: bool = False
     output_truncated: bool = False
     process_state: str = "unknown"
+    system_metadata: dict | None = None
 
 
 class ExecutionStartError(OSError):
@@ -127,10 +128,18 @@ class BashExecutor:
 
     def execute_policy_query(self, argv, cwd, excluded=(), *, timeout_seconds=60):
         from .command_policy import review_query, sandbox_argv
-        if type(self) is not BashExecutor:
+        from .system_view import system_view, SYSTEM_VIEW
+        if os.name != 'posix' or type(self) is not BashExecutor:
             raise RuntimeError('黑名单模式仅支持原生 Linux 沙箱，不降级到其他后端')
-        actual = sandbox_argv(review_query(argv, cwd), cwd, excluded=excluded)
-        return self._execute_argv(actual, timeout_seconds, cwd), actual
+        argv = review_query(argv, cwd)
+        if argv[0] not in {'lsblk','findmnt','mount'} and not any(SYSTEM_VIEW in value for value in argv):
+            actual = sandbox_argv(argv, cwd, excluded=excluded)
+            return self._execute_argv(actual, timeout_seconds, cwd), actual
+        with system_view() as (view, summary):
+            actual = sandbox_argv(argv, cwd, excluded=excluded, system_root=view)
+            result = self._execute_argv(actual, timeout_seconds, cwd)
+            result.system_metadata = summary
+            return result, actual
 
     def execute_native_item(self, prepared, action, item, *, timeout_seconds=60):
         from .command_policy import native_argv, sandbox_argv

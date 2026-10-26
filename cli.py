@@ -279,6 +279,11 @@ def show_outcome(outcome):
         print(_paint("    " + shlex.join(outcome["actual_argv"]), CYAN))
     for argv in outcome.get('actual_commands', []):
         print('  实际 Linux 命令：' + shlex.join(argv))
+    if outcome.get('system_metadata'):
+        metadata = outcome['system_metadata']
+        print('  系统范围：' + metadata['scope'])
+        print(f"  可见块设备：{metadata['block_device_count']}；有文件系统挂载的块设备：{metadata['mounted_block_device_count']}（按设备编号去重，不含交换设备）")
+        print(f"  文件系统挂载记录：{metadata['mount_record_count']}（含伪文件系统及重复挂载点，不等于硬盘数）")
     if "count" in outcome:
         print(f"  文件数量：{outcome['count']}")
     if outcome.get("largest_files"):
@@ -368,10 +373,13 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
             return finish('needs_clarification', '仍有必要条件未明确，任务停止')
         phase = 'policy_review'
         argv = review_query(candidate['argv'], cwd)
+        if argv != candidate['argv']:
+            attempts[-1]['execution_context_binding'] = {'reason':'绑定当前 Linux 只读系统元数据',
+                'model_argv':candidate['argv'], 'reviewed_argv':argv}
         launcher = sandbox_argv(argv, cwd, excluded=excluded)
         _section(1, '执行预览')
         print('黑名单扩展命令：' + shlex.join(argv))
-        print('运行环境：只读工作区、无网络、无提权的 Linux 沙箱。系统查询反映沙箱视图。')
+        print('运行环境：只读工作区、无网络、无提权的 Linux 沙箱。系统挂载与设备查询绑定当前 Linux/WSL 的只读元数据。')
         print('此扩展命令没有独立的任务结果验证器；退出码 0 不等于任务目标已验证。')
         if mode == PREVIEW:
             return finish('preview')
@@ -398,6 +406,8 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
             'stderr':result.stderr,'timed_out':result.timed_out,'output_truncated':result.output_truncated,
             'task_completed':False,'duration_seconds':result.duration_seconds,'items':[],
             'detail':'命令已退出；扩展命令未进行独立目标验证，不宣称任务成功'})
+        if result.system_metadata is not None:
+            outcome['system_metadata'] = redact_value(result.system_metadata)
         outcomes.append(outcome)
         show_outcome(outcome)
         return finish(outcome['status'], outcome['detail'])

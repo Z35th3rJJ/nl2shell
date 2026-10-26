@@ -8,14 +8,32 @@ import time
 from .bash_queries import _sensitive
 from .llm import chat
 from .operations import workspace_path
+from .system_view import SYSTEM_VIEW
 
 
-DENIED = set('sudo su doas rm rmdir dd shred mkfs mount umount shutdown reboot halt poweroff kill killall '
+DENIED = set('sudo su doas rm rmdir dd shred mkfs umount shutdown reboot halt poweroff kill killall '
              'pkill chmod chown chgrp chroot nsenter unshare bwrap prlimit env xargs parallel '
              'bash sh dash zsh fish python python3 perl ruby node php lua busybox git '
              'curl wget ssh scp rsync nc ncat socat telnet ftp apt apt-get dpkg pip pip3 '
-             'systemctl service crontab at sed awk gawk vim vi ex ed tee truncate '
+             'systemctl service crontab at vim vi ex ed tee truncate '
              'cp mv mkdir touch install ln tar zip unzip'.split())
+
+
+def _bind_view(argv, options, path):
+    values = []
+    for index, value in enumerate(argv[1:], 1):
+        if value in options:
+            if index+1 >= len(argv):
+                raise ValueError('系统查询缺少元数据来源')
+            values.append(argv[index+1])
+        elif any(value.startswith(option+'=') for option in options):
+            values.append(value.split('=',1)[1])
+    if values:
+        if values != [path]:
+            raise ValueError('系统查询只能绑定当前 Linux 的只读元数据，不能切换到其他根目录')
+        return argv
+    index = argv.index('--') if '--' in argv else len(argv)
+    return argv[:index]+[options[0],path]+argv[index:]
 
 
 def review_query(argv, cwd):
@@ -28,13 +46,32 @@ def review_query(argv, cwd):
     if any(v in {'-delete', '-exec', '-execdir', '-ok', '-okdir', '|', '&&', ';', '>', '>>'} or
            v.startswith(('-fprint', '-fprintf', '-fls')) for v in argv[1:]):
         raise ValueError('黑名单拒绝执行、删除或重定向参数')
+    if argv[0] == 'mount' and argv[1:] not in ([], ['-l'], ['--show-labels']):
+        raise ValueError('允许列出挂载信息，不允许挂载、重新挂载或修改挂载状态')
+    if argv[0] == 'sed' and ('--sandbox' not in argv or any(
+            value.startswith(('-i','--in-place')) or value in {'-f','--file'} for value in argv[1:])):
+        raise ValueError('sed 过滤需使用 --sandbox，不能修改文件或加载外部脚本')
+    if argv[0] in {'awk','gawk','mawk'} and any(
+            value.startswith(('-f','--file','--include','--load','-l','-W')) or re.search(r'\bsystem\s*\(|[|>]',value)
+            for value in argv[1:]):
+        raise ValueError('允许 awk 文本过滤，不允许程序执行、外部脚本或文件重定向')
     for argument in argv[1:]:
         value = argument.split('=', 1)[-1]
-        if value.startswith(('/', '~')) or '..' in Path(value).parts:
+        virtual_system = value.startswith('/') and any(
+            value == prefix or value.startswith(prefix+'/') for prefix in ('/proc','/sys',SYSTEM_VIEW))
+        mount_selector = value == '/' and argv[0] == 'findmnt'
+        if '..' in Path(value).parts or (value.startswith(('/', '~')) and not virtual_system and not mount_selector):
             raise ValueError('黑名单模式的命令路径必须位于工作目录内，使用相对路径')
     if not Path(cwd).is_dir():
         raise ValueError('工作目录不存在')
-    return list(argv)
+    argv = list(argv)
+    if argv[0] == 'lsblk':
+        argv = _bind_view(argv, ('--sysroot',), SYSTEM_VIEW)
+    elif argv[0] == 'findmnt':
+        if any(value == '-N' or value.startswith('--task') for value in argv):
+            raise ValueError('不切换到其他进程的挂载命名空间')
+        argv = _bind_view(argv, ('--tab-file','-F'), SYSTEM_VIEW+'/proc/self/mountinfo')
+    return argv
 
 
 def generate_candidate(user_input, cwd, clarifications, backend=None):
@@ -42,11 +79,14 @@ def generate_candidate(user_input, cwd, clarifications, backend=None):
 明确只读查询输出 {"status":"ready","argv":["date","-u","+%Y"],"explanation":"说明"}。
 可以使用系统工具，不限于白名单已有的操作；仅单条参数数组，不支持管道、Shell、脚本或网络。
 目录大小 du、文件类型 file、校验值 sha256sum、日期 date 都是允许的只读查询，不要因旧操作表没有这些类型而拒绝。
+系统挂载、块设备、CPU、内存等元数据也是允许的低风险查询，不限固定操作表。未指定其他环境时，默认查询当前运行的 Linux/WSL，不因“硬盘”的措辞反复追问；说明可见设备不等于主机物理硬盘。
+挂载与设备可用 findmnt、lsblk、mount（仅列出信息）。程序会绑定当前 Linux 的只读元数据快照，不需要挂载磁盘或读取 /dev 设备。
+可以使用 /proc、/sys 中的只读系统信息；支持 awk 单行文本过滤及 sed --sandbox。不支持执行脚本、system()、重定向写入或修改系统状态。
 例如计算 sample.txt 的 SHA-256 校验值：{"status":"ready","argv":["sha256sum","--","./sample.txt"],"explanation":"计算文件校验值"}。路径必须使用实际用户文件。
 复制、移动、重命名、创建文件或目录、整理、回收和恢复必须输出 {"status":"protected"}，后续由受保护流程解析条件及预览，不生成这些操作的命令。
 真正缺少信息输出 {"status":"need_clarification","clarification":"具体问题"}。
 危险或不支持的写入、删除、提权、安装及网络输出 {"status":"unsupported","reason":"具体原因"}。
-路径使用工作区内相对路径。命令在只读、无网络的隔离 Linux 环境中运行；系统信息反映沙箱视图，不推断物理硬盘数量。'''
+业务文件使用工作区内相对路径。命令仍在只读、无网络的隔离 Linux 环境中运行；lsblk/findmnt 的输入由程序绑定到当前 Linux 元数据，不推断主机物理硬盘数量。'''
     raw = chat([{'role': 'system', 'content': system}, {'role': 'user', 'content': json.dumps(
         {'request': user_input, 'cwd': cwd, 'clarifications': clarifications}, ensure_ascii=False)}],
         backend=backend, json_mode=True)
@@ -60,7 +100,7 @@ def generate_candidate(user_input, cwd, clarifications, backend=None):
     return value, raw
 
 
-def sandbox_argv(argv, cwd, *, writable=False, excluded=()):
+def sandbox_argv(argv, cwd, *, writable=False, excluded=(), system_root=None):
     if os.name != 'posix' or any(not Path(v).is_file() for v in ('/usr/bin/bwrap','/usr/bin/prlimit')):
         raise RuntimeError('黑名单模式需要 Linux 的 bwrap 和 prlimit；不会降级到主机执行')
     root = Path(cwd).resolve(strict=True)
@@ -87,6 +127,11 @@ def sandbox_argv(argv, cwd, *, writable=False, excluded=()):
         binary = Path('/bin') / argv[0]
     if not binary.is_file():
         raise RuntimeError('系统未安装对应命令')
+    binary = binary.resolve(strict=True)
+    if not binary.is_relative_to(Path('/usr')):
+        raise ValueError('系统程序解析到运行库目录外，未执行')
+    if not writable and (binary.name in DENIED or binary.name.startswith(('mkfs','python','pip'))):
+        raise ValueError('系统程序别名指向黑名单命令，未执行')
     command = ['/usr/bin/prlimit', '--as=536870912', '--cpu=20', '--nproc=256', '--nofile=64',
                '--fsize=' + str(1024**3 if writable else 1024**2), '--', '/usr/bin/bwrap',
                '--unshare-all', '--die-with-parent', '--new-session', '--cap-drop', 'ALL', '--clearenv',
@@ -95,6 +140,11 @@ def sandbox_argv(argv, cwd, *, writable=False, excluded=()):
         command += ['--ro-bind', '/lib64', '/lib64']
     command += ['--symlink','usr/bin','/bin','--proc','/proc','--dev','/dev','--tmpfs','/tmp',
                 '--bind' if writable else '--ro-bind',str(root),'/workspace']
+    if not writable:
+        command += ['--ro-bind','/sys','/sys','--remount-ro','/proc']
+    if system_root is not None:
+        command += ['--ro-bind',str(system_root),SYSTEM_VIEW,'--ro-bind','/sys',SYSTEM_VIEW+'/sys',
+                    '--ro-bind',str(system_root/'proc/mounts'),'/etc/mtab']
     for path, directory in masks:
         target = '/workspace/' + path.relative_to(root).as_posix()
         command += ['--tmpfs',target] if directory else ['--ro-bind','/dev/null',target]
