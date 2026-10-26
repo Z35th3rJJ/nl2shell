@@ -265,6 +265,16 @@ python eval/run_eval.py --backend local --limit 3
 
 [tests/](tests/) 包含程序回归；[eval/operation_cases.py](eval/operation_cases.py) 定义自然语言任务与期望结果。自动化测试、响应回放和真实模型验收应分别统计，不能互相替代。
 
+普通 CLI 历史新增 `measurements`：分别记录模型 SDK 调用耗时、实际 Linux 进程耗时、等待输入时间和记录时的任务总耗时。`active_seconds` 排除等待输入时间。SDK 内部的 HTTP 自动重试不单独计数；`model_call_count` 不是 HTTP 请求数。Python 文件操作没有 Linux 命令耗时，不能将其写成 `cp` 的执行时间。运行信息只保存版本、CPU、内存、Python 和系统信息，不保存完整环境变量。
+
+白名单与黑名单使用同一固定任务集进行真实 CLI 对比：
+
+```bash
+python eval/policy_compare.py --repeats 3
+```
+
+此命令需要 Linux、Ollama 和黑名单沙箱依赖。它创建独立合成目录，核对预览后才确认测试写入；不处理用户文件。结果保存在仓库外的 `~/nl2shell-evaluations/policies/`，每轮保留终端输出、历史、文件摘要、JSON 和 CSV。预期拒绝单独计入行为符合数，不能当作执行成功。扩展查询的程序状态仍为“未独立验证”，评测的外部核对结果另行记录。可用 `--cases P07 P10` 选择子集，报告保留实际任务数。
+
 若要在评测工具创建的临时夹具中**真实执行**匹配期望的操作，可增加 `--execute-safe`。它包含文件写入，结果默认保存在仓库外的 `~/nl2shell-evaluations/legacy`。
 
 真人 CLI 验收应保留版本、模型、输入、澄清、预览、确认、实际命令及输出；写入后另行检查真实文件内容。记录模型耗时与命令耗时，区分完成、拒绝、取消和未验证结果，不把未运行项目计为通过。

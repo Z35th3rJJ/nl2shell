@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 from uuid import uuid4
+from .measurements import measure_command
 
 
 @dataclass
@@ -155,6 +156,7 @@ class BashExecutor:
         actual = sandbox_argv(argv, prepared['cwd'], writable=True, excluded=prepared['excluded'])
         return self._execute_argv(actual, timeout_seconds, prepared['cwd']), actual
 
+    @measure_command
     def _execute_argv(self, argv: list[str], timeout_seconds: float | None,
                       cwd: str | None = None, *, env=None) -> ExecutionResult:
 

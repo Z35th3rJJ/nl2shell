@@ -8,6 +8,7 @@ from .bash_queries import prepare_queries
 from .engine import _AGENT_SYSTEM, _missing_conditions, _normalize_paths, _task_plan_errors
 from .execution_evidence import summarize_execution, execution_description, change_description
 from .llm import request_deadline
+from .measurements import measure_task
 from .operations import snapshot, workspace_path
 from .redaction import redact_value
 from .task_plan import TaskPlan, parse_operation_plan, plan_payload
@@ -190,6 +191,7 @@ def verify_final(prepared_steps, deadline):
                     raise TimeoutError("最终验证超过总时限")
 
 
+@measure_task
 def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=input,
                   timeout_seconds=60, assume_yes=False):
     from cli import execute_request, save_history, BATCH

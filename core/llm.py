@@ -4,6 +4,7 @@ from contextvars import ContextVar
 import httpx
 from openai import APIConnectionError, APITimeoutError, OpenAI, OpenAIError
 from .redaction import redact_messages, redact_text
+from .measurements import measured
 
 # 按后端缓存客户端，支持同进程内切换（对比实验用）
 _clients: dict[str, tuple[OpenAI, str]] = {}
@@ -72,10 +73,11 @@ def chat(messages: list[dict], backend: str | None = None, *, json_mode: bool = 
             if remaining is not None and remaining <= 0:
                 raise TimeoutError("任务总时限已用完")
             bounded = client if remaining is None else client.with_options(timeout=remaining, max_retries=0)
-            response = bounded.chat.completions.create(
-                model=model, messages=safe_messages, temperature=0,
-                **({"response_format": {"type": "json_object"}} if json_mode else {}),
-            )
+            with measured('model', backend=backend or os.environ.get('LLM_BACKEND','local'), model=model):
+                response = bounded.chat.completions.create(
+                    model=model, messages=safe_messages, temperature=0,
+                    **({"response_format": {"type": "json_object"}} if json_mode else {}),
+                )
             if not response.choices:
                 raise RuntimeError("模型返回了空响应，请重试")
             content = response.choices[0].message.content

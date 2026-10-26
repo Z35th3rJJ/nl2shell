@@ -35,6 +35,7 @@ from core.operations import prepare_plan, preview_details, preparation_changed, 
 from core.bash_queries import uses_bash, prepare_queries, review_commands, query_preview, execute_query
 from core.error_analysis import assess_failure
 from core.execution_evidence import summarize_execution, execution_description, change_description
+from core.measurements import measure_task, snapshot
 
 load_dotenv(ENV_PATH)
 
@@ -109,6 +110,9 @@ def print_history(store: HistoryStore, limit: int = 20, *, status: str | None = 
 
 def save_history(store: HistoryStore, *, user_input: str, cwd: str, command: str,
                  risk: str, status: str, executed: bool, **details) -> None:
+    measurements = snapshot()
+    if measurements is not None:
+        details['measurements'] = measurements
     store.last_record = redact_value({"input": user_input, "cwd": cwd, "command": command, "risk": risk,
                                      "status": status, "executed": executed, **details})
     store.append(store.last_record)
@@ -181,7 +185,7 @@ def print_help() -> None:
     )
 
 
-def print_status(mode: str, executor: BashExecutor) -> None:
+def print_status(mode: str, executor: BashExecutor, policy='whitelist') -> None:
     configuration = model_configuration()
     backend, model = configuration["backend"], configuration["model"]
     print(
@@ -189,7 +193,8 @@ def print_status(mode: str, executor: BashExecutor) -> None:
         f"  模型：{backend} / {model}\n"
         f"  工作目录：{os.getcwd()}\n"
         f"  运行方式：{mode_name(mode)} - {mode_description(mode)}\n"
-        f"  文件操作：Python 固定操作\n"
+        f"  文件操作：{'受控 Linux 命令；部分操作使用 Python 工具' if policy == 'blacklist' else '受保护的 Python 工具'}\n"
+        f"  命令策略：{policy}\n"
         f"  系统查询后端：{'Docker 沙箱' if isinstance(executor, DockerExecutor) else '本机 Bash'}"
         f"（{'可用' if executor.is_available() else '不可用'}）"
     )
@@ -421,6 +426,7 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
         return finish('interrupted' if isinstance(error, KeyboardInterrupt) else status, str(error))
 
 
+@measure_task
 def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStore,
                     user_input: str, cwd: str, mode: str, input_fn=input,
                     timeout_seconds: float = 60, batch_id: str = "",
@@ -980,7 +986,7 @@ def main(input_session=None, args=None) -> None:
             print_help()
             continue
         if user_input == "/status":
-            print_status(mode, executor)
+            print_status(mode, executor, engine.command_policy)
             continue
         if user_input == "/doctor":
             print_diagnostics(executor)
