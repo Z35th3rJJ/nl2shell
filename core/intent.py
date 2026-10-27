@@ -4,7 +4,7 @@ import re
 
 from .llm import chat
 from .redaction import redact_value
-from .requirements import resolve_request, explicit_transfer_operation
+from .requirements import resolve_request, explicit_transfer_operation, _COPY_DESTINATION_PATTERN
 from .task_plan import OPERATIONS
 
 REJECTION_REASONS = {
@@ -144,6 +144,17 @@ def analyze_request(user_input, answers, backend, attempts):
                         names = []
                 # 问题用于解释回答，但问题中的示例路径不是用户授权的源文件。
                 text = "\n".join([user_input, *(answer.split("用户回答：", 1)[-1].strip() for answer in answers)])
+                if names and set(operations) == {"find_files", "copy_files"}:
+                    targets = [match.span("path") for match in _COPY_DESTINATION_PATTERN.finditer(text)]
+                    def target_only(name):
+                        occurrences = list(re.finditer(re.escape(name), text))
+                        return bool(occurrences) and all(any(start <= match.start() and match.end() <= end
+                            for start, end in targets) for match in occurrences)
+                    if all(name == "." or target_only(name) for name in names):
+                        result.pop("named_sources", None)
+                        result.pop("selection_required", None)
+                        names = []
+                        record["resolution"] = "源对象元数据仅指向当前范围或目标，保留筛选操作"
                 if any(name not in text for name in names):
                     raise ValueError("明确源文件必须逐字来自用户原文或补充回答")
                 if names and result.get("selection_required") is False and set(operations) == {"find_files", "copy_files"}:

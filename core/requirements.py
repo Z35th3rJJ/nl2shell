@@ -8,6 +8,8 @@ from .task_plan import parse_operation_plan
 DEFAULT_INCLUDE_HIDDEN = False
 UNSPECIFIED_DESTINATIONS = {"合适的目录", "合适的文件夹", "合适的地方", "某个目录", "某个文件夹", "目标目录"}
 PATH_TOKEN = r'''(?:"[^"\r\n]+"|'[^'\r\n]+'|“[^”\r\n]+”|‘[^’\r\n]+’|[^\s，。；,;"'“”‘’]+)'''
+_TARGET_MARKER = r"(?:到|进|入|至|放在|存放在|保存在|目标目录(?:为|是|[:：]))"
+_COPY_DESTINATION_PATTERN = re.compile(_TARGET_MARKER + r"\s*(?:名为\s*)?(?P<path>" + PATH_TOKEN + ")")
 
 
 def path_value(token):

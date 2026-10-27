@@ -6,7 +6,7 @@ from .llm import chat
 from .ssh_config import load_ssh_hosts
 from .task_plan import TaskPlan, TaskStep, READ_OPERATIONS, parse_operation_plan, plan_payload, validate_parameters
 from .intent import analyze_request, DIRECTORY_RULES
-from .requirements import resolve_request, count_request_recursive, DEFAULT_INCLUDE_HIDDEN, UNSPECIFIED_DESTINATIONS, PATH_TOKEN, path_value, transfer_expression
+from .requirements import resolve_request, count_request_recursive, DEFAULT_INCLUDE_HIDDEN, UNSPECIFIED_DESTINATIONS, PATH_TOKEN, path_value, transfer_expression, _TARGET_MARKER, _COPY_DESTINATION_PATTERN
 from .redaction import redact_value
 from .operations import workspace_path
 
@@ -15,7 +15,6 @@ CANNOT_GENERATE_PREFIX = "CANNOT_GENERATE:"
 CLARIFY_PREFIX         = "CLARIFY:"
 MODEL_REJECTION_REASON = "意图模型未能将请求识别为受支持的操作；任务未执行。"
 _AMBIGUOUS_DELETION = re.compile(r"^(?:请)?(?:帮我)?(?:删除|清理|移除)(?:一下)?[。！!\s]*$")
-_TARGET_MARKER = r"(?:到|进|入|至|放在|存放在|保存在|目标目录(?:为|是|[:：]))"
 _UNSUPPORTED_CONTENT_SEARCH = re.compile(
     r"(?:请)?(?:"
     r"递归(?:搜索|查找)[^，。；;\n]*?文件(?:的)?(?:内容|中(?:的)?)"
@@ -102,7 +101,6 @@ def _explicit_days(text: str) -> set[float]:
     return days
 
 
-_COPY_DESTINATION_PATTERN = re.compile(_TARGET_MARKER + r"\s*(?:名为\s*)?(?P<path>" + PATH_TOKEN + ")")
 _DIRECTORY_QUESTION = re.compile(
     r"(请问|请明确|请指定)?(?:(?:复制或移动|复制|移动)到(?:哪个目录|哪里)|目标目录(?:是|为|是什么|在哪里)?)[？?]?")
 _ALTERNATE_TARGET_PATTERN = re.compile(r"\s*(?:或|或者)\s*" + PATH_TOKEN)
@@ -460,6 +458,17 @@ def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str, required, clari
         if not same_query_plan(plan, _normalize_paths(expected, cwd)):
             errors.append("计划与原始需求及统一默认规则不一致")
     operations = {step.operation for step in plan.steps}
+    days = _explicit_days("\n".join([user_input, *(answer.split("用户回答：", 1)[-1] for answer in clarifications)]))
+    if days:
+        for step in plan.steps:
+            if step.operation not in {"copy_files", "move_files"}:
+                continue
+            source = step.parameters.get("source_step")
+            if (type(source) is not int or not 1 <= source <= len(plan.steps)
+                    or plan.steps[source - 1].operation != "find_files"
+                    or plan.steps[source - 1].parameters.get("modified_within_days") not in days):
+                errors.append("模型计划未保留时间筛选条件与文件操作的关联")
+                break
     for operation in sorted(set(required) - operations):
         errors.append(f"用户要求的操作未出现在计划中：{operation}")
     if required:
