@@ -1,4 +1,6 @@
 """可选的本地语音输入；识别结果需要用户确认。"""
+import ctypes
+import importlib.metadata
 import signal
 import shutil
 import subprocess
@@ -9,6 +11,28 @@ from pathlib import Path
 
 class VoiceInputError(Exception):
     pass
+
+
+def _prepare_cuda():
+    import ctranslate2
+
+    try:
+        if ctranslate2.get_cuda_device_count() < 1:
+            raise VoiceInputError("未检测到 NVIDIA GPU，请检查 WSL 的 CUDA 环境。")
+        for package, names in (
+            ("nvidia-cublas-cu12", ("libcublasLt.so.12", "libcublas.so.12")),
+            ("nvidia-cudnn-cu12", ("libcudnn.so.9",)),
+        ):
+            try:
+                dist = importlib.metadata.distribution(package)
+            except importlib.metadata.PackageNotFoundError:
+                dist = None
+            for name in names:
+                files = [file for file in (dist.files or ()) if file.name == name] if dist else []
+                path = str(dist.locate_file(files[0])) if files else name
+                ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+    except (OSError, RuntimeError) as error:
+        raise VoiceInputError("GPU 运行库不可用，请按 README 安装语音 GPU 依赖。") from error
 
 
 def confirm_transcript(text, prompt):
@@ -32,6 +56,7 @@ def record_and_transcribe(prompt=input):
         from opencc import OpenCC
     except ImportError as error:
         raise VoiceInputError("未安装语音依赖，请按 README 安装 voice 可选依赖。") from error
+    _prepare_cuda()
 
     with tempfile.TemporaryDirectory(prefix="nl2shell-voice-") as directory:
         audio = Path(directory) / "input.wav"
@@ -79,9 +104,9 @@ def record_and_transcribe(prompt=input):
         except (OSError, wave.Error, EOFError) as error:
             raise VoiceInputError("录音文件无效，请改用文字输入。") from error
         model_name = "medium"
-        print(f"正在识别语音（模型：faster-whisper {model_name}，CPU）；首次使用可能需要下载模型。")
+        print(f"正在识别语音（模型：faster-whisper {model_name}，NVIDIA GPU）；首次使用可能需要下载模型。")
         try:
-            model = WhisperModel(model_name, device="cpu", compute_type="int8")
+            model = WhisperModel(model_name, device="cuda", compute_type="int8_float16")
             pcm = np.frombuffer(samples, dtype="<i2").astype(np.float32) / 32768.0
             segments, _ = model.transcribe(pcm, language="zh", beam_size=1, vad_filter=True)
             text = "".join(segment.text for segment in segments).strip()

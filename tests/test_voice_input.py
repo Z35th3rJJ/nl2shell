@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from core.voice_input import VoiceInputError, confirm_transcript, record_and_transcribe
+from core.voice_input import VoiceInputError, _prepare_cuda, confirm_transcript, record_and_transcribe
 
 try:
     import numpy
@@ -15,6 +15,19 @@ except ImportError:
 
 
 class VoiceInputTests(unittest.TestCase):
+    def test_missing_gpu_is_reported(self):
+        module = SimpleNamespace(get_cuda_device_count=lambda: 0)
+        with patch.dict(sys.modules, {"ctranslate2": module}):
+            with self.assertRaisesRegex(VoiceInputError, "未检测到 NVIDIA GPU"):
+                _prepare_cuda()
+
+    def test_missing_gpu_runtime_is_reported(self):
+        module = SimpleNamespace(get_cuda_device_count=lambda: 1)
+        with patch.dict(sys.modules, {"ctranslate2": module}), \
+             patch("core.voice_input.ctypes.CDLL", side_effect=OSError("not found")):
+            with self.assertRaisesRegex(VoiceInputError, "GPU 运行库不可用"):
+                _prepare_cuda()
+
     def test_confirm_edit_and_cancel(self):
         for answer, expected in (("yes", "复制 source.txt"), ("改成查看文件", "改成查看文件"), ("臺灣.txt", "臺灣.txt"), ("/cancel", None), ("", None)):
             with self.subTest(answer=answer):
@@ -75,12 +88,13 @@ class VoiceInputTests(unittest.TestCase):
             return process
 
         with patch.dict(sys.modules, {"faster_whisper": module}), \
+             patch("core.voice_input._prepare_cuda"), \
              patch("core.voice_input.subprocess.Popen", side_effect=start), patch("builtins.print") as output:
             self.assertEqual(record_and_transcribe(lambda _: ""), "列出当前目录 sample.txt ERROR.*")
         output.assert_any_call("识别原文：列出當前目錄 sample.txt ERROR.*")
-        output.assert_any_call("正在识别语音（模型：faster-whisper medium，CPU）；首次使用可能需要下载模型。")
+        output.assert_any_call("正在识别语音（模型：faster-whisper medium，NVIDIA GPU）；首次使用可能需要下载模型。")
         self.assertFalse(audio[0].exists())
-        module.WhisperModel.assert_called_once_with("medium", device="cpu", compute_type="int8")
+        module.WhisperModel.assert_called_once_with("medium", device="cuda", compute_type="int8_float16")
         process.send_signal.assert_called_once()
         pcm = model.transcribe.call_args.args[0]
         self.assertEqual(str(pcm.dtype), "float32")
@@ -93,6 +107,7 @@ class VoiceInputTests(unittest.TestCase):
         process = Mock(returncode=1)
         process.poll.return_value = 1
         with patch.dict(sys.modules, {"faster_whisper": module}), \
+             patch("core.voice_input._prepare_cuda"), \
              patch("core.voice_input.subprocess.Popen", return_value=process), patch("builtins.print"):
             with self.assertRaises(VoiceInputError):
                 record_and_transcribe(lambda _: "")
@@ -111,6 +126,7 @@ class VoiceInputTests(unittest.TestCase):
             return process
 
         with patch.dict(sys.modules, {"faster_whisper": module}), \
+             patch("core.voice_input._prepare_cuda"), \
              patch("core.voice_input.subprocess.Popen", side_effect=start), patch("builtins.print"):
             with self.assertRaisesRegex(VoiceInputError, "没有声音"):
                 record_and_transcribe(lambda _: "")
@@ -122,6 +138,7 @@ class VoiceInputTests(unittest.TestCase):
         process = Mock(returncode=0)
         process.poll.side_effect = [None, 0]
         with patch.dict(sys.modules, {"faster_whisper": module}), \
+             patch("core.voice_input._prepare_cuda"), \
              patch("core.voice_input.subprocess.Popen", return_value=process), patch("builtins.print"):
             self.assertIsNone(record_and_transcribe(lambda _: "/cancel"))
         process.send_signal.assert_called_once()
