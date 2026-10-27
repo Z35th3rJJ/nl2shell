@@ -402,7 +402,17 @@ def execute_action(prepared: dict, action: dict, executor=None, *, timeout_secon
                 with record_path.open("x", encoding="utf-8") as file:
                     json.dump(record, file, ensure_ascii=False)
             else:
-                destination.parent.mkdir(parents=True, exist_ok=True)
+                if parent_missing and item.get('native_argv'):
+                    result, launcher = executor.execute_native_parent(prepared,action,item,
+                        timeout_seconds=max(0.01,deadline-time.monotonic()))
+                    progress['parent_launcher_argv'] = launcher
+                    outcome.setdefault('actual_commands', []).append(item['parent_argv'])
+                    if result.timed_out or result.exit_code != 0 or result.stderr or result.output_truncated:
+                        raise RuntimeError('原生父目录命令失败、超时或输出不完整：'+result.stderr)
+                    if not destination.parent.is_dir():
+                        raise RuntimeError('原生父目录命令未创建目录')
+                elif not item.get('native_argv'):
+                    destination.parent.mkdir(parents=True, exist_ok=True)
                 if parent_missing:
                     outcome["file_change_state"] = "changed"
                     progress["file_change_state"] = "changed"

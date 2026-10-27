@@ -152,16 +152,31 @@ class BashExecutor:
             return result, actual
 
     def execute_native_item(self, prepared, action, item, *, timeout_seconds=60):
-        from .command_policy import native_argv, sandbox_argv
+        from .command_policy import native_argv, native_internal_entry, sandbox_argv
         from .operations import workspace_path
         argv = native_argv(action['operation'], item)
         if type(self) is not BashExecutor or argv is None or item.get('native_argv') != argv:
             raise ValueError('原生写入参数未通过保护流程')
-        destination = workspace_path(Path(prepared['cwd']), item['destination'])
+        entry = native_internal_entry(action['operation'],item)
+        destination = workspace_path(Path(prepared['cwd']), item['destination'],internal=action['operation']=='trash')
         if destination.exists() or destination.is_symlink():
             raise FileExistsError('原生写入目标已存在，未执行命令')
-        actual = sandbox_argv(argv, prepared['cwd'], writable=True, excluded=prepared['excluded'])
+        actual = sandbox_argv(argv, prepared['cwd'], writable=True, excluded=prepared['excluded'],internal_entry=entry)
         return self._execute_argv(actual, timeout_seconds, prepared['cwd']), actual
+
+    def execute_native_parent(self, prepared, action, item, *, timeout_seconds=60):
+        from .command_policy import native_argv, native_parent_argv, native_internal_entry, sandbox_argv
+        from .operations import workspace_path
+        if (type(self) is not BashExecutor or action['operation']=='trash'
+                or item.get('native_argv') != native_argv(action['operation'],item)
+                or item.get('parent_argv') != native_parent_argv(item) or not item.get('parent_argv')):
+            raise ValueError('父目录命令未通过保护流程')
+        native_internal_entry(action['operation'],item)
+        destination = workspace_path(Path(prepared['cwd']),item['destination'])
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError('原生写入目标已存在，未创建父目录')
+        actual = sandbox_argv(item['parent_argv'],prepared['cwd'],writable=True,excluded=prepared['excluded'])
+        return self._execute_argv(actual,timeout_seconds,prepared['cwd']),actual
 
     @measure_command
     def _execute_argv(self, argv: list[str], timeout_seconds: float | None,

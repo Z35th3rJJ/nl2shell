@@ -244,6 +244,8 @@ def show_preview(prepared, *, show_cwd=True, request=""):
         elif action.get('execution_kind') == 'blacklist_native':
             print(_paint('  执行方式：受控 Linux 写命令（黑名单模式）', GRAY))
             for item in action['items']:
+                if item.get('parent_argv'):
+                    print('    父目录不存在时：' + shlex.join(item['parent_argv']))
                 if item.get('native_argv'):
                     print('    ' + shlex.join(item['native_argv']))
         else:
@@ -458,6 +460,10 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                     batch_index: int | None = None, assume_yes: bool = False,
                     agent_context: dict | None = None, _policy_routed=False, _policy_answers=()) -> str:
     if getattr(engine, 'command_policy', 'whitelist') == 'blacklist' and not _policy_routed:
+        if user_input == '/trash' or user_input.startswith('/restore '):
+            return execute_request(engine,executor,history,user_input,cwd,mode,input_fn,
+                timeout_seconds=timeout_seconds,batch_id=batch_id,batch_index=batch_index,
+                assume_yes=assume_yes,agent_context=agent_context,_policy_routed=True)
         return execute_blacklist_request(engine, executor, history, user_input, cwd, mode, input_fn,
             timeout_seconds=timeout_seconds, assume_yes=assume_yes, batch_id=batch_id, batch_index=batch_index)
     plan = TaskPlan(())
@@ -658,6 +664,15 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                     action['candidate_source'] = 'request_rules'
         if not bash_query and getattr(engine, 'command_policy', 'whitelist') == 'blacklist':
             from core.command_policy import prepare_native
+            if prepared is not None:
+                previous = {(action['step'],item['source']):item for action in prepared['actions']
+                            if action['operation']=='trash' for item in action['items']}
+                for action in value['actions']:
+                    if action['operation']=='trash':
+                        for item in action['items']:
+                            old = previous.get((action['step'],item['source']))
+                            if old and not workspace_path(Path(cwd),old['destination'],internal=True).parent.exists():
+                                item.update(trash_id=old['trash_id'],destination=old['destination'])
             prepare_native(value)
         if bash_query and candidates is not None:
             review_commands(value, candidates)

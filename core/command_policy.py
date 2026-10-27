@@ -7,7 +7,7 @@ import time
 
 from .bash_queries import _sensitive
 from .llm import chat
-from .operations import workspace_path
+from .operations import TRASH, workspace_path
 from .system_view import SYSTEM_VIEW
 
 
@@ -103,7 +103,7 @@ argv 是直接传给程序的参数数组，不能加入 Shell 的包裹引号�
     return value, raw
 
 
-def sandbox_argv(argv, cwd, *, writable=False, excluded=(), system_root=None):
+def sandbox_argv(argv, cwd, *, writable=False, excluded=(), system_root=None, internal_entry=None):
     if os.name != 'posix' or any(not Path(v).is_file() for v in ('/usr/bin/bwrap','/usr/bin/prlimit')):
         raise RuntimeError('黑名单模式需要 Linux 的 bwrap 和 prlimit；不会降级到主机执行')
     root = Path(cwd).resolve(strict=True)
@@ -154,20 +154,49 @@ def sandbox_argv(argv, cwd, *, writable=False, excluded=(), system_root=None):
     for path, directory in masks:
         target = '/workspace/' + path.relative_to(root).as_posix()
         command += ['--tmpfs',target] if directory else ['--ro-bind','/dev/null',target]
+    if internal_entry is not None:
+        if not writable or not re.fullmatch(r'[0-9a-f]{32}', internal_entry):
+            raise ValueError('回收区绑定无效')
+        entry = workspace_path(root, f'{TRASH}/{internal_entry}', internal=True)
+        if any(value == entry or value in entry.parents or entry in value.parents for value in excluded):
+            raise ValueError('回收区与审计路径重叠，未执行')
+        if entry.exists():
+            if not entry.is_dir():
+                raise ValueError('回收记录目录无效')
+            target = f'/workspace/{TRASH}/{internal_entry}'
+            command += ['--dir',target,'--bind',str(entry),target]
     return command + ['--chdir','/workspace','--setenv','PATH','/usr/bin:/bin','--setenv','HOME','/tmp',
                       '--setenv','LANG','C.UTF-8','--setenv','LC_ALL','C.UTF-8','--',str(binary),*argv[1:]]
 
 
 def native_argv(operation, item):
     destination = './' + item['destination']
+    if operation == 'create_file':
+        return ['dd','if=/dev/null','of='+destination,'conv=excl','status=none']
     if operation == 'create_directory':
         return ['mkdir','--',destination]
     if operation == 'copy_files':
         return ['cp','--update=none','--no-target-directory','--recursive','--no-dereference',
                 '--','./' + item['source'],destination]
-    if operation in {'move_files','rename'}:
+    if operation in {'move_files','rename','organize_files','trash','restore'}:
         return ['mv','--update=none','--no-copy','--no-target-directory','--','./' + item['source'],destination]
     return None
+
+
+def native_parent_argv(item):
+    parent = Path(item['destination']).parent.as_posix()
+    return None if parent == '.' else ['mkdir','--parents','--','./'+parent]
+
+
+def native_internal_entry(operation, item):
+    if operation not in {'trash','restore'}:
+        return None
+    identifier = item.get('trash_id','')
+    field = 'destination' if operation == 'trash' else 'source'
+    if (not isinstance(identifier,str) or not re.fullmatch(r'[0-9a-f]{32}',identifier)
+            or item.get(field) != f'{TRASH}/{identifier}/data'):
+        raise ValueError('回收文件与授权编号不匹配')
+    return identifier
 
 
 def prepare_native(prepared):
@@ -175,12 +204,17 @@ def prepare_native(prepared):
         for item in action['items']:
             argv = native_argv(action['operation'], item)
             if argv is not None:
+                entry = native_internal_entry(action['operation'],item)
                 for key in ('source','destination'):
                     if key in item:
-                        path = workspace_path(Path(prepared['cwd']), item[key])
-                        if _sensitive(path, Path(prepared['cwd'])):
+                        internal = (action['operation'],key) in {('trash','destination'),('restore','source')}
+                        path = workspace_path(Path(prepared['cwd']), item[key],internal=internal)
+                        if not internal and _sensitive(path, Path(prepared['cwd'])):
                             raise ValueError('黑名单写命令不访问敏感路径')
-                sandbox_argv(argv, prepared['cwd'], writable=True, excluded=prepared['excluded'])
+                sandbox_argv(argv, prepared['cwd'], writable=True, excluded=prepared['excluded'],internal_entry=entry)
                 item['native_argv'] = argv
+                if action['operation'] != 'trash' and not workspace_path(
+                        Path(prepared['cwd']),item['destination']).parent.exists():
+                    item['parent_argv'] = native_parent_argv(item)
                 action['execution_kind'] = 'blacklist_native'
     return prepared
