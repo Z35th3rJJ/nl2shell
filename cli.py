@@ -324,6 +324,7 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
                               timeout_seconds=60, assume_yes=False, batch_id='', batch_index=None):
     from core.command_policy import generate_candidate, review_query, sandbox_argv
     started = time.monotonic()
+    input_seconds = 0
     clarifications, attempts, outcomes = [], [], []
     engine.policy_attempts = attempts
     argv, phase, authorized = [], 'planning', False
@@ -348,11 +349,17 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
         if detail:
             print('说明：' + detail)
         return status
+    def remaining_time():
+        return timeout_seconds - (time.monotonic() - started - input_seconds)
     def ask(prompt):
+        nonlocal input_seconds
+        waiting_started = time.monotonic()
         try:
             answer = input_fn(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             return ''
+        finally:
+            input_seconds += time.monotonic() - waiting_started
         if answer == '/exit':
             finish('cancelled', '用户退出，当前任务已取消')
             print('再见！')
@@ -361,17 +368,21 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
     try:
         for _ in range(3):
             resolved = resolve_request(user_input, clarifications)
+            if remaining_time() <= 0:
+                return finish('blocked','任务时限已用完，未执行')
             if resolved is not None and uses_bash(resolved):
                 attempts.append({'phase':'supported_query_routing','source':'original_request',
                                  'requirements':plan_payload(resolved)})
                 return execute_request(engine, executor, history, user_input, cwd, mode, input_fn,
-                    timeout_seconds=max(.01,timeout_seconds-(time.monotonic()-started)), assume_yes=assume_yes,
+                    timeout_seconds=remaining_time(), assume_yes=assume_yes,
                     batch_id=batch_id, batch_index=batch_index, _policy_routed=True, _policy_answers=clarifications)
             candidate, raw = generate_candidate(user_input, cwd, clarifications, engine._backend)
             attempts.append({'phase':'blacklist_candidate','raw_output':redact_value(raw)})
+            if remaining_time() <= 0:
+                return finish('blocked','任务时限已用完，未执行')
             if candidate['status'] == 'protected':
                 return execute_request(engine, executor, history, user_input, cwd, mode, input_fn,
-                    timeout_seconds=max(.01,timeout_seconds-(time.monotonic()-started)), assume_yes=assume_yes,
+                    timeout_seconds=remaining_time(), assume_yes=assume_yes,
                     batch_id=batch_id, batch_index=batch_index, _policy_routed=True, _policy_answers=clarifications)
             if candidate['status'] == 'unsupported':
                 return finish('unsupported', '黑名单模型拒绝（非程序安全检查结果）：' + str(candidate['reason']))
@@ -404,16 +415,20 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
         _section(2, '等待确认')
         if ask('是否执行以上命令？请输入 yes 确认 > ').lower() != 'yes':
             return finish('cancelled')
-        if time.monotonic()-started >= timeout_seconds:
+        if remaining_time() <= 0:
             return finish('blocked', '任务时限已用完，未执行')
         if sandbox_argv(argv, cwd, excluded=excluded) != launcher:
             return finish('blocked', '沙箱范围已变化，请重新提交任务')
         save_history(history, user_input=user_input, cwd=cwd, command=shlex.join(argv), risk=WARN,
             status='confirmed', executed=False, execution_state='not_started', file_change_state='unchanged',
             authorized=True, command_policy='blacklist', run_mode=mode, clarifications=clarifications)
-        authorized, phase = True, 'execution'
+        authorized = True
+        remaining = remaining_time()
+        if remaining <= 0:
+            return finish('blocked','任务时限已用完，未执行')
+        phase = 'execution'
         result, actual = executor.execute_policy_query(argv, cwd, excluded,
-            timeout_seconds=max(.01,timeout_seconds-(time.monotonic()-started)))
+            timeout_seconds=remaining)
         outcome = redact_value({'step':1,'operation':'blacklist_query','execution_kind':'blacklist_sandbox',
             'status':'unverified' if result.exit_code == 0 and not result.timed_out else 'execution_failed',
             'executed':True,'execution_state':result.process_state,'file_change_state':'unchanged',

@@ -269,6 +269,8 @@ python eval/run_eval.py --backend local --limit 3
 
 普通 CLI 历史新增 `measurements`：分别记录模型 SDK 调用耗时、实际 Linux 进程耗时、等待输入时间和记录时的任务总耗时。`active_seconds` 排除等待输入时间。SDK 内部的 HTTP 自动重试不单独计数；`model_call_count` 不是 HTTP 请求数。Python 文件操作没有 Linux 命令耗时，不能将其写成 `cp` 的执行时间。运行信息只保存版本、CPU、内存、Python 和系统信息，不保存完整环境变量。
 
+黑名单扩展查询的任务预算不包含等待澄清回答或执行确认的时间。模型生成、准备检查和执行仍消耗预算；确认后不会重置这些已用时间。记录中的总耗时仍包含人工等待。
+
 白名单与黑名单使用同一固定任务集进行真实 CLI 对比：
 
 ```bash
