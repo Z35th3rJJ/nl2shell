@@ -182,3 +182,13 @@ class VoiceInputTests(unittest.TestCase):
         with patch.dict(os.environ, {"NL2SHELL_VOICE_MODEL": "other"}):
             with self.assertRaisesRegex(VoiceInputError, "只能选择"):
                 record_and_transcribe(lambda _: "")
+
+    @unittest.skipIf(numpy is None, "需要语音可选依赖")
+    def test_missing_qwen_environment_stops_before_recording(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {"NL2SHELL_VOICE_MODEL": "qwen"}), \
+             patch("core.voice_input.Path.home", return_value=Path(directory)), \
+             patch("core.voice_input.subprocess.Popen") as recorder:
+            with self.assertRaisesRegex(VoiceInputError, "未安装 Qwen3-ASR"):
+                record_and_transcribe(lambda _: "")
+        recorder.assert_not_called()
