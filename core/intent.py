@@ -150,7 +150,10 @@ def analyze_request(user_input, answers, backend, attempts):
                         occurrences = list(re.finditer(re.escape(name), text))
                         return bool(occurrences) and all(any(start <= match.start() and match.end() <= end
                             for start, end in targets) for match in occurrences)
-                    if all(name == "." or target_only(name) for name in names):
+                    def search_scope(name):
+                        return (bool(re.search(re.escape(name) + r"\s*(?:目录|文件夹)(?:内|中|下)", text))
+                                and bool(re.search(r"修改|改过|更新|变更", text)))
+                    if all(name == "." or target_only(name) or search_scope(name) for name in names):
                         result.pop("named_sources", None)
                         result.pop("selection_required", None)
                         names = []

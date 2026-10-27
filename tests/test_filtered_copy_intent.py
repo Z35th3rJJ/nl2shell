@@ -13,6 +13,14 @@ from core.operations import prepare_plan, execute_action
 
 
 class FilteredCopyIntentTests(unittest.TestCase):
+    def test_named_search_directory_is_not_a_direct_copy_source(self):
+        request = "备份 src 目录内过去两周修改的文件到 archive"
+        raw = json.dumps({"status": "ready", "operations": ["find_files", "copy_files"],
+                          "named_sources": ["src"], "selection_required": False})
+        with patch("core.intent.chat", return_value=raw):
+            result = analyze_request(request, [], "local", [])
+        self.assertEqual(result["operations"], ["find_files", "copy_files"])
+
     def test_destination_is_not_treated_as_a_named_source(self):
         request = "把这里和子目录中近七天改过的 .py 复制到 backup，目录层次保持不变"
         raw = json.dumps({"status": "ready", "operations": ["find_files", "copy_files"],
