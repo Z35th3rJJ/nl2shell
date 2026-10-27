@@ -1,5 +1,8 @@
 import unittest
+import os
+import json
 import sys
+import tempfile
 import wave
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +18,11 @@ except ImportError:
 
 
 class VoiceInputTests(unittest.TestCase):
+    def setUp(self):
+        self.voice_env = patch.dict(os.environ, {"NL2SHELL_VOICE_MODEL": "whisper"})
+        self.voice_env.start()
+        self.addCleanup(self.voice_env.stop)
+
     def test_missing_gpu_is_reported(self):
         module = SimpleNamespace(get_cuda_device_count=lambda: 0)
         with patch.dict(sys.modules, {"ctranslate2": module}):
@@ -143,3 +151,34 @@ class VoiceInputTests(unittest.TestCase):
             self.assertIsNone(record_and_transcribe(lambda _: "/cancel"))
         process.send_signal.assert_called_once()
         module.WhisperModel.assert_not_called()
+
+    @unittest.skipIf(numpy is None, "需要语音可选依赖")
+    def test_qwen_worker_transcript_is_confirmable_and_simplified(self):
+        process = Mock(returncode=0)
+        process.poll.side_effect = [None, 0]
+
+        def recorder(argv, **kwargs):
+            with wave.open(argv[-1], "wb") as recording:
+                recording.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                recording.writeframes(b"\x01\x00" * 800)
+            return process
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = root / ".local/share/nl2shell/qwen-asr/bin/python"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            result = SimpleNamespace(stdout=json.dumps({"text": "列出當前目錄 sample.txt"}))
+            with patch.dict(os.environ, {"NL2SHELL_VOICE_MODEL": "qwen"}), \
+                 patch("core.voice_input.Path.home", return_value=root), \
+                 patch("core.voice_input.subprocess.Popen", side_effect=recorder), \
+                 patch("core.voice_input.subprocess.run", return_value=result) as run, patch("builtins.print") as output:
+                text = record_and_transcribe(lambda _: "")
+            self.assertEqual(text, "列出当前目录 sample.txt")
+            self.assertEqual(run.call_args.args[0][0], str(python))
+            output.assert_any_call("识别原文：列出當前目錄 sample.txt")
+
+    def test_unrecognized_voice_model_is_rejected(self):
+        with patch.dict(os.environ, {"NL2SHELL_VOICE_MODEL": "other"}):
+            with self.assertRaisesRegex(VoiceInputError, "只能选择"):
+                record_and_transcribe(lambda _: "")

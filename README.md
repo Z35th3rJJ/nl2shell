@@ -204,11 +204,13 @@ Linux / WSL 需要可用的麦克风与 PulseAudio 的 `parec`（Ubuntu 软件�
 
 ```bash
 .venv/bin/python -m pip install -e '.[voice,voice-gpu]'
+python3 -m venv "$HOME/.local/share/nl2shell/qwen-asr"
+"$HOME/.local/share/nl2shell/qwen-asr/bin/python" -m pip install 'torch==2.6.0' 'qwen-asr==0.0.6'
 ```
 
 启动助手后输入 `/voice`，说完后按回车结束录音；录音时也可输入 `/cancel` 取消。程序显示识别文字后，输入 `yes` 使用，输入完整文字可修改，输入 `/cancel` 取消。识别文字仍会经过原有计划、审查和执行确认；这个 `yes` 只确认文字，不授权文件操作。
 
-使用本地 faster-whisper `medium` 中文识别模型，以 NVIDIA GPU 运行；需要可用的 CUDA 驱动和显存，首次使用需要下载模型。GPU 不可用时会提示，不会静默改用 CPU。识别结果默认转换为简体；发生转换时同时显示原文，文件名使用繁体时请在确认步骤输入原文。临时录音处理后删除。模型或麦克风不可用时可继续使用键盘。确认后的文字按所选模型后端处理，云端后端可能接收文字。
+默认使用本地 Qwen3-ASR-0.6B，以 NVIDIA GPU 运行；需要可用的 CUDA 驱动和显存，首次使用需要下载模型。设置 `NL2SHELL_VOICE_MODEL=whisper` 可改用原有 faster-whisper `medium`。GPU 不可用时会提示，不会静默改用 CPU。识别结果默认转换为简体；发生转换时同时显示原文，文件名使用繁体时请在确认步骤输入原文。临时录音处理后删除。模型或麦克风不可用时可继续使用键盘。确认后的文字按所选模型后端处理，云端后端可能接收文字。
 
 <details>
 <summary>受限 ReAct Agent 与受控修复</summary>
