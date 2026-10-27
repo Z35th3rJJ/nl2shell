@@ -178,6 +178,11 @@ def analyze_request(user_input, answers, backend, attempts):
                     raise ValueError("原始请求已明确单源传输动作 " + transfer +
                                      "，不得改成其他动作或重复追问操作类型；保留原始路径，参数和安全条件仍由后续校验")
             if expected is not None and status == "ready":
+                if ([step.operation for step in expected.steps] == ["list_directory"]
+                        and len(result["operations"]) == 2
+                        and set(result["operations"]) == {"working_directory", "list_directory"}):
+                    record["resolution"] = "原始需求只要求目录内容，移除未要求的当前路径查询"
+                    result["operations"] = ["list_directory"]
                 if result["operations"] != [step.operation for step in expected.steps]:
                     raise ValueError("意图与原始需求可确定的操作不一致")
                 return result

@@ -73,8 +73,9 @@ def _directory_query(user_input, answers, operation):
 def _directory_request(user_input, clarifications):
     # shortcut: 仅接受完整单路径浏览语法及隐藏项问答；扩展表达前须增加无歧义解析测试。
     request = re.fullmatch(
+        r"(?:列出[ \t]*(?P<bare_current>当前目录|本目录)(?:这一层|当前层)?|"
         r"(?:列出|查看|浏览)[ \t]*(?:(?P<current>当前目录|本目录|这里)(?:这一层|当前层)?(?:的)?(?:内容|文件和文件夹)|"
-        r"(?P<path>" + PATH_TOKEN + r")[ \t]+(?:目录|文件夹)(?:的)?内容)"
+        r"(?P<path>" + PATH_TOKEN + r")[ \t]+(?:目录|文件夹)(?:的)?内容))"
         r"(?:[，,][ \t]*(?P<hidden>(?:包括|包含|显示|列出|不包括|不包含|不显示|不列)隐藏(?:文件|项)))?[。]?",
         user_input.strip())
     if request is None:
@@ -90,7 +91,7 @@ def _directory_request(user_input, clarifications):
         if hidden is not None and hidden != confirmed:
             return None
         hidden = confirmed
-    parameters = {"path": '.' if request['current'] else path_value(request['path'])}
+    parameters = {"path": '.' if request['current'] or request['bare_current'] else path_value(request['path'])}
     parameters["include_hidden"] = DEFAULT_INCLUDE_HIDDEN if hidden is None else hidden
     raw = json.dumps({"status": "ready", "steps": [{"operation": "list_directory", "parameters": parameters}]})
     return parse_operation_plan(raw)
