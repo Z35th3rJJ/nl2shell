@@ -461,7 +461,12 @@ def execute_action(prepared: dict, action: dict, executor=None, *, timeout_secon
         if getattr(error, "process_started", False):
             outcome.update(executed=True, execution_state=getattr(error, "process_state", "unknown"))
         elif isinstance(error, ExecutionStartError):
-            outcome["execution_state"] = "not_started"
+            if outcome['file_change_state'] == 'changed':
+                outcome['execution_state'] = 'stopped'
+            else:
+                outcome.update(executed=False, execution_state='not_started', file_change_state='unchanged')
+                if progress is not None:
+                    progress.update(executed=False, file_change_state='unchanged')
         if isinstance(error, KeyboardInterrupt):
             outcome.update(status="interrupted", detail="用户中断，停止后续操作；请核对实际结果")
         if progress is not None:

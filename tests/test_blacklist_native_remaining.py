@@ -9,12 +9,12 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from cli import execute_request
-from core.command_policy import native_argv, prepare_native, review_query, sandbox_argv
+from core.command_policy import native_argv, native_parent_argv, prepare_native, review_query, sandbox_argv
 from core.engine import Engine
-from core.execution import BashExecutor
+from core.execution import BashExecutor, ExecutionResult, ExecutionStartError
 from core.history import HistoryStore
 from core.operations import execute_action, prepare_plan
 from core.task_plan import parse_operation_plan
@@ -37,6 +37,45 @@ class NativeRemainingContracts(unittest.TestCase):
                 item={'source':source,'destination':destination,'trash_id':identifier}
                 self.assertEqual(native_argv(operation,item),['mv','--update=none','--no-copy',
                                  '--no-target-directory','--','./'+source,'./'+destination])
+
+    def test_start_failure_without_prior_write_is_not_recorded_as_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan=parse_operation_plan('{"status":"ready","steps":[{"operation":"create_file",'
+                                      '"parameters":{"path":"empty.txt"}}]}')
+            prepared=prepare_plan(plan,directory)
+            action=prepared['actions'][0]
+            action['items'][0]['native_argv']=native_argv('create_file',action['items'][0])
+            executor=Mock()
+            executor.execute_native_item.side_effect=ExecutionStartError(2,'synthetic start failure')
+            result=execute_action(prepared,action,executor)
+            self.assertEqual(result['status'],'execution_failed')
+            self.assertEqual(result['execution_state'],'not_started')
+            self.assertFalse(result['executed'])
+            self.assertEqual(result['file_change_state'],'unchanged')
+            self.assertFalse((Path(directory)/'empty.txt').exists())
+
+    def test_start_failure_after_parent_creation_records_existing_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan=parse_operation_plan('{"status":"ready","steps":[{"operation":"create_file",'
+                                      '"parameters":{"path":"new/empty.txt"}}]}')
+            prepared=prepare_plan(plan,directory)
+            action=prepared['actions'][0]
+            item=action['items'][0]
+            item['native_argv']=native_argv('create_file',item)
+            item['parent_argv']=native_parent_argv(item)
+            executor=Mock()
+            def parent(*args,**kwargs):
+                (Path(directory)/'new').mkdir()
+                return ExecutionResult(0,'','',.01),['synthetic launcher']
+            executor.execute_native_parent.side_effect=parent
+            executor.execute_native_item.side_effect=ExecutionStartError(2,'synthetic start failure')
+            result=execute_action(prepared,action,executor)
+            self.assertEqual(result['status'],'execution_failed')
+            self.assertEqual(result['execution_state'],'stopped')
+            self.assertTrue(result['executed'])
+            self.assertEqual(result['file_change_state'],'changed')
+            self.assertTrue((Path(directory)/'new').is_dir())
+            self.assertFalse((Path(directory)/'new/empty.txt').exists())
 
 
 @unittest.skipUnless(sys.platform=='linux','需要 Linux/bwrap')
@@ -159,6 +198,22 @@ class NativeRemainingLinuxTests(unittest.TestCase):
                                    'confirm',input_fn=lambda _: 'yes')
         self.assertEqual(status,'verified',history.last_record)
         self.assertEqual((self.root/'a.txt').read_bytes(),b'original')
+
+    def test_cli_cancellation_never_creates_trash_record_or_moves_file(self):
+        (self.root/'a.txt').write_bytes(b'original')
+        plan=parse_operation_plan(json.dumps({'status':'ready','steps':[{'operation':'trash',
+                                   'parameters':{'sources':['a.txt']}}]}))
+        engine=Engine(ssh_hosts=[])
+        engine.command_policy='blacklist'
+        history=HistoryStore(Path(self.temp.name)/'history.jsonl')
+        with patch('core.command_policy.chat',return_value='{"status":"protected"}'), \
+                patch.object(engine,'generate_task_plan',return_value=plan), redirect_stdout(io.StringIO()):
+            status=execute_request(engine,self.executor,history,'将 a.txt 移入回收区',str(self.root),
+                                   'confirm',input_fn=lambda _: 'no')
+        self.assertEqual(status,'cancelled')
+        self.assertFalse(history.last_record['executed'])
+        self.assertEqual((self.root/'a.txt').read_bytes(),b'original')
+        self.assertFalse((self.root/'.nl2shell-trash').exists())
 
 
 if __name__=='__main__':
