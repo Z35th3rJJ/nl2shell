@@ -1,5 +1,4 @@
 import unittest
-import subprocess
 import sys
 import wave
 from pathlib import Path
@@ -35,10 +34,11 @@ class VoiceInputTests(unittest.TestCase):
              patch.object(cli, "create_executor"), patch.object(cli, "Engine"), \
              patch.object(cli, "HistoryStore"), patch.object(cli, "print_diagnostics"), \
              patch.object(cli, "recover_working_directory", return_value=(".", "")), \
-             patch.object(cli, "record_and_transcribe", return_value="错误识别结果"), \
+             patch.object(cli, "record_and_transcribe", return_value="错误识别结果") as recorder, \
              patch.object(cli, "execute_request") as execute, patch("builtins.print"):
             cli.main(input_session=session)
         self.assertEqual(execute.call_count, 1)
+        recorder.assert_called_once_with(session.prompt)
         self.assertEqual(execute.call_args.args[3], "更正后的请求")
 
     def test_cli_cancel_never_submits_task(self):
@@ -63,25 +63,24 @@ class VoiceInputTests(unittest.TestCase):
         model.transcribe.return_value = ([SimpleNamespace(text="列出当前目录")], None)
         module = SimpleNamespace(WhisperModel=Mock(return_value=model))
         process = Mock(returncode=1)
-        process.wait.side_effect = [subprocess.TimeoutExpired("pw-record", 8), 0]
-        process.poll.return_value = 0
+        process.poll.side_effect = [None, 0]
         audio = []
 
         def start(argv, **kwargs):
             audio.append(Path(argv[-1]))
             with wave.open(str(audio[-1]), "wb") as recording:
                 recording.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
-                recording.writeframes(b"\x01\x00" * 800)
+                recording.writeframes(b"\x01\x00" * (16000 * 12))
             return process
 
         with patch.dict(sys.modules, {"faster_whisper": module}), \
              patch("core.voice_input.subprocess.Popen", side_effect=start), patch("builtins.print"):
-            self.assertEqual(record_and_transcribe(), "列出当前目录")
+            self.assertEqual(record_and_transcribe(lambda _: ""), "列出当前目录")
         self.assertFalse(audio[0].exists())
         process.send_signal.assert_called_once()
         pcm = model.transcribe.call_args.args[0]
         self.assertEqual(str(pcm.dtype), "float32")
-        self.assertEqual(len(pcm), 800)
+        self.assertEqual(len(pcm), 16000 * 12)
         self.assertAlmostEqual(float(pcm[0]), 1 / 32768)
 
     @unittest.skipIf(numpy is None, "需要语音可选依赖")
@@ -92,15 +91,14 @@ class VoiceInputTests(unittest.TestCase):
         with patch.dict(sys.modules, {"faster_whisper": module}), \
              patch("core.voice_input.subprocess.Popen", return_value=process), patch("builtins.print"):
             with self.assertRaises(VoiceInputError):
-                record_and_transcribe()
+                record_and_transcribe(lambda _: "")
         module.WhisperModel.assert_not_called()
 
     @unittest.skipIf(numpy is None, "需要语音可选依赖")
     def test_silent_audio_does_not_call_model(self):
         module = SimpleNamespace(WhisperModel=Mock())
         process = Mock(returncode=1)
-        process.wait.side_effect = [subprocess.TimeoutExpired("pw-record", 8), 1]
-        process.poll.return_value = 1
+        process.poll.side_effect = [None, 1]
 
         def start(argv, **kwargs):
             with wave.open(argv[-1], "wb") as recording:
@@ -111,5 +109,16 @@ class VoiceInputTests(unittest.TestCase):
         with patch.dict(sys.modules, {"faster_whisper": module}), \
              patch("core.voice_input.subprocess.Popen", side_effect=start), patch("builtins.print"):
             with self.assertRaisesRegex(VoiceInputError, "没有声音"):
-                record_and_transcribe()
+                record_and_transcribe(lambda _: "")
+        module.WhisperModel.assert_not_called()
+
+    @unittest.skipIf(numpy is None, "需要语音可选依赖")
+    def test_cancel_recording_does_not_call_model(self):
+        module = SimpleNamespace(WhisperModel=Mock())
+        process = Mock(returncode=0)
+        process.poll.side_effect = [None, 0]
+        with patch.dict(sys.modules, {"faster_whisper": module}), \
+             patch("core.voice_input.subprocess.Popen", return_value=process), patch("builtins.print"):
+            self.assertIsNone(record_and_transcribe(lambda _: "/cancel"))
+        process.send_signal.assert_called_once()
         module.WhisperModel.assert_not_called()

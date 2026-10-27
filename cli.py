@@ -1052,7 +1052,8 @@ def main(input_session=None, args=None) -> None:
             continue
         if user_input == "/voice":
             try:
-                user_input = confirm_transcript(record_and_transcribe(), input_session.prompt)
+                transcript = record_and_transcribe(input_session.prompt)
+                user_input = confirm_transcript(transcript, input_session.prompt) if transcript is not None else None
             except VoiceInputError as error:
                 print(f"语音输入不可用：{error}")
                 continue
