@@ -8,6 +8,11 @@ from unittest.mock import Mock, patch
 
 from core.voice_input import VoiceInputError, confirm_transcript, record_and_transcribe
 
+try:
+    import numpy
+except ImportError:
+    numpy = None
+
 
 class VoiceInputTests(unittest.TestCase):
     def test_confirm_edit_and_cancel(self):
@@ -52,6 +57,7 @@ class VoiceInputTests(unittest.TestCase):
             cli.main(input_session=session)
         execute.assert_not_called()
 
+    @unittest.skipIf(numpy is None, "需要语音可选依赖")
     def test_recorder_stops_and_removes_temporary_audio(self):
         model = Mock()
         model.transcribe.return_value = ([SimpleNamespace(text="列出当前目录")], None)
@@ -78,6 +84,7 @@ class VoiceInputTests(unittest.TestCase):
         self.assertEqual(len(pcm), 800)
         self.assertAlmostEqual(float(pcm[0]), 1 / 32768)
 
+    @unittest.skipIf(numpy is None, "需要语音可选依赖")
     def test_failed_recorder_does_not_call_model(self):
         module = SimpleNamespace(WhisperModel=Mock())
         process = Mock(returncode=1)
@@ -88,6 +95,7 @@ class VoiceInputTests(unittest.TestCase):
                 record_and_transcribe()
         module.WhisperModel.assert_not_called()
 
+    @unittest.skipIf(numpy is None, "需要语音可选依赖")
     def test_silent_audio_does_not_call_model(self):
         module = SimpleNamespace(WhisperModel=Mock())
         process = Mock(returncode=1)
