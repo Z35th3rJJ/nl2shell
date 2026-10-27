@@ -215,6 +215,37 @@ class NativeRemainingLinuxTests(unittest.TestCase):
         self.assertEqual((self.root/'a.txt').read_bytes(),b'original')
         self.assertFalse((self.root/'.nl2shell-trash').exists())
 
+    def test_cli_multiple_trash_items_keep_distinct_confirmed_bindings(self):
+        (self.root/'a.txt').write_bytes(b'first')
+        (self.root/'b.txt').write_bytes(b'second')
+        plan=parse_operation_plan(json.dumps({'status':'ready','steps':[{'operation':'trash',
+                                   'parameters':{'sources':['a.txt','b.txt']}}]}))
+        engine=Engine(ssh_hosts=[])
+        engine.command_policy='blacklist'
+        history=HistoryStore(Path(self.temp.name)/'history.jsonl')
+        output=io.StringIO()
+        def confirm(prompt):
+            self.assertEqual((self.root/'a.txt').read_bytes(),b'first')
+            self.assertEqual((self.root/'b.txt').read_bytes(),b'second')
+            self.assertFalse((self.root/'.nl2shell-trash').exists())
+            return 'yes'
+        with patch('core.command_policy.chat',return_value='{"status":"protected"}'), \
+                patch.object(engine,'generate_task_plan',return_value=plan), \
+                patch.dict(os.environ,{'NO_COLOR':'1'}), redirect_stdout(output):
+            status=execute_request(engine,self.executor,history,'将 a.txt 和 b.txt 放入回收区',str(self.root),
+                                   'confirm',input_fn=confirm)
+        self.assertEqual(status,'verified',history.last_record)
+        outcome=history.last_record['verification'][0]
+        self.assertEqual(len(outcome['actual_commands']),2)
+        identifiers=[item['trash_id'] for item in outcome['items']]
+        self.assertEqual(len(set(identifiers)),2)
+        for item,content in zip(outcome['items'],(b'first',b'second')):
+            self.assertEqual((self.root/'.nl2shell-trash'/item['trash_id']/'data').read_bytes(),content)
+        for command in outcome['actual_commands']:
+            self.assertIn(shlex.join(command),output.getvalue())
+        self.assertFalse((self.root/'a.txt').exists())
+        self.assertFalse((self.root/'b.txt').exists())
+
 
 if __name__=='__main__':
     unittest.main()
