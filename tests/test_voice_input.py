@@ -9,13 +9,14 @@ from core.voice_input import VoiceInputError, confirm_transcript, record_and_tra
 
 try:
     import numpy
+    import opencc
 except ImportError:
     numpy = None
 
 
 class VoiceInputTests(unittest.TestCase):
     def test_confirm_edit_and_cancel(self):
-        for answer, expected in (("yes", "复制 source.txt"), ("改成查看文件", "改成查看文件"), ("/cancel", None), ("", None)):
+        for answer, expected in (("yes", "复制 source.txt"), ("改成查看文件", "改成查看文件"), ("臺灣.txt", "臺灣.txt"), ("/cancel", None), ("", None)):
             with self.subTest(answer=answer):
                 self.assertEqual(confirm_transcript("复制 source.txt", lambda _: answer), expected)
 
@@ -60,7 +61,7 @@ class VoiceInputTests(unittest.TestCase):
     @unittest.skipIf(numpy is None, "需要语音可选依赖")
     def test_recorder_stops_and_removes_temporary_audio(self):
         model = Mock()
-        model.transcribe.return_value = ([SimpleNamespace(text="列出当前目录")], None)
+        model.transcribe.return_value = ([SimpleNamespace(text="列出當前目錄 sample.txt ERROR.*")], None)
         module = SimpleNamespace(WhisperModel=Mock(return_value=model))
         process = Mock(returncode=1)
         process.poll.side_effect = [None, 0]
@@ -74,8 +75,9 @@ class VoiceInputTests(unittest.TestCase):
             return process
 
         with patch.dict(sys.modules, {"faster_whisper": module}), \
-             patch("core.voice_input.subprocess.Popen", side_effect=start), patch("builtins.print"):
-            self.assertEqual(record_and_transcribe(lambda _: ""), "列出当前目录")
+             patch("core.voice_input.subprocess.Popen", side_effect=start), patch("builtins.print") as output:
+            self.assertEqual(record_and_transcribe(lambda _: ""), "列出当前目录 sample.txt ERROR.*")
+        output.assert_any_call("识别原文：列出當前目錄 sample.txt ERROR.*")
         self.assertFalse(audio[0].exists())
         process.send_signal.assert_called_once()
         pcm = model.transcribe.call_args.args[0]

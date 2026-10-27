@@ -29,6 +29,7 @@ def record_and_transcribe(prompt=input):
     try:
         from faster_whisper import WhisperModel
         import numpy as np
+        from opencc import OpenCC
     except ImportError as error:
         raise VoiceInputError("未安装语音依赖，请按 README 安装 voice 可选依赖。") from error
 
@@ -82,6 +83,11 @@ def record_and_transcribe(prompt=input):
             model = WhisperModel("base", device="cpu", compute_type="int8")
             pcm = np.frombuffer(samples, dtype="<i2").astype(np.float32) / 32768.0
             segments, _ = model.transcribe(pcm, language="zh", beam_size=1, vad_filter=True)
-            return "".join(segment.text for segment in segments).strip()
+            text = "".join(segment.text for segment in segments).strip()
+            simplified = OpenCC("t2s").convert(text)
+            if simplified != text:
+                print(f"识别原文：{text}")
+                print("识别文字已转为简体；如果文件名使用繁体，请输入原始文字。")
+            return simplified
         except Exception as error:
             raise VoiceInputError(f"语音识别失败：{error}") from error
