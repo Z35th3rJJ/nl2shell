@@ -6,6 +6,8 @@ import re
 import time
 
 from .bash_queries import _sensitive
+from .bash_queries import SENSITIVE
+import fnmatch
 from .llm import chat
 from .operations import TRASH, workspace_path
 from .system_view import SYSTEM_VIEW
@@ -112,6 +114,13 @@ def sandbox_argv(argv, cwd, *, writable=False, excluded=(), system_root=None, in
     masks, pending, count = [], [root], 0
     deadline = time.monotonic() + 5
     excluded = [Path(value).resolve() for value in excluded]
+    entry = None
+    if internal_entry is not None:
+        if not writable or not re.fullmatch(r'[0-9a-f]{32}', internal_entry):
+            raise ValueError('回收区绑定无效')
+        entry = workspace_path(root, f'{TRASH}/{internal_entry}', internal=True)
+        if any(value == entry or value in entry.parents or entry in value.parents for value in excluded):
+            raise ValueError('回收区与审计路径重叠，未执行')
     while pending:
         for path in pending.pop().iterdir():
             count += 1
@@ -119,7 +128,16 @@ def sandbox_argv(argv, cwd, *, writable=False, excluded=(), system_root=None, in
                 raise ValueError('黑名单工作区检查超出预算，请缩小工作目录')
             if path.is_symlink():
                 raise ValueError('黑名单工作目录包含符号链接，请选择不含链接的目录')
-            if _sensitive(path, root) or path in excluded:
+            if entry is not None and path == root/TRASH:
+                if not path.is_dir():
+                    raise ValueError('回收区路径不是目录')
+                pending.append(path)
+                continue
+            within_entry = entry is not None and (path == entry or entry in path.parents)
+            internal_sensitive = within_entry and any(
+                fnmatch.fnmatchcase(part.lower(),pattern)
+                for part in path.relative_to(entry).parts for pattern in SENSITIVE)
+            if ((not within_entry and _sensitive(path, root)) or internal_sensitive or path in excluded):
                 masks.append((path, path.is_dir()))
             elif path.is_dir():
                 pending.append(path)
@@ -154,17 +172,6 @@ def sandbox_argv(argv, cwd, *, writable=False, excluded=(), system_root=None, in
     for path, directory in masks:
         target = '/workspace/' + path.relative_to(root).as_posix()
         command += ['--tmpfs',target] if directory else ['--ro-bind','/dev/null',target]
-    if internal_entry is not None:
-        if not writable or not re.fullmatch(r'[0-9a-f]{32}', internal_entry):
-            raise ValueError('回收区绑定无效')
-        entry = workspace_path(root, f'{TRASH}/{internal_entry}', internal=True)
-        if any(value == entry or value in entry.parents or entry in value.parents for value in excluded):
-            raise ValueError('回收区与审计路径重叠，未执行')
-        if entry.exists():
-            if not entry.is_dir():
-                raise ValueError('回收记录目录无效')
-            target = f'/workspace/{TRASH}/{internal_entry}'
-            command += ['--dir',target,'--bind',str(entry),target]
     return command + ['--chdir','/workspace','--setenv','PATH','/usr/bin:/bin','--setenv','HOME','/tmp',
                       '--setenv','LANG','C.UTF-8','--setenv','LC_ALL','C.UTF-8','--',str(binary),*argv[1:]]
 
