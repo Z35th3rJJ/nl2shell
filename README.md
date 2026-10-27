@@ -200,7 +200,7 @@ python cli.py --batch tasks.jsonl
 
 ### 语音输入（可选）
 
-Linux / WSL 需要可用的麦克风与 PipeWire 的 `pw-record`。在项目目录安装可选依赖：
+Linux / WSL 需要可用的麦克风与 PulseAudio 的 `parec`（Ubuntu 软件包 `pulseaudio-utils`）；没有 `parec` 时使用 PipeWire 的 `pw-record`。在项目目录安装可选依赖：
 
 ```bash
 .venv/bin/python -m pip install -e '.[voice]'

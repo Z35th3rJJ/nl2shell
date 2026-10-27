@@ -1,6 +1,7 @@
 import unittest
 import subprocess
 import sys
+import wave
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -55,14 +56,16 @@ class VoiceInputTests(unittest.TestCase):
         model = Mock()
         model.transcribe.return_value = ([SimpleNamespace(text="列出当前目录")], None)
         module = SimpleNamespace(WhisperModel=Mock(return_value=model))
-        process = Mock(returncode=0)
+        process = Mock(returncode=1)
         process.wait.side_effect = [subprocess.TimeoutExpired("pw-record", 8), 0]
         process.poll.return_value = 0
         audio = []
 
         def start(argv, **kwargs):
             audio.append(Path(argv[-1]))
-            audio[-1].write_bytes(b"x" * 100)
+            with wave.open(str(audio[-1]), "wb") as recording:
+                recording.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                recording.writeframes(b"\x01\x00" * 800)
             return process
 
         with patch.dict(sys.modules, {"faster_whisper": module}), \
@@ -78,5 +81,23 @@ class VoiceInputTests(unittest.TestCase):
         with patch.dict(sys.modules, {"faster_whisper": module}), \
              patch("core.voice_input.subprocess.Popen", return_value=process), patch("builtins.print"):
             with self.assertRaises(VoiceInputError):
+                record_and_transcribe()
+        module.WhisperModel.assert_not_called()
+
+    def test_silent_audio_does_not_call_model(self):
+        module = SimpleNamespace(WhisperModel=Mock())
+        process = Mock(returncode=1)
+        process.wait.side_effect = [subprocess.TimeoutExpired("pw-record", 8), 1]
+        process.poll.return_value = 1
+
+        def start(argv, **kwargs):
+            with wave.open(argv[-1], "wb") as recording:
+                recording.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                recording.writeframes(b"\x00\x00" * 800)
+            return process
+
+        with patch.dict(sys.modules, {"faster_whisper": module}), \
+             patch("core.voice_input.subprocess.Popen", side_effect=start), patch("builtins.print"):
+            with self.assertRaisesRegex(VoiceInputError, "没有声音"):
                 record_and_transcribe()
         module.WhisperModel.assert_not_called()

@@ -1,7 +1,9 @@
 """可选的本地语音输入；识别结果需要用户确认。"""
 import signal
+import shutil
 import subprocess
 import tempfile
+import wave
 from pathlib import Path
 
 
@@ -32,17 +34,23 @@ def record_and_transcribe():
     with tempfile.TemporaryDirectory(prefix="nl2shell-voice-") as directory:
         audio = Path(directory) / "input.wav"
         print("开始录音，最长 8 秒；请在提示后说话。")
+        if shutil.which("parec"):
+            command = ["parec", "--rate=16000", "--channels=1", "--format=s16le", "--file-format=wav", str(audio)]
+        else:
+            command = ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", str(audio)]
         try:
             process = subprocess.Popen(
-                ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", str(audio)],
+                command,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
         except OSError as error:
-            raise VoiceInputError("无法启动录音，请检查 PipeWire 和麦克风。") from error
+            raise VoiceInputError("无法启动录音，请检查 PulseAudio 或 PipeWire 和麦克风。") from error
+        stopped = False
         try:
             try:
                 process.wait(timeout=8)
             except subprocess.TimeoutExpired:
+                stopped = True
                 process.send_signal(signal.SIGINT)
                 try:
                     process.wait(timeout=5)
@@ -52,8 +60,19 @@ def record_and_transcribe():
             if process.poll() is None:
                 process.kill()
                 process.wait()
-        if process.returncode not in (0, -signal.SIGINT) or not audio.exists() or audio.stat().st_size <= 44:
+        if not stopped or not audio.exists():
             raise VoiceInputError("录音失败，请检查麦克风，或改用文字输入。")
+        try:
+            with wave.open(str(audio), "rb") as recording:
+                if (recording.getnchannels(), recording.getsampwidth(), recording.getframerate()) != (1, 2, 16000):
+                    raise VoiceInputError("录音格式不受支持，请改用文字输入。")
+                if not any(recording.readframes(16000) for _ in range(9)):
+                    raise VoiceInputError("没有检测到录音，请检查麦克风，或改用文字输入。")
+                recording.rewind()
+                if not any(any(recording.readframes(16000)) for _ in range(9)):
+                    raise VoiceInputError("录音没有声音，请检查麦克风，或改用文字输入。")
+        except (OSError, wave.Error, EOFError) as error:
+            raise VoiceInputError("录音文件无效，请改用文字输入。") from error
         print("正在识别语音；首次使用可能需要下载模型。")
         try:
             model = WhisperModel("base", device="cpu", compute_type="int8")
