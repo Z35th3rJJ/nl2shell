@@ -78,6 +78,7 @@ class VoiceInputTests(unittest.TestCase):
              patch("core.voice_input.subprocess.Popen", side_effect=start), patch("builtins.print") as output:
             self.assertEqual(record_and_transcribe(lambda _: ""), "列出当前目录 sample.txt ERROR.*")
         output.assert_any_call("识别原文：列出當前目錄 sample.txt ERROR.*")
+        output.assert_any_call("正在识别语音（模型：faster-whisper medium，CPU）；首次使用可能需要下载模型。")
         self.assertFalse(audio[0].exists())
         module.WhisperModel.assert_called_once_with("medium", device="cpu", compute_type="int8")
         process.send_signal.assert_called_once()

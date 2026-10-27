@@ -78,9 +78,10 @@ def record_and_transcribe(prompt=input):
                     raise VoiceInputError("录音没有声音，请检查麦克风，或改用文字输入。")
         except (OSError, wave.Error, EOFError) as error:
             raise VoiceInputError("录音文件无效，请改用文字输入。") from error
-        print("正在识别语音；首次使用可能需要下载模型。")
+        model_name = "medium"
+        print(f"正在识别语音（模型：faster-whisper {model_name}，CPU）；首次使用可能需要下载模型。")
         try:
-            model = WhisperModel("medium", device="cpu", compute_type="int8")
+            model = WhisperModel(model_name, device="cpu", compute_type="int8")
             pcm = np.frombuffer(samples, dtype="<i2").astype(np.float32) / 32768.0
             segments, _ = model.transcribe(pcm, language="zh", beam_size=1, vad_filter=True)
             text = "".join(segment.text for segment in segments).strip()
