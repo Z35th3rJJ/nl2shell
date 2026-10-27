@@ -21,6 +21,21 @@ class BareDirectoryIntentTests(unittest.TestCase):
         self.assertEqual(intent["operations"], ["list_directory"])
         model.assert_called_once()
 
+    def test_path_query_alone_is_corrected_for_explicit_listing(self):
+        raw = json.dumps({"status": "ready", "operations": ["working_directory"]})
+        attempts = []
+        with patch("core.intent.chat", return_value=raw) as model:
+            intent = analyze_request("列出当前目录。", [], "local", attempts)
+        self.assertEqual(intent["operations"], ["list_directory"])
+        model.assert_called_once()
+        self.assertIn("目录内容", attempts[0]["resolution"])
+
+    def test_explicit_current_path_query_remains_a_path_query(self):
+        raw = json.dumps({"status": "ready", "operations": ["working_directory"]})
+        with patch("core.intent.chat", return_value=raw):
+            intent = analyze_request("显示当前工作目录", [], "local", [])
+        self.assertEqual(intent["operations"], ["working_directory"])
+
     def test_explicit_path_query_and_listing_keep_both_operations(self):
         raw = json.dumps({"status": "ready", "operations": ["working_directory", "list_directory"]})
         with patch("core.intent.chat", return_value=raw):
