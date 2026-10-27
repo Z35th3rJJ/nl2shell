@@ -79,6 +79,7 @@ class VoiceInputTests(unittest.TestCase):
             self.assertEqual(record_and_transcribe(lambda _: ""), "列出当前目录 sample.txt ERROR.*")
         output.assert_any_call("识别原文：列出當前目錄 sample.txt ERROR.*")
         self.assertFalse(audio[0].exists())
+        module.WhisperModel.assert_called_once_with("medium", device="cpu", compute_type="int8")
         process.send_signal.assert_called_once()
         pcm = model.transcribe.call_args.args[0]
         self.assertEqual(str(pcm.dtype), "float32")

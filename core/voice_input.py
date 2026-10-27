@@ -80,7 +80,7 @@ def record_and_transcribe(prompt=input):
             raise VoiceInputError("录音文件无效，请改用文字输入。") from error
         print("正在识别语音；首次使用可能需要下载模型。")
         try:
-            model = WhisperModel("base", device="cpu", compute_type="int8")
+            model = WhisperModel("medium", device="cpu", compute_type="int8")
             pcm = np.frombuffer(samples, dtype="<i2").astype(np.float32) / 32768.0
             segments, _ = model.transcribe(pcm, language="zh", beam_size=1, vad_filter=True)
             text = "".join(segment.text for segment in segments).strip()
