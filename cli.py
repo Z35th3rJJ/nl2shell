@@ -243,6 +243,8 @@ def show_preview(prepared, *, show_cwd=True, request=""):
             print(_paint(f"  审查：{text}", GREEN if review == "accepted" else RED if review == "rejected" else YELLOW))
         elif action.get('execution_kind') == 'blacklist_native':
             print(_paint('  执行方式：受控 Linux 写命令（黑名单模式）', GRAY))
+            if action['operation'] == 'trash':
+                print(_paint('  回收索引：由受保护的 Python 工具记录', GRAY))
             for item in action['items']:
                 if item.get('parent_argv'):
                     print('    父目录不存在时：' + shlex.join(item['parent_argv']))

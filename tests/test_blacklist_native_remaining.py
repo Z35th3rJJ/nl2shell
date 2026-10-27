@@ -187,6 +187,7 @@ class NativeRemainingLinuxTests(unittest.TestCase):
                                    'confirm',input_fn=confirm)
         self.assertEqual(status,'verified',history.last_record)
         self.assertEqual(len(seen),1)
+        self.assertIn('回收索引：由受保护的 Python 工具记录',output.getvalue())
         outcome=history.last_record['verification'][0]
         self.assertIn(shlex.join(outcome['actual_commands'][0]),output.getvalue())
         identifier=outcome['items'][0]['trash_id']
