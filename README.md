@@ -192,10 +192,23 @@ python cli.py --batch tasks.jsonl
 | `/workspace 路径` | 切换到已有工作目录 |
 | `/history` | 查看历史；导出与重放参数见 `/help` |
 | `/trash`、`/restore 编号` | 查看回收区、恢复文件 |
+| `/voice` | 录音并确认识别文字 |
 | `/mode`、`/config` | 临时或持久化调整运行方式 |
 | `/exit` | 退出；在澄清阶段输入也会取消任务 |
 
 `RUN_MODE=confirm` 为默认确认方式；`preview` 只生成预览。旧 `auto-safe` 设置仍兼容，但不自动授权写操作。命令策略通过 `--policy` 或 `COMMAND_POLICY` 设置。
+
+### 语音输入（可选）
+
+Linux / WSL 需要可用的麦克风与 PipeWire 的 `pw-record`。在项目目录安装可选依赖：
+
+```bash
+.venv/bin/python -m pip install -e '.[voice]'
+```
+
+启动助手后输入 `/voice`，录音最长 8 秒。程序显示识别文字后，输入 `yes` 使用，输入完整文字可修改，输入 `/cancel` 取消。识别文字仍会经过原有计划、审查和执行确认；这个 `yes` 只确认文字，不授权文件操作。
+
+使用本地 faster-whisper `base` 中文识别模型；首次使用可能联网下载模型。临时录音处理后删除。模型或麦克风不可用时可继续使用键盘。确认后的文字按所选模型后端处理，云端后端可能接收文字。
 
 <details>
 <summary>受限 ReAct Agent 与受控修复</summary>
@@ -226,7 +239,7 @@ python cli.py --policy whitelist --agent --timeout 180 "先查找当前目录这
 
 白名单的路径检查不是操作系统沙箱。请使用可信的个人工作目录，避免运行期间由其他程序并发修改相同文件。WSL 验收使用 Linux 文件系统，通过 Git 同步代码，不需要挂载 Windows 磁盘。
 
-当前不支持软件安装、权限修改、服务管理、网络或远程操作、任意脚本和永久删除。语音输入尚未实现；WSL 可见设备不等于主机物理硬盘清单。
+当前不支持软件安装、权限修改、服务管理、网络或远程操作、任意脚本和永久删除。语音输入依赖本机麦克风与可选模型；WSL 可见设备不等于主机物理硬盘清单。
 
 <details>
 <summary>白名单命令与查询限制</summary>

@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0.0", "build>=1.0.0"]
+voice = ["faster-whisper>=1.1,<2"]
 
 [project.scripts]
 nl2shell = "cli:entrypoint"

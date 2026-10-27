@@ -37,6 +37,7 @@ from core.error_analysis import assess_failure
 from core.execution_evidence import summarize_execution, execution_description, change_description
 from core.measurements import measure_task, snapshot
 from core.requirements import resolve_request
+from core.voice_input import VoiceInputError, confirm_transcript, record_and_transcribe
 
 load_dotenv(ENV_PATH)
 
@@ -181,6 +182,7 @@ def print_help() -> None:
         "  /history replay <记录ID> | replay-batch <批次ID>\n"
         "  /ssh              查看 OpenSSH 主机配置\n"
         "  /workspace <路径> 切换工作目录\n  /trash             查看回收区\n  /restore <编号>    恢复回收文件\n"
+        "  /voice            录音并确认识别文字\n"
         "  /help             显示帮助\n"
         "  /exit             退出"
     )
@@ -1048,6 +1050,17 @@ def main(input_session=None, args=None) -> None:
             break
         if not user_input:
             continue
+        if user_input == "/voice":
+            try:
+                user_input = confirm_transcript(record_and_transcribe(), input_session.prompt)
+            except VoiceInputError as error:
+                print(f"语音输入不可用：{error}")
+                continue
+            except (EOFError, KeyboardInterrupt):
+                print("\n语音输入已取消。")
+                continue
+            if user_input is None:
+                continue
         if user_input in {"/exit", "exit", "quit", "退出"}:
             print("再见！")
             break
