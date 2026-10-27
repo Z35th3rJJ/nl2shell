@@ -28,6 +28,7 @@ def confirm_transcript(text, prompt):
 def record_and_transcribe():
     try:
         from faster_whisper import WhisperModel
+        import numpy as np
     except ImportError as error:
         raise VoiceInputError("未安装语音依赖，请按 README 安装 voice 可选依赖。") from error
 
@@ -66,17 +67,18 @@ def record_and_transcribe():
             with wave.open(str(audio), "rb") as recording:
                 if (recording.getnchannels(), recording.getsampwidth(), recording.getframerate()) != (1, 2, 16000):
                     raise VoiceInputError("录音格式不受支持，请改用文字输入。")
-                if not any(recording.readframes(16000) for _ in range(9)):
+                samples = b"".join(recording.readframes(16000) for _ in range(9))
+                if not samples:
                     raise VoiceInputError("没有检测到录音，请检查麦克风，或改用文字输入。")
-                recording.rewind()
-                if not any(any(recording.readframes(16000)) for _ in range(9)):
+                if not any(samples):
                     raise VoiceInputError("录音没有声音，请检查麦克风，或改用文字输入。")
         except (OSError, wave.Error, EOFError) as error:
             raise VoiceInputError("录音文件无效，请改用文字输入。") from error
         print("正在识别语音；首次使用可能需要下载模型。")
         try:
             model = WhisperModel("base", device="cpu", compute_type="int8")
-            segments, _ = model.transcribe(str(audio), language="zh", beam_size=1, vad_filter=True)
+            pcm = np.frombuffer(samples, dtype="<i2").astype(np.float32) / 32768.0
+            segments, _ = model.transcribe(pcm, language="zh", beam_size=1, vad_filter=True)
             return "".join(segment.text for segment in segments).strip()
         except Exception as error:
             raise VoiceInputError(f"语音识别失败：{error}") from error

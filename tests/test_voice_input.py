@@ -73,6 +73,10 @@ class VoiceInputTests(unittest.TestCase):
             self.assertEqual(record_and_transcribe(), "列出当前目录")
         self.assertFalse(audio[0].exists())
         process.send_signal.assert_called_once()
+        pcm = model.transcribe.call_args.args[0]
+        self.assertEqual(str(pcm.dtype), "float32")
+        self.assertEqual(len(pcm), 800)
+        self.assertAlmostEqual(float(pcm[0]), 1 / 32768)
 
     def test_failed_recorder_does_not_call_model(self):
         module = SimpleNamespace(WhisperModel=Mock())
