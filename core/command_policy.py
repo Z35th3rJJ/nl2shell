@@ -83,8 +83,8 @@ def review_command(argv, cwd):
             or sum(len(v) for v in argv) > 16384):
         raise ValueError('无效的命令参数')
     program, options, paths, after_separator, explicit_separator = argv[0], [], [], False, False
-    allowed = {'cp': {'-r', '-R', '--recursive', '-n', '--no-clobber', '--no-dereference', '-P', '--no-target-directory'},
-               'mv': {'-n', '--no-clobber', '--no-target-directory', '--no-copy'},
+    allowed = {'cp': {'-r', '-R', '--recursive', '-n', '--no-clobber', '--update=none', '--no-dereference', '-P', '--no-target-directory'},
+               'mv': {'-n', '--no-clobber', '--update=none', '--no-target-directory', '--no-copy'},
                'mkdir': {'-p', '--parents'}}[program]
     for value in argv[1:]:
         if value == '--' and not after_separator:
@@ -110,8 +110,8 @@ def review_command(argv, cwd):
     if program in {'cp', 'mv'}:
         if any(source == resolved[-1] or source in resolved[-1].parents for source in resolved[:-1]):
             raise ValueError('目标不能是源路径或位于源目录内')
-        options = [option for option in options if option not in {'-n', '--no-clobber'}]
-        options.insert(0, '--no-clobber')
+        options = [option for option in options if option not in {'-n', '--no-clobber', '--update=none'}]
+        options.insert(0, '--update=none')
         if program == 'mv' and '--no-copy' not in options:
             options.insert(1, '--no-copy')
     return [program, *options, '--', *paths], True
@@ -139,6 +139,9 @@ argv 是直接传给程序的参数数组，不能加入 Shell 的包裹引号�
     value = json.loads(raw)
     if not isinstance(value, dict):
         raise ValueError('黑名单候选必须是 JSON 对象')
+    if (value.get('status') == 'unsupported' and set(value) == {'status', 'explanation'}
+            and isinstance(value['explanation'], str) and value['explanation'].strip()):
+        value = {'status': 'unsupported', 'reason': value['explanation']}
     allowed = {'ready': {'status','argv','explanation'},
                'need_clarification': {'status','clarification'}, 'unsupported': {'status','reason'}}
     if set(value) != allowed.get(value.get('status')):

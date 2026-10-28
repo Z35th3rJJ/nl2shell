@@ -30,7 +30,7 @@ class DirectBlacklistTests(unittest.TestCase):
             argv, writable = command_policy.review_command(['cp', 'source.txt', 'backup.txt'], directory)
             self.assertTrue(writable)
             self.assertEqual(argv[0], 'cp')
-            self.assertIn('--no-clobber', argv)
+            self.assertIn('--update=none', argv)
             self.assertEqual(argv[-2:], ['source.txt', 'backup.txt'])
 
     def test_blacklist_still_blocks_danger_and_traversal(self):
@@ -86,12 +86,18 @@ class DirectBlacklistTests(unittest.TestCase):
             self.assertTrue(history.last_record['executed'])
             self.assertEqual(history.last_record['file_change_state'], 'unknown')
             self.assertEqual(executor.execute_policy_command.call_args.args[0],
-                             ['cp', '--no-clobber', '--', 'source.txt', 'backup.txt'])
+                             ['cp', '--update=none', '--', 'source.txt', 'backup.txt'])
 
     def test_placeholder_is_not_asked_as_a_real_question(self):
         raw = json.dumps({'status': 'need_clarification', 'clarification': '具体问题'})
         with patch('core.command_policy.chat', return_value=raw), self.assertRaises(ValueError):
             command_policy.generate_candidate('显示当前目录', '.', [], 'local')
+
+    def test_model_refusal_with_explanation_stays_a_refusal(self):
+        raw = json.dumps({'status': 'unsupported', 'explanation': '不支持删除'})
+        with patch('core.command_policy.chat', return_value=raw):
+            candidate, _ = command_policy.generate_candidate('执行 rm -rf /', '.', [], 'local')
+        self.assertEqual(candidate, {'status': 'unsupported', 'reason': '不支持删除'})
 
     @unittest.skipUnless(sys.platform == 'linux', '需要 Linux 沙箱')
     def test_native_copy_and_overwrite_protection_in_sandbox(self):
