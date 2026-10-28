@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 from core.command_review import SAFE, WARN
 from core.diagnostics import diagnose_environment
-from core.engine import Engine, PlanPathError
+from core.engine import Engine, PlanPathError, _explicit_days
 from core.llm import model_configuration
 from core.execution import (
     BashExecutor, DockerExecutor, create_executor,
@@ -397,6 +397,10 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
         else:
             return finish('needs_clarification', '仍有必要条件未明确，任务停止')
         phase = 'policy_review'
+        request_text = '\n'.join([user_input, *(answer.split('用户回答：', 1)[-1] for answer in clarifications)])
+        if (isinstance(candidate.get('argv'), list) and candidate['argv']
+                and candidate['argv'][0] in ('cp', 'mv') and _explicit_days(request_text)):
+            return finish('blocked', '黑名单单条复制或移动命令无法核实时间筛选条件，任务未执行')
         argv, writable = review_command(candidate['argv'], cwd)
         if argv != candidate['argv']:
             attempts[-1]['execution_context_binding'] = {'reason':'应用命令安全参数或绑定只读系统元数据',

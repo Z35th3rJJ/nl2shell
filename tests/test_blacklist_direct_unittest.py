@@ -68,6 +68,39 @@ class DirectBlacklistTests(unittest.TestCase):
             executor.execute_policy_command.assert_not_called()
             self.assertFalse((root / 'backup.txt').exists())
 
+    def test_time_filtered_copy_never_offers_an_unfiltered_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            engine = Engine(ssh_hosts=[])
+            engine.command_policy = 'blacklist'
+            executor = Mock()
+            history = HistoryStore(root / 'history.jsonl')
+            raw = json.dumps({'status': 'ready', 'argv': ['cp', '*.txt', 'backup'], 'explanation': '复制'})
+            with patch('core.command_policy.chat', return_value=raw), \
+                 patch('core.command_policy.sandbox_argv', side_effect=AssertionError('不能准备不符合需求的命令')):
+                status = execute_request(engine, executor, history,
+                    '将当前目录最近七天修改的 .txt 文件复制到 backup', directory, 'confirm',
+                    input_fn=lambda _: self.fail('不应要求确认错误命令'))
+            self.assertEqual(status, 'blocked')
+            self.assertIn('时间筛选条件', history.last_record['block_reason'])
+            self.assertFalse(history.last_record['executed'])
+            executor.execute_policy_command.assert_not_called()
+
+    def test_time_filter_from_clarification_is_not_discarded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            engine = Engine(ssh_hosts=[])
+            engine.command_policy = 'blacklist'
+            history = HistoryStore(root / 'history.jsonl')
+            responses = [json.dumps({'status': 'need_clarification', 'clarification': '时间范围？'}),
+                         json.dumps({'status': 'ready', 'argv': ['cp', 'file.txt', 'backup'], 'explanation': '复制'})]
+            with patch('core.command_policy.chat', side_effect=responses), \
+                 patch('core.command_policy.sandbox_argv', side_effect=AssertionError('不能准备不符合需求的命令')):
+                status = execute_request(engine, Mock(), history, '复制筛选的文件到 backup', directory,
+                                         'confirm', input_fn=lambda _: '最近七天')
+            self.assertEqual(status, 'blocked')
+            self.assertFalse(history.last_record['executed'])
+
     def test_confirmed_write_reports_unverified_and_unknown_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
