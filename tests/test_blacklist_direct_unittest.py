@@ -99,6 +99,14 @@ class DirectBlacklistTests(unittest.TestCase):
             candidate, _ = command_policy.generate_candidate('执行 rm -rf /', '.', [], 'local')
         self.assertEqual(candidate, {'status': 'unsupported', 'reason': '不支持删除'})
 
+    def test_model_receives_request_and_clarification_without_host_path(self):
+        raw = json.dumps({'status': 'ready', 'argv': ['mkdir', 'created'], 'explanation': '创建'})
+        with patch('core.command_policy.chat', return_value=raw) as chat:
+            command_policy.generate_candidate('创建目录', '/private/host/path', ['名称：created'], 'local')
+        messages = chat.call_args.args[0]
+        self.assertEqual(json.loads(messages[1]['content']),
+                         {'request': '创建目录', 'clarifications': ['名称：created']})
+
     @unittest.skipUnless(sys.platform == 'linux', '需要 Linux 沙箱')
     def test_native_copy_and_overwrite_protection_in_sandbox(self):
         with tempfile.TemporaryDirectory() as directory:

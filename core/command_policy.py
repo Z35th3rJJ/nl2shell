@@ -119,6 +119,7 @@ def review_command(argv, cwd):
 
 def generate_candidate(user_input, cwd, clarifications, backend=None):
     system = '''你是实验黑名单模式的 Linux 助手。只输出 JSON，不输出 Markdown。
+普通文件操作由程序检查并经用户确认，可以生成 Linux 命令。示例：创建目录返回 {"status":"ready","argv":["mkdir","created"],"explanation":"创建目录"}；移动文件到目录返回 {"status":"ready","argv":["mv","sample.txt","archive"],"explanation":"移动文件"}；将 archive/old.txt 重命名为 new.txt 返回 {"status":"ready","argv":["mv","archive/old.txt","archive/new.txt"],"explanation":"原目录重命名"}。字面文本搜索使用 grep -F。
 明确只读查询输出 {"status":"ready","argv":["date","-u","+%Y"],"explanation":"说明"}。
 查询当前工作目录时直接使用 pwd -P，不要询问用户具体问题。
 可以使用系统工具，不限于白名单已有的操作；仅单条参数数组，不支持管道、Shell、脚本或网络。
@@ -134,7 +135,7 @@ argv 是直接传给程序的参数数组，不能加入 Shell 的包裹引号�
 仅在确实缺少必要信息时输出 need_clarification，clarification 必须是用户能回答的完整问题，不要输出“具体问题”占位文字。
 危险命令、永久删除、提权、安装及网络输出 unsupported。业务文件使用工作区内相对路径；命令在隔离环境运行，程序检查危险参数并要求用户确认。'''
     raw = chat([{'role': 'system', 'content': system}, {'role': 'user', 'content': json.dumps(
-        {'request': user_input, 'cwd': cwd, 'clarifications': clarifications}, ensure_ascii=False)}],
+        {'request': user_input, 'clarifications': clarifications}, ensure_ascii=False)}],
         backend=backend, json_mode=True)
     value = json.loads(raw)
     if not isinstance(value, dict):
