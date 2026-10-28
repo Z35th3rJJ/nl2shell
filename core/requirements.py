@@ -16,6 +16,26 @@ def path_value(token):
     return token[1:-1] if (token[0], token[-1]) in {('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’")} else token
 
 
+def explicit_days(text: str) -> set[float]:
+    days = set()
+    digits = {char: number for number, char in enumerate("零一二三四五六七八九")}
+    digits.update({"〇": 0, "两": 2})
+    for number, unit in re.findall(r"(\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百]+)\s*(天|日|周|星期|小时)", text):
+        if number[0].isdigit():
+            value = float(number)
+        else:
+            value, current = 0, 0
+            for char in number:
+                if char in {"十", "百"}:
+                    value += (current or 1) * (10 if char == "十" else 100)
+                    current = 0
+                else:
+                    current = digits[char]
+            value += current
+        days.add(value * (7 if unit in {"周", "星期"} else 1 / 24 if unit == "小时" else 1))
+    return days
+
+
 def transfer_expression(user_input):
     # shortcut: 裸空格路径仅接受完整单源直接传输；连词、条件或额外动作必须继续澄清。
     spaced_path = r"[\w./\\()\[\]+@%-]+(?:[ \t]+[\w./\\()\[\]+@%-]+)*?"
@@ -28,6 +48,8 @@ def transfer_expression(user_input):
         fragment = request[field]
         if fragment[0] in "\"'“‘":
             continue
+        if field == "source" and explicit_days(fragment) and any(word in fragment for word in ("修改", "更新", "改过")):
+            return None
         if not re.fullmatch(spaced_path, fragment) or re.search(
                 r"还是|命名为|改名|复制到|移动到|不要|如果|(?:^|\s)(?:和|或|或者|以及|并|并且|然后)(?:\s|$)", fragment):
             return None

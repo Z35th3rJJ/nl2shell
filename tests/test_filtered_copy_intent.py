@@ -10,9 +10,31 @@ from core.engine import Engine, _task_plan_errors
 from core.intent import analyze_request
 from core.task_plan import parse_operation_plan
 from core.operations import prepare_plan, execute_action
+from core.requirements import explicit_transfer_operation
 
 
 class FilteredCopyIntentTests(unittest.TestCase):
+    def test_time_filtered_file_type_is_not_a_single_named_source(self):
+        request = '将当前目录这一层最近七天修改的 .txt 文件复制到 saved 目录'
+        raw = json.dumps({'status': 'ready', 'operations': ['find_files', 'copy_files'],
+                          'named_sources': ['*.txt'], 'selection_required': False})
+        with patch('core.intent.chat', return_value=raw):
+            result = analyze_request(request, [], 'local', [])
+        self.assertEqual(result['operations'], ['find_files', 'copy_files'])
+        self.assertNotIn('named_sources', result)
+
+    def test_filtered_copy_cannot_drop_file_type(self):
+        request = '将当前目录这一层最近七天修改的 .txt 文件复制到 saved 目录'
+        find = {'operation': 'find_files', 'parameters': {'path': '.', 'recursive': False,
+                                                           'modified_within_days': 7}}
+        copy = {'operation': 'copy_files', 'parameters': {'source_step': 1, 'destination': 'saved'}}
+        plan = parse_operation_plan(json.dumps({'status': 'ready', 'steps': [find, copy]}))
+        self.assertTrue(any('文件类型' in error for error in
+                            _task_plan_errors(plan, request, '.', {'find_files', 'copy_files'})))
+
+    def test_quoted_filename_with_time_words_remains_a_named_source(self):
+        self.assertEqual(explicit_transfer_operation('将“最近七天修改的报告.txt”复制到 backup', []), 'copy_files')
+
     def test_named_search_directory_is_not_a_direct_copy_source(self):
         request = "备份 src 目录内过去两周修改的文件到 archive"
         raw = json.dumps({"status": "ready", "operations": ["find_files", "copy_files"],

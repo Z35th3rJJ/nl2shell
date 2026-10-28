@@ -6,7 +6,7 @@ from .llm import chat
 from .ssh_config import load_ssh_hosts
 from .task_plan import TaskPlan, TaskStep, READ_OPERATIONS, parse_operation_plan, plan_payload, validate_parameters
 from .intent import analyze_request, DIRECTORY_RULES
-from .requirements import resolve_request, count_request_recursive, DEFAULT_INCLUDE_HIDDEN, UNSPECIFIED_DESTINATIONS, PATH_TOKEN, path_value, transfer_expression, _TARGET_MARKER, _COPY_DESTINATION_PATTERN
+from .requirements import resolve_request, count_request_recursive, DEFAULT_INCLUDE_HIDDEN, UNSPECIFIED_DESTINATIONS, PATH_TOKEN, path_value, transfer_expression, _TARGET_MARKER, _COPY_DESTINATION_PATTERN, explicit_days as _explicit_days
 from .redaction import redact_value
 from .operations import workspace_path
 from .runtime_diagnostics import observe, emit, differences, link_exception, current_task
@@ -96,26 +96,6 @@ def _direct_named_copy(plan, intent, cwd):
         raise ValueError("复制源与用户明确命名文件不一致")
     return replace(plan, steps=(replace(copy, parameters=parameters,
                                        explanation="将明确指定的文件复制到目标目录"),))
-
-
-def _explicit_days(text: str) -> set[float]:
-    days = set()
-    digits = {char: number for number, char in enumerate("零一二三四五六七八九")}
-    digits.update({"〇": 0, "两": 2})
-    for number, unit in re.findall(r"(\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百]+)\s*(天|日|周|星期|小时)", text):
-        if number[0].isdigit():
-            value = float(number)
-        else:
-            value, current = 0, 0
-            for char in number:
-                if char in {"十", "百"}:
-                    value += (current or 1) * (10 if char == "十" else 100)
-                    current = 0
-                else:
-                    current = digits[char]
-            value += current
-        days.add(value * (7 if unit in {"周", "星期"} else 1 / 24 if unit == "小时" else 1))
-    return days
 
 
 _DIRECTORY_QUESTION = re.compile(
@@ -500,7 +480,9 @@ def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str, required, clari
         if not same_query_plan(plan, _normalize_paths(expected, cwd)):
             errors.append("计划与原始需求及统一默认规则不一致")
     operations = {step.operation for step in plan.steps}
-    days = _explicit_days("\n".join([user_input, *(answer.split("用户回答：", 1)[-1] for answer in clarifications)]))
+    request_text = "\n".join([user_input, *(answer.split("用户回答：", 1)[-1] for answer in clarifications)])
+    days = _explicit_days(request_text)
+    extensions = set(re.findall(r"(?<![\w.])(\.[A-Za-z0-9][A-Za-z0-9_-]*)\s*(?:的)?(?:普通)?文件", request_text))
     if days:
         for step in plan.steps:
             if step.operation not in {"copy_files", "move_files"}:
@@ -510,6 +492,10 @@ def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str, required, clari
                     or plan.steps[source - 1].operation != "find_files"
                     or plan.steps[source - 1].parameters.get("modified_within_days") not in days):
                 errors.append("模型计划未保留时间筛选条件与文件操作的关联")
+                break
+            if extensions and (len(extensions) != 1 or
+                    plan.steps[source - 1].parameters.get("pattern") != "*" + next(iter(extensions))):
+                errors.append("模型计划未保留用户指定的文件类型筛选条件")
                 break
     for operation in sorted(set(required) - operations):
         errors.append(f"用户要求的操作未出现在计划中：{operation}")

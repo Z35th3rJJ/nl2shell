@@ -149,6 +149,11 @@ def analyze_request(user_input, answers, backend, attempts):
                 # 问题用于解释回答，但问题中的示例路径不是用户授权的源文件。
                 text = "\n".join([user_input, *(answer.split("用户回答：", 1)[-1].strip() for answer in answers)])
                 if names and set(operations) == {"find_files", "copy_files"}:
+                    if all(name.startswith("*.") and name[1:] in text and name not in text for name in names):
+                        result.pop("named_sources", None)
+                        result.pop("selection_required", None)
+                        names = []
+                        record["resolution"] = "模型生成的是文件类型筛选条件，不是用户指定的源文件"
                     targets = [match.span("path") for match in _COPY_DESTINATION_PATTERN.finditer(text)]
                     def target_only(name):
                         occurrences = list(re.finditer(re.escape(name), text))
@@ -157,7 +162,7 @@ def analyze_request(user_input, answers, backend, attempts):
                     def search_scope(name):
                         return (bool(re.search(re.escape(name) + r"\s*(?:目录|文件夹)(?:内|中|下)", text))
                                 and bool(re.search(r"修改|改过|更新|变更", text)))
-                    if all(name == "." or target_only(name) or search_scope(name) for name in names):
+                    if names and all(name == "." or target_only(name) or search_scope(name) for name in names):
                         result.pop("named_sources", None)
                         result.pop("selection_required", None)
                         names = []
