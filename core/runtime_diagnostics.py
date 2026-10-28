@@ -106,6 +106,7 @@ def _quoted_end(text, opening):
 
 def _json_sensitive_fields(text):
     count = 0
+    limit = MAX_ITEMS if text.lstrip().startswith(("{", "[")) else MAX_NODES
     for opening in _QUOTED_VALUE.finditer(text):
         if text[opening.end() - 1] != '"':
             continue
@@ -114,7 +115,7 @@ def _json_sensitive_fields(text):
         if boundary is None:
             continue
         count += 1
-        if count > MAX_ITEMS:
+        if count > limit:
             raise ValueError("JSON 字段超过诊断处理预算，不能确认脱敏")
         encoded = text[opening.start():end]
         for _ in range(MAX_DEPTH):
