@@ -76,9 +76,51 @@ def review_query(argv, cwd):
     return argv
 
 
+def review_command(argv, cwd):
+    if not isinstance(argv, list) or not argv or argv[0] not in {'cp', 'mv', 'mkdir'}:
+        return review_query(argv, cwd), False
+    if (len(argv) > 128 or any(not isinstance(v, str) or not v or any(c in v for c in '\0\n\r') for v in argv)
+            or sum(len(v) for v in argv) > 16384):
+        raise ValueError('无效的命令参数')
+    program, options, paths, after_separator, explicit_separator = argv[0], [], [], False, False
+    allowed = {'cp': {'-r', '-R', '--recursive', '-n', '--no-clobber', '--no-dereference', '-P', '--no-target-directory'},
+               'mv': {'-n', '--no-clobber', '--no-target-directory', '--no-copy'},
+               'mkdir': {'-p', '--parents'}}[program]
+    for value in argv[1:]:
+        if value == '--' and not after_separator:
+            after_separator = explicit_separator = True
+        elif value.startswith('-') and not after_separator:
+            if value not in allowed:
+                raise ValueError('写入命令包含不安全或无法确认的参数')
+            options.append(value)
+        else:
+            if value.startswith('-') and not explicit_separator:
+                raise ValueError('路径以减号开头时必须使用 --；选项必须放在路径前')
+            paths.append(value)
+            after_separator = True
+    if len(paths) < (2 if program in {'cp', 'mv'} else 1):
+        raise ValueError('写入命令缺少路径')
+    root = Path(cwd).resolve(strict=True)
+    resolved = []
+    for path in paths:
+        target = workspace_path(root, path)
+        if target == root or _sensitive(target, root):
+            raise ValueError('不允许操作工作目录本身或敏感路径')
+        resolved.append(target)
+    if program in {'cp', 'mv'}:
+        if any(source == resolved[-1] or source in resolved[-1].parents for source in resolved[:-1]):
+            raise ValueError('目标不能是源路径或位于源目录内')
+        options = [option for option in options if option not in {'-n', '--no-clobber'}]
+        options.insert(0, '--no-clobber')
+        if program == 'mv' and '--no-copy' not in options:
+            options.insert(1, '--no-copy')
+    return [program, *options, '--', *paths], True
+
+
 def generate_candidate(user_input, cwd, clarifications, backend=None):
     system = '''你是实验黑名单模式的 Linux 助手。只输出 JSON，不输出 Markdown。
 明确只读查询输出 {"status":"ready","argv":["date","-u","+%Y"],"explanation":"说明"}。
+查询当前工作目录时直接使用 pwd -P，不要询问用户具体问题。
 可以使用系统工具，不限于白名单已有的操作；仅单条参数数组，不支持管道、Shell、脚本或网络。
 目录大小 du、文件类型 file、校验值 sha256sum、日期 date 都是允许的只读查询，不要因旧操作表没有这些类型而拒绝。
 系统挂载、块设备、CPU、内存等元数据也是允许的低风险查询，不限固定操作表。未指定其他环境时，默认查询当前运行的 Linux/WSL，不因“硬盘”的措辞反复追问；说明可见设备不等于主机物理硬盘。
@@ -88,20 +130,22 @@ def generate_candidate(user_input, cwd, clarifications, backend=None):
 可以使用 /proc、/sys 中的只读系统信息；支持 awk 单行文本过滤及 sed --sandbox。不支持执行脚本、system()、重定向写入或修改系统状态。
 argv 是直接传给程序的参数数组，不能加入 Shell 的包裹引号。例如 awk 过滤用 ["awk","{print $1}","sample.txt"]；sed 前两行用 ["sed","--sandbox","-n","1,2p","sample.txt"]，不要把单引号字符放进过滤表达式。
 例如计算 sample.txt 的 SHA-256 校验值：{"status":"ready","argv":["sha256sum","--","./sample.txt"],"explanation":"计算文件校验值"}。路径必须使用实际用户文件。
-复制、移动、重命名、创建文件或目录、整理、回收和恢复必须输出 {"status":"protected"}，后续由受保护流程解析条件及预览，不生成这些操作的命令。
-真正缺少信息输出 {"status":"need_clarification","clarification":"具体问题"}。
-危险或不支持的写入、删除、提权、安装及网络输出 {"status":"unsupported","reason":"具体原因"}。
-业务文件使用工作区内相对路径。命令仍在只读、无网络的隔离 Linux 环境中运行；lsblk/findmnt 的输入由程序绑定到当前 Linux 元数据，不推断主机物理硬盘数量。'''
+复制、移动、重命名及创建目录直接生成 cp、mv 或 mkdir 参数数组；重命名只给新文件名时保持原目录。不要使用覆盖选项。复制目录可用 -r；其他选项避免使用，程序会添加防覆盖参数。路径不存在或执行失败由程序报告，不要无故追问。
+仅在确实缺少必要信息时输出 need_clarification，clarification 必须是用户能回答的完整问题，不要输出“具体问题”占位文字。
+危险命令、永久删除、提权、安装及网络输出 unsupported。业务文件使用工作区内相对路径；命令在隔离环境运行，程序检查危险参数并要求用户确认。'''
     raw = chat([{'role': 'system', 'content': system}, {'role': 'user', 'content': json.dumps(
         {'request': user_input, 'cwd': cwd, 'clarifications': clarifications}, ensure_ascii=False)}],
         backend=backend, json_mode=True)
     value = json.loads(raw)
     if not isinstance(value, dict):
         raise ValueError('黑名单候选必须是 JSON 对象')
-    allowed = {'ready': {'status','argv','explanation'}, 'protected': {'status'},
+    allowed = {'ready': {'status','argv','explanation'},
                'need_clarification': {'status','clarification'}, 'unsupported': {'status','reason'}}
     if set(value) != allowed.get(value.get('status')):
         raise ValueError('黑名单候选字段不完整或包含未知字段')
+    if value['status'] == 'need_clarification' and (not isinstance(value['clarification'], str)
+            or value['clarification'].strip(' ?？。') in {'', '具体问题', '请说明具体问题'}):
+        raise ValueError('模型没有给出可回答的具体问题')
     return value, raw
 
 
@@ -151,6 +195,8 @@ def sandbox_argv(argv, cwd, *, writable=False, excluded=(), system_root=None, in
     binary = binary.resolve(strict=True)
     if not binary.is_relative_to(Path('/usr')):
         raise ValueError('系统程序解析到运行库目录外，未执行')
+    if writable and binary.name != argv[0]:
+        raise ValueError('写入命令不能通过程序别名绕过检查')
     if not writable and (binary.name in DENIED or binary.name.startswith(('mkfs','python','pip'))):
         raise ValueError('系统程序别名指向黑名单命令，未执行')
     if not writable and binary.name != argv[0]:

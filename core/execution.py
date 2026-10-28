@@ -151,6 +151,16 @@ class BashExecutor:
             result.system_metadata = summary
             return result, actual
 
+    def execute_policy_command(self, argv, cwd, excluded=(), *, timeout_seconds=60):
+        from .command_policy import review_command, sandbox_argv
+        if os.name != 'posix' or type(self) is not BashExecutor:
+            raise RuntimeError('黑名单模式仅支持原生 Linux 沙箱，不降级到其他后端')
+        checked, writable = review_command(argv, cwd)
+        if not writable:
+            return self.execute_policy_query(checked, cwd, excluded, timeout_seconds=timeout_seconds)
+        actual = sandbox_argv(checked, cwd, writable=True, excluded=excluded)
+        return self._execute_argv(actual, timeout_seconds, cwd), actual
+
     def execute_native_item(self, prepared, action, item, *, timeout_seconds=60):
         from .command_policy import native_argv, native_internal_entry, sandbox_argv
         from .operations import workspace_path

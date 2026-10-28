@@ -166,7 +166,7 @@ class NativeRemainingLinuxTests(unittest.TestCase):
         self.assertNotIn(other,result.stdout)
         self.assertEqual((self.root/'.nl2shell-trash'/other/'data').read_bytes(),other.encode())
 
-    def test_cli_confirmation_freezes_trash_id_and_shows_actual_linux_move(self):
+    def test_direct_mode_does_not_accept_legacy_protected_response(self):
         (self.root/'a.txt').write_bytes(b'original')
         plan=parse_operation_plan(json.dumps({'status':'ready','steps':[{'operation':'trash',
                                    'parameters':{'sources':['a.txt']}}]}))
@@ -185,22 +185,12 @@ class NativeRemainingLinuxTests(unittest.TestCase):
                 patch.dict(os.environ,{'NO_COLOR':'1'}), redirect_stdout(output):
             status=execute_request(engine,self.executor,history,'将 a.txt 移入回收区',str(self.root),
                                    'confirm',input_fn=confirm)
-        self.assertEqual(status,'verified',history.last_record)
-        self.assertEqual(len(seen),1)
-        self.assertIn('回收索引：由受保护的 Python 工具记录',output.getvalue())
-        outcome=history.last_record['verification'][0]
-        self.assertIn(shlex.join(outcome['actual_commands'][0]),output.getvalue())
-        identifier=outcome['items'][0]['trash_id']
-        self.assertEqual((self.root/'.nl2shell-trash'/identifier/'data').read_bytes(),b'original')
-        self.assertFalse((self.root/'a.txt').exists())
-        with patch('core.command_policy.chat',side_effect=AssertionError('内置恢复不应调用模型')), \
-                redirect_stdout(io.StringIO()):
-            status=execute_request(engine,self.executor,history,'/restore '+identifier,str(self.root),
-                                   'confirm',input_fn=lambda _: 'yes')
-        self.assertEqual(status,'verified',history.last_record)
+        self.assertEqual(status,'plan_failed',history.last_record)
+        self.assertEqual(seen,[])
         self.assertEqual((self.root/'a.txt').read_bytes(),b'original')
+        self.assertFalse((self.root/'.nl2shell-trash').exists())
 
-    def test_cli_cancellation_never_creates_trash_record_or_moves_file(self):
+    def test_legacy_trash_response_never_creates_record_or_moves_file(self):
         (self.root/'a.txt').write_bytes(b'original')
         plan=parse_operation_plan(json.dumps({'status':'ready','steps':[{'operation':'trash',
                                    'parameters':{'sources':['a.txt']}}]}))
@@ -211,12 +201,12 @@ class NativeRemainingLinuxTests(unittest.TestCase):
                 patch.object(engine,'generate_task_plan',return_value=plan), redirect_stdout(io.StringIO()):
             status=execute_request(engine,self.executor,history,'将 a.txt 移入回收区',str(self.root),
                                    'confirm',input_fn=lambda _: 'no')
-        self.assertEqual(status,'cancelled')
+        self.assertEqual(status,'plan_failed')
         self.assertFalse(history.last_record['executed'])
         self.assertEqual((self.root/'a.txt').read_bytes(),b'original')
         self.assertFalse((self.root/'.nl2shell-trash').exists())
 
-    def test_cli_multiple_trash_items_keep_distinct_confirmed_bindings(self):
+    def test_direct_mode_does_not_execute_legacy_multiple_trash_plan(self):
         (self.root/'a.txt').write_bytes(b'first')
         (self.root/'b.txt').write_bytes(b'second')
         plan=parse_operation_plan(json.dumps({'status':'ready','steps':[{'operation':'trash',
@@ -235,17 +225,10 @@ class NativeRemainingLinuxTests(unittest.TestCase):
                 patch.dict(os.environ,{'NO_COLOR':'1'}), redirect_stdout(output):
             status=execute_request(engine,self.executor,history,'将 a.txt 和 b.txt 放入回收区',str(self.root),
                                    'confirm',input_fn=confirm)
-        self.assertEqual(status,'verified',history.last_record)
-        outcome=history.last_record['verification'][0]
-        self.assertEqual(len(outcome['actual_commands']),2)
-        identifiers=[item['trash_id'] for item in outcome['items']]
-        self.assertEqual(len(set(identifiers)),2)
-        for item,content in zip(outcome['items'],(b'first',b'second')):
-            self.assertEqual((self.root/'.nl2shell-trash'/item['trash_id']/'data').read_bytes(),content)
-        for command in outcome['actual_commands']:
-            self.assertIn(shlex.join(command),output.getvalue())
-        self.assertFalse((self.root/'a.txt').exists())
-        self.assertFalse((self.root/'b.txt').exists())
+        self.assertEqual(status,'plan_failed',history.last_record)
+        self.assertEqual((self.root/'a.txt').read_bytes(),b'first')
+        self.assertEqual((self.root/'b.txt').read_bytes(),b'second')
+        self.assertFalse((self.root/'.nl2shell-trash').exists())
 
 
 if __name__=='__main__':

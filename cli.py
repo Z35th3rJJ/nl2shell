@@ -330,7 +330,7 @@ def show_outcome(outcome):
 
 def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, input_fn,
                               timeout_seconds=60, assume_yes=False, batch_id='', batch_index=None):
-    from core.command_policy import generate_candidate, review_query, sandbox_argv
+    from core.command_policy import generate_candidate, review_command, sandbox_argv
     started = time.monotonic()
     input_seconds = 0
     clarifications, attempts, outcomes = [], [], []
@@ -374,24 +374,15 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
             raise SystemExit(0)
         return answer
     try:
+        if user_input == '/trash' or user_input.startswith('/restore '):
+            return finish('unsupported', '黑名单直接命令模式暂不支持回收区内置命令')
         for _ in range(3):
-            resolved = resolve_request(user_input, clarifications)
             if remaining_time() <= 0:
                 return finish('blocked','任务时限已用完，未执行')
-            if resolved is not None and uses_bash(resolved):
-                attempts.append({'phase':'supported_query_routing','source':'original_request',
-                                 'requirements':plan_payload(resolved)})
-                return execute_request(engine, executor, history, user_input, cwd, mode, input_fn,
-                    timeout_seconds=remaining_time(), assume_yes=assume_yes,
-                    batch_id=batch_id, batch_index=batch_index, _policy_routed=True, _policy_answers=clarifications)
             candidate, raw = generate_candidate(user_input, cwd, clarifications, engine._backend)
             attempts.append({'phase':'blacklist_candidate','raw_output':redact_value(raw)})
             if remaining_time() <= 0:
                 return finish('blocked','任务时限已用完，未执行')
-            if candidate['status'] == 'protected':
-                return execute_request(engine, executor, history, user_input, cwd, mode, input_fn,
-                    timeout_seconds=remaining_time(), assume_yes=assume_yes,
-                    batch_id=batch_id, batch_index=batch_index, _policy_routed=True, _policy_answers=clarifications)
             if candidate['status'] == 'unsupported':
                 return finish('unsupported', '黑名单模型拒绝（非程序安全检查结果）：' + str(candidate['reason']))
             if candidate['status'] != 'need_clarification':
@@ -406,15 +397,16 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
         else:
             return finish('needs_clarification', '仍有必要条件未明确，任务停止')
         phase = 'policy_review'
-        argv = review_query(candidate['argv'], cwd)
+        argv, writable = review_command(candidate['argv'], cwd)
         if argv != candidate['argv']:
-            attempts[-1]['execution_context_binding'] = {'reason':'绑定当前 Linux 只读系统元数据',
+            attempts[-1]['execution_context_binding'] = {'reason':'应用命令安全参数或绑定只读系统元数据',
                 'model_argv':candidate['argv'], 'reviewed_argv':argv}
-        launcher = sandbox_argv(argv, cwd, excluded=excluded)
+        launcher = sandbox_argv(argv, cwd, writable=writable, excluded=excluded)
         _section(1, '执行预览')
-        print('黑名单扩展命令：' + shlex.join(argv))
-        print('运行环境：只读工作区、无网络、无提权的 Linux 沙箱。系统挂载与设备查询绑定当前 Linux/WSL 的只读元数据。')
-        print('此扩展命令没有独立的任务结果验证器；退出码 0 不等于任务目标已验证。')
+        print('黑名单命令：' + shlex.join(argv))
+        print('运行环境：' + ('可写工作区' if writable else '只读工作区') + '、无网络、无提权的 Linux 沙箱。')
+        print('工作目录映射：沙箱 /workspace → ' + str(Path(cwd).resolve()))
+        print('此命令没有独立的任务结果验证器；退出码 0 不等于任务目标已验证。')
         if mode == PREVIEW:
             return finish('preview')
         if mode == BATCH or assume_yes:
@@ -425,7 +417,7 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
             return finish('cancelled')
         if remaining_time() <= 0:
             return finish('blocked', '任务时限已用完，未执行')
-        if sandbox_argv(argv, cwd, excluded=excluded) != launcher:
+        if sandbox_argv(argv, cwd, writable=writable, excluded=excluded) != launcher:
             return finish('blocked', '沙箱范围已变化，请重新提交任务')
         save_history(history, user_input=user_input, cwd=cwd, command=shlex.join(argv), risk=WARN,
             status='confirmed', executed=False, execution_state='not_started', file_change_state='unchanged',
@@ -435,15 +427,18 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
         if remaining <= 0:
             return finish('blocked','任务时限已用完，未执行')
         phase = 'execution'
-        result, actual = executor.execute_policy_query(argv, cwd, excluded,
+        result, actual = executor.execute_policy_command(argv, cwd, excluded,
             timeout_seconds=remaining)
+        detail = ('命令超时，未自动重放' if result.timed_out else
+                  '命令退出码非零：' + str(result.exit_code) if result.exit_code != 0 else
+                  '命令已退出；未进行独立目标验证，不宣称任务成功')
         outcome = redact_value({'step':1,'operation':'blacklist_query','execution_kind':'blacklist_sandbox',
             'status':'unverified' if result.exit_code == 0 and not result.timed_out else 'execution_failed',
-            'executed':True,'execution_state':result.process_state,'file_change_state':'unchanged',
+            'executed':True,'execution_state':result.process_state,'file_change_state':'unknown' if writable else 'unchanged',
             'actual_argv':argv,'launcher_argv':actual,'exit_code':result.exit_code,'stdout':result.stdout,
             'stderr':result.stderr,'timed_out':result.timed_out,'output_truncated':result.output_truncated,
             'task_completed':False,'duration_seconds':result.duration_seconds,'items':[],
-            'detail':'命令已退出；扩展命令未进行独立目标验证，不宣称任务成功'})
+            'detail':detail})
         if result.system_metadata is not None:
             outcome['system_metadata'] = redact_value(result.system_metadata)
         outcomes.append(outcome)
@@ -454,7 +449,8 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
             outcomes.append({'step':1,'operation':'blacklist_query','status':'execution_failed',
                 'executed':getattr(error,'process_started',False),
                 'execution_state':getattr(error,'process_state','not_started'),
-                'file_change_state':'unchanged','detail':str(error),'items':[]})
+                'file_change_state':'unknown' if writable and getattr(error,'process_started',False) else 'unchanged',
+                'detail':str(error),'items':[]})
         status = 'plan_failed' if phase == 'planning' else 'execution_failed' if phase == 'execution' else 'blocked'
         return finish('interrupted' if isinstance(error, KeyboardInterrupt) else status, str(error))
 
@@ -467,10 +463,6 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                     batch_index: int | None = None, assume_yes: bool = False,
                     agent_context: dict | None = None, _policy_routed=False, _policy_answers=()) -> str:
     if getattr(engine, 'command_policy', 'whitelist') == 'blacklist' and not _policy_routed:
-        if user_input == '/trash' or user_input.startswith('/restore '):
-            return execute_request(engine,executor,history,user_input,cwd,mode,input_fn,
-                timeout_seconds=timeout_seconds,batch_id=batch_id,batch_index=batch_index,
-                assume_yes=assume_yes,agent_context=agent_context,_policy_routed=True)
         return execute_blacklist_request(engine, executor, history, user_input, cwd, mode, input_fn,
             timeout_seconds=timeout_seconds, assume_yes=assume_yes, batch_id=batch_id, batch_index=batch_index)
     plan = TaskPlan(())
