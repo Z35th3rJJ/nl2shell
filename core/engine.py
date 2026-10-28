@@ -465,10 +465,35 @@ _AGENT_SYSTEM = """你是帮助 Linux 新手的任务规划器。理解中文需
 """ + "\n" + DIRECTORY_RULES
 
 
+def _rename_request(user_input, clarifications, cwd):
+    if clarifications:
+        return None
+    match = re.fullmatch(r"(?:将|把)\s*(?P<source>" + PATH_TOKEN + r")\s*(?:重命名|改名|更名)(?:为|成)\s*(?P<target>" + PATH_TOKEN + r")[。]?", user_input.strip())
+    if match is None:
+        return None
+    root = Path(cwd).resolve()
+    source = workspace_path(root, path_value(match['source']))
+    target = path_value(match['target'])
+    destination = (source.parent / target if not Path(target).is_absolute()
+                   and '/' not in target and '\\' not in target else target)
+    return (source.relative_to(root).as_posix(),
+            workspace_path(root, str(destination)).relative_to(root).as_posix(), target)
+
+
 def _task_plan_errors(plan: TaskPlan, user_input: str, cwd: str, required, clarifications=()) -> list[str]:
     if plan.clarification or plan.refused:
         return []
     errors = []
+    rename = _rename_request(user_input, clarifications, cwd)
+    if rename is not None and (len(plan.steps) != 1 or plan.steps[0].operation != 'rename'):
+        errors.append('用户要求重命名，计划不得改变操作或增加步骤')
+    for step in plan.steps:
+        if step.operation == 'rename':
+            if rename is not None and (len(plan.steps) != 1 or
+                    (step.parameters['source'], step.parameters['destination']) != rename[:2]):
+                errors.append('重命名计划与用户指定的源路径或目标路径不一致')
+            elif rename is None and Path(step.parameters['source']).parent != Path('.'):
+                errors.append('无法确认子目录文件的重命名目标，请明确完整源路径和目标路径')
     expected = resolve_request(user_input, clarifications)
     if expected is not None:
         from .bash_queries import same_query_plan
@@ -582,6 +607,13 @@ def _plan_defaults(raw, user_input, answers, cwd):
         if not isinstance(step, dict):
             continue
         parameters = step.get("parameters")
+        rename = _rename_request(user_input, answers, cwd) if step.get('operation') == 'rename' else None
+        if rename is not None and isinstance(parameters, dict):
+            source, destination, requested_target = rename
+            if (parameters.get('source') == source and parameters.get('destination') == requested_target
+                    and requested_target != destination):
+                parameters['destination'] = destination
+                changed = True
         copy_text = text
         copy_binding = None
         if step.get("operation") in {"copy_files", "move_files"} and isinstance(parameters, dict):
