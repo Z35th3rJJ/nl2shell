@@ -4,6 +4,7 @@ import json
 import re
 import math
 from pathlib import PureWindowsPath
+from .runtime_diagnostics import observe
 
 
 INTENTS = {
@@ -55,6 +56,7 @@ READ_OPERATIONS = {"find_files", "count_files", "list_trash", "system_info", "wo
                    "list_directory", "search_text", "text_stats", "read_text", "file_inode", "largest_file"}
 
 
+@observe("plan_parse", "parse_error")
 def parse_operation_plan(raw: str) -> TaskPlan:
     """主执行入口仅接受操作计划；旧命令格式不可执行。"""
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.I)
@@ -90,6 +92,7 @@ def parse_operation_plan(raw: str) -> TaskPlan:
     return TaskPlan(tuple(result))
 
 
+@observe("parameter_check", "parameter_error")
 def validate_parameters(operation: str, p: dict, index: int, previous) -> None:
     allowed = {
         "find_files": {"path", "recursive", "pattern", "modified_within_days", "size_gt_bytes"},

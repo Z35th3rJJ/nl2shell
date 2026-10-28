@@ -100,6 +100,10 @@ largest_file：查询指定目录中按字节大小最大的普通文件；支�
 """ + "\n" + DIRECTORY_RULES
 
 
+from .runtime_diagnostics import observe, emit, link_exception
+
+
+@observe("intent", "model_error")
 def analyze_request(user_input, answers, backend, attempts):
     expected = resolve_request(user_input, answers)
     transfer = explicit_transfer_operation(user_input, answers)
@@ -199,6 +203,7 @@ def analyze_request(user_input, answers, backend, attempts):
                 if result["operations"] != [step.operation for step in expected.steps]:
                     raise ValueError("意图与原始需求可确定的操作不一致")
                 return result
+            emit("intent_parse", "succeeded", output=result)
             if status == "unsupported":
                 rejected = result
             if status == "need_clarification":
@@ -211,12 +216,20 @@ def analyze_request(user_input, answers, backend, attempts):
                 return result
             if attempt == 0:
                 record["review_requested"] = True
+                emit("intent_review", "requested", input=result, reason="现有意图复核，不是格式修正")
                 messages.extend([{"role": "assistant", "content": raw},
                                  {"role": "user", "content": "请复核上一条意图是否准确表达原始需求。只根据下面的原始需求及用户补充判断，不把复核说明当成需求，不添加未要求的动作。按系统规则输出最终意图 JSON。\n" + messages[1]["content"]}])
                 continue
             return result
         except (ValueError, TypeError) as error:
             record["validation_errors"] = [str(error)]
+            violation = emit("intent_parse", "failed", output={"raw": raw, "error": str(error)},
+                             error_code="parse_error", reason=str(error), exception=error)
+            if attempt == 0:
+                emit("format_correction", "requested", input={"raw": raw, "error": str(error)},
+                     reason="意图格式无效", attempt=attempt + 1)
             messages.extend([{"role": "assistant", "content": raw},
                              {"role": "user", "content": f"输出无效：{error}。请只重新输出规定的 JSON。"}])
-    raise ValueError("无法取得有效的结构化意图，不能将计划标记为 ready")
+    error = ValueError("无法取得有效的结构化意图，不能将计划标记为 ready")
+    link_exception(error, violation)
+    raise error

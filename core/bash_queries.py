@@ -12,6 +12,7 @@ import time
 from .operations import workspace_path, find_files, _check_deadline
 from .task_plan import plan_payload, validate_parameters
 from .redaction import redact_text
+from .runtime_diagnostics import emit, observe, differences, link_result
 
 QUERY_OPERATIONS = {"working_directory", "list_directory", "find_files", "count_files",
                     "search_text", "text_stats", "read_text", "system_info", "file_inode", "largest_file"}
@@ -39,7 +40,14 @@ def same_query_plan(plan, reference):
                 p.setdefault("path", ".")
             result.append((step.operation, p))
         return result
-    return reference.status == "ready" and signature(plan) == signature(reference)
+    candidate = signature(plan) if reference.status == "ready" else None
+    expected = signature(reference) if reference.status == "ready" else None
+    matched = reference.status == "ready" and candidate == expected
+    emit("strict_comparison", "succeeded" if matched else "failed",
+         input={"candidate": plan_payload(plan), "reference": plan_payload(reference)},
+         output={"matched": matched, "diff": differences(candidate, expected), "reference_status": reference.status},
+         error_code=None if matched else "reference_mismatch", reason="" if matched else "计划与独立需求契约不一致")
+    return matched
 
 
 def _sensitive(path, root):
@@ -118,6 +126,7 @@ def required_argv(operation, p, now, excluded=()):
     raise ValueError("不支持的只读任务")
 
 
+@observe("preparation", "safety_rejected")
 def prepare_queries(plan, cwd, *, now=None, timeout_seconds=60, excluded_paths=()):
     if (not uses_bash(plan) or plan.status != "ready" or plan.refused or plan.clarification
             or not 1 <= len(plan.steps) <= 3):
@@ -249,6 +258,7 @@ system_info: disk=["df","-B1","--output=size,used,avail","--","PATH"]，没有 p
             {"role": "user", "content": json.dumps({"plan": plan_payload(plan), "rules": tasks}, ensure_ascii=False)}]
 
 
+@observe("command_review", "safety_rejected")
 def review_commands(prepared, payload):
     if not isinstance(payload, dict) or set(payload) != {"commands"}:
         raise ValueError("候选必须是 commands 对象，不能是任意命令字符串")
@@ -264,9 +274,13 @@ def review_commands(prepared, payload):
         if (not isinstance(argv, list) or not argv or
                 any(not isinstance(value, str) or "\0" in value for value in argv)
                 or argv != action["_required_argv"]):
+            error = ValueError("候选命令不符合计划、参数或路径规则；未执行，也不替换命令")
+            emit("command_comparison", "failed", input={"candidate": argv, "required": action["_required_argv"]},
+                 output={"diff": differences(argv, action["_required_argv"])},
+                 error_code="safety_rejected", reason="候选参数与允许的参数数组不一致，安全审查拒绝", step=action["step"], exception=error)
             action["candidate_argv"] = argv
             action["review"] = "rejected"
-            raise ValueError("候选命令不符合计划、参数或路径规则；未执行，也不替换命令")
+            raise error
         action.update(candidate_argv=list(argv), command=shlex.join(argv),
                       candidate_explanation=candidate["explanation"], review="accepted")
     return prepared
@@ -277,6 +291,7 @@ def query_preview(prepared):
             for action in prepared["actions"]]
 
 
+@observe("verification", "verification_failed")
 def _verify_output(prepared, action, result):
     root = Path(prepared["cwd"])
     operation, p = action["operation"], action["parameters"]
@@ -360,6 +375,12 @@ def execute_query(prepared, action, executor, *, timeout_seconds=60, sandboxed=F
             phase = "execution"
             outcome.update(status="execution_failed", detail="命令失败或超时，未自动修复")
         elif result.output_truncated or result.stderr or not _verify_output(prepared, action, result):
+            if result.output_truncated or result.stderr:
+                gate = emit("verification_gate", "failed", input={"result": result, "action": action},
+                            error_code="verification_failed", step=action["step"],
+                            reason="独立验证被阻止：" + ("output_truncated" if result.output_truncated else "stderr 非空"))
+                emit("verification", "blocked", step=action["step"], blocked_by=gate,
+                     reason="验证门禁拒绝当前输出，未调用独立结果比较")
             outcome.update(status="unverified", detail="命令已运行，但输出或实际环境未通过独立验证")
         else:
             empty = not result.stdout
@@ -374,6 +395,7 @@ def execute_query(prepared, action, executor, *, timeout_seconds=60, sandboxed=F
             elif action["operation"] == "largest_file":
                 outcome["largest_files"] = action["_largest_files"]
     except (OSError, ValueError, RuntimeError, TypeError, KeyboardInterrupt) as error:
+        link_result(outcome, error)
         status = "unverified" if phase == "verification" else "blocked" if phase in {"review", "environment"} and isinstance(error, ValueError) else "execution_failed"
         outcome.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else status,
                        detail=str(error), timed_out=isinstance(error, TimeoutError),

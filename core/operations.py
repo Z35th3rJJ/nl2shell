@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from .task_plan import READ_OPERATIONS, TaskPlan, validate_parameters
 from .execution import ExecutionStartError
+from .runtime_diagnostics import observe
 
 TRASH = ".nl2shell-trash"
 
@@ -147,6 +148,7 @@ def trash_entries(root: Path) -> list[dict]:
     return entries
 
 
+@observe("preparation", "safety_rejected")
 def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excluded_paths=()) -> dict:
     """只读预览：冻结文件清单和实际目标名称。"""
     root = Path(cwd).expanduser().resolve(strict=True)
@@ -325,6 +327,7 @@ def _move_no_replace(source: Path, destination: Path):
         raise OSError(code, os.strerror(code), str(destination))
 
 
+@observe("python_tool", "execution_failed")
 def execute_action(prepared: dict, action: dict, executor=None, *, timeout_seconds=60) -> dict:
     root = Path(prepared["cwd"])
     operation = action["operation"]

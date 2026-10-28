@@ -10,6 +10,7 @@ import tempfile
 import time
 from uuid import uuid4
 from .measurements import measure_command
+from .runtime_diagnostics import observe
 
 
 @dataclass
@@ -90,7 +91,6 @@ class BashExecutor:
         try:
             return subprocess.run(
                 [self.bash_path, "-lc", "true"],
-                text=True,
                 capture_output=True,
                 check=False,
                 timeout=5,
@@ -179,6 +179,7 @@ class BashExecutor:
         return self._execute_argv(actual,timeout_seconds,prepared['cwd']),actual
 
     @measure_command
+    @observe("execution_boundary", "execution_failed")
     def _execute_argv(self, argv: list[str], timeout_seconds: float | None,
                       cwd: str | None = None, *, env=None) -> ExecutionResult:
 

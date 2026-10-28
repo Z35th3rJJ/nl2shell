@@ -22,6 +22,7 @@ from core.execution import (
 )
 from core.history import HistoryStore
 from core.redaction import redact_value
+from core.runtime_diagnostics import diagnostic_task, emit, observe, result_cause
 from core.input_session import create_input_session
 from core.settings import (
     AUTO_SAFE, ENV_PATH, PREVIEW, AppSettings,
@@ -110,6 +111,7 @@ def print_history(store: HistoryStore, limit: int = 20, *, status: str | None = 
             print(f"  验证：{record['verification']}")
 
 
+@observe("audit", "audit_error")
 def save_history(store: HistoryStore, *, user_input: str, cwd: str, command: str,
                  risk: str, status: str, executed: bool, **details) -> None:
     measurements = snapshot()
@@ -458,6 +460,7 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
 
 
 @measure_task
+@diagnostic_task
 def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStore,
                     user_input: str, cwd: str, mode: str, input_fn=input,
                     timeout_seconds: float = 60, batch_id: str = "",
@@ -496,6 +499,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             _section(3, "执行与验证")
             result_section_printed = True
 
+    @observe("user_response", "user_cancelled")
     def ask(message):
         try:
             answer = input_fn(message).strip()
@@ -533,6 +537,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                 raise TimeoutError("Agent 总时限已用完")
             agent_context["check"](prepared)
 
+    @observe("execution", "execution_failed")
     def run_action(value, action):
         nonlocal phase
         base = {"step": action["step"], "operation": action["operation"], "items": [],
@@ -631,6 +636,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             plan = TaskPlan((TaskStep(operation="list_trash"),))
         else:
             plan = generate_plan()
+        emit("plan_received", "succeeded", output=plan_payload(plan))
         for _ in range(3):
             if not plan.clarification:
                 break
@@ -641,6 +647,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                 return finish("needs_clarification", plan.clarification)
             clarifications.append(f"问题：{plan.clarification}；用户回答：{answer}")
             plan = generate_plan(clarifications=clarifications)
+            emit("plan_received", "succeeded", output=plan_payload(plan))
         if plan.clarification:
             return finish("needs_clarification", plan.clarification)
     except (KeyboardInterrupt, EOFError):
@@ -652,6 +659,9 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     if plan.refused:
         return finish("unsupported", "规划阶段拒绝（非路径检查结果）：" + (plan.reason or "暂不支持这项操作"))
     bash_query = uses_bash(plan)
+    if not bash_query:
+        for stage in ("independent_reference", "strict_comparison", "command_review", "verification"):
+            emit(stage, "skipped", reason="固定 Python 文件工具路径；文件状态检查由现有工具内部完成")
     if not bash_query and any(step.operation in {"system_info", "working_directory", "list_directory",
                                                 "search_text", "text_stats", "read_text", "file_inode", "largest_file"} for step in plan.steps):
         return finish("blocked", "首版请把命令查询和文件写入分开提交；未执行任何步骤")
@@ -733,7 +743,10 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
     for _ in range(3):
         if not automatic:
             if ask(_paint("\n是否执行以上操作？请输入 yes 确认 > ", YELLOW)).lower() != "yes":
+                emit("confirmation", "failed", error_code="user_cancelled", reason="用户未输入 yes，未授权执行")
                 return finish("cancelled")
+        emit("confirmation", "succeeded", output={"confirmed": True, "automatic": automatic,
+                                                     "mode": mode, "read_only": prepared["read_only"]})
         try:
             check_agent()
             current = prepare()
@@ -798,8 +811,10 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             show_preview(current)
             phase = "confirmation"
             if ask(_paint("\n是否执行这一次只读修复？请输入 yes 确认 > ", YELLOW)).lower() != "yes":
+                emit("confirmation", "failed", error_code="user_cancelled", reason="用户未授权只读修复")
                 attempt["status"] = "cancelled"
                 return failed
+            emit("confirmation", "succeeded", output={"confirmed": True, "repair": True})
             checked = prepare_queries(plan, cwd, now=prepared["now"],
                                       timeout_seconds=max(0, deadline - time.monotonic()), excluded_paths=excluded)
             review_commands(checked, payload)
@@ -835,7 +850,10 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             outcomes[-1] = outcome
         if outcome["status"] not in {"verified", "no_matches"}:
             break
+    stop_event = result_cause(outcomes[-1]) if outcomes else None
     for action in prepared["actions"][len(outcomes):]:
+        blocked = emit("execution", "blocked", input=action, reason="前序步骤未成功", step=action["step"], blocked_by=stop_event)
+        emit("verification", "blocked", reason="当前步骤因前序失败而未执行", step=action["step"], blocked_by=blocked)
         outcomes.append({"step": action["step"], "operation": action["operation"],
                          "status": "not_executed", "detail": "前序步骤未成功", "executed": False,
                          "execution_state": "not_started", "file_change_state": "unchanged",

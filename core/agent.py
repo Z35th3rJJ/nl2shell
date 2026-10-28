@@ -12,6 +12,7 @@ from .measurements import measure_task
 from .operations import snapshot, workspace_path
 from .redaction import redact_value
 from .task_plan import TaskPlan, parse_operation_plan, plan_payload
+from .runtime_diagnostics import diagnostic_task, observe, emit, differences, record_exception
 
 
 def contract_messages(goal):
@@ -30,6 +31,7 @@ selection 只能引用更早的 find_files，表示处理该次实际查找的�
 """}, {"role": "user", "content": json.dumps({"goal": goal}, ensure_ascii=False)}]
 
 
+@observe("agent_contract_parse", "parse_error")
 def parse_contract(raw, cwd, goal):
     value = json.loads(raw)
     if not isinstance(value, dict):
@@ -157,6 +159,7 @@ class _StepEngine:
         pass
 
 
+@observe("final_verification", "verification_failed")
 def verify_final(prepared_steps, deadline):
     wrote = any(not p["read_only"] for p in prepared_steps.values())
     for prepared in prepared_steps.values():
@@ -192,6 +195,7 @@ def verify_final(prepared_steps, deadline):
 
 
 @measure_task
+@diagnostic_task
 def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=input,
                   timeout_seconds=60, assume_yes=False):
     from cli import execute_request, save_history, BATCH
@@ -201,6 +205,7 @@ def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=inp
     trace, observations, completed, prepared_steps = [], {}, set(), {}
     signatures = set()
     contract = None
+    phase = "guard"
     token = request_deadline.set(context["deadline"])
 
     def finish(status, reason=""):
@@ -225,7 +230,9 @@ def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=inp
     try:
         if mode == BATCH:
             return finish("blocked", "首版 Agent 不支持批处理")
+        phase = "model"
         contract = engine.agent_contract(user_input, cwd)
+        phase = "guard"
         if contract["status"] != "ready":
             return finish("needs_clarification" if contract["status"] == "need_clarification" else "unsupported",
                           contract.get("clarification", contract.get("reason", "")))
@@ -234,7 +241,9 @@ def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=inp
         for iteration in range(6):
             if time.monotonic() >= context["deadline"]:
                 return finish("blocked", "Agent 总时限已用完")
+            phase = "model"
             decision = engine.agent_decide(user_input, contract, list(observations.values()))
+            phase = "guard"
             if time.monotonic() >= context["deadline"]:
                 return finish("blocked", "Agent 决策超过总时限")
             row = {"iteration": iteration + 1, "decision": decision, "observations_used": list(observations),
@@ -256,7 +265,9 @@ def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=inp
                     raise ValueError("目标尚未独立验证，模型不能宣布完成")
                 if set(basis) != completed:
                     raise ValueError("完成决策必须引用全部已验证的实际观察")
+                phase = "verification"
                 verify_final(prepared_steps, context["deadline"])
+                phase = "guard"
                 row["review"] = "accepted"
                 return finish("verified")
             if set(decision) - {"status", "rule", "step", "basis", "reason"} or decision.get("rule") not in by_id:
@@ -292,7 +303,11 @@ def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=inp
             checked = plan_payload(plan)["steps"][0]
             checked.pop("explanation")
             if checked != expected:
-                raise ValueError("下一步参数遗漏条件或扩大了用户授权范围")
+                error = ValueError("下一步参数遗漏条件或扩大了用户授权范围")
+                emit("agent_decision_review", "failed", input={"actual": checked, "expected": expected},
+                     output={"diff": differences(checked, expected)}, error_code="safety_rejected",
+                     reason="下一步参数遗漏条件或扩大了用户授权范围", exception=error)
+                raise error
             row["resolved_step"] = checked
             signature_parameters = dict(checked["parameters"])
             if checked["operation"] in {"find_files", "count_files"}:
@@ -320,6 +335,8 @@ def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=inp
                     prepared_steps[rule["id"]] = prepared
             context["check"] = check
             row["review"] = "accepted"
+            emit("agent_decision_review", "succeeded", input=decision, output={"resolved_step": checked,
+                 "expected": expected, "basis": basis}, reason="通过动作约束，尚未执行")
             status = execute_request(_StepEngine(engine, plan), executor, history, user_input, cwd, mode,
                 input_fn=input_fn, timeout_seconds=max(0, context["deadline"] - time.monotonic()),
                 assume_yes=assume_yes, agent_context=context)
@@ -342,6 +359,8 @@ def execute_agent(engine, executor, history, user_input, cwd, mode, input_fn=inp
         finish("cancelled", "用户退出，停止后续操作")
         raise
     except (ValueError, TypeError, KeyError, RuntimeError, OSError) as error:
+        record_exception("agent_guard", error,
+                         {"model": "model_error", "verification": "verification_failed"}.get(phase, "safety_rejected"))
         return finish("blocked", str(error))
     except (KeyboardInterrupt, EOFError):
         return finish("interrupted", "用户中断，停止，不重放")

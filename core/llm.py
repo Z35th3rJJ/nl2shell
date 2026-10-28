@@ -5,6 +5,7 @@ import httpx
 from openai import APIConnectionError, APITimeoutError, OpenAI, OpenAIError
 from .redaction import redact_messages, redact_text
 from .measurements import measured
+from .runtime_diagnostics import observe, emit
 
 # 按后端缓存客户端，支持同进程内切换（对比实验用）
 _clients: dict[str, tuple[OpenAI, str]] = {}
@@ -63,21 +64,29 @@ def _get_client(backend: str | None = None) -> tuple[OpenAI, str]:
     return client, model
 
 
+@observe("model_call", "model_error")
 def chat(messages: list[dict], backend: str | None = None, *, json_mode: bool = False) -> str:
     client, model = _get_client(backend)
     safe_messages = redact_messages(messages)
     for attempt in range(2):
+        request_id = None
         try:
             deadline = request_deadline.get()
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
                 raise TimeoutError("任务总时限已用完")
             bounded = client if remaining is None else client.with_options(timeout=remaining, max_retries=0)
+            request_id = emit("model_request", "started", input={"messages": safe_messages,
+                              "model": model, "backend": model_configuration(backend)["backend"],
+                              "temperature": 0, "json_mode": json_mode, "remaining_seconds": remaining},
+                              attempt=attempt + 1)
             with measured('model', backend=backend or os.environ.get('LLM_BACKEND','local'), model=model):
                 response = bounded.chat.completions.create(
                     model=model, messages=safe_messages, temperature=0,
                     **({"response_format": {"type": "json_object"}} if json_mode else {}),
                 )
+            emit("model_response", "succeeded", output={"content": response.choices[0].message.content if response.choices else None},
+                 attempt=attempt + 1, request_event_id=request_id)
             if not response.choices:
                 raise RuntimeError("模型返回了空响应，请重试")
             content = response.choices[0].message.content
@@ -87,10 +96,16 @@ def chat(messages: list[dict], backend: str | None = None, *, json_mode: bool = 
                 raise RuntimeError("模型返回了空响应，请重试")
             return content.strip()
         except (APIConnectionError, APITimeoutError) as error:
+            emit("model_response", "failed", error_code="model_error", reason=str(error),
+                 output={"exception": type(error).__name__, "message": str(error)}, attempt=attempt + 1,
+                 exception=error, request_event_id=request_id)
             if attempt == 0:
                 time.sleep(0.2 if request_deadline.get() is None else max(0, min(0.2, request_deadline.get() - time.monotonic())))
                 continue
             raise RuntimeError(f"模型连接失败：{redact_text(str(error))}") from error
         except OpenAIError as error:
+            emit("model_response", "failed", error_code="model_error", reason=str(error),
+                 output={"exception": type(error).__name__, "message": str(error)}, attempt=attempt + 1,
+                 exception=error, request_event_id=request_id)
             raise RuntimeError(f"模型请求失败：{redact_text(str(error))}") from error
     raise RuntimeError("模型请求失败")

@@ -267,6 +267,22 @@ inode 与最大文件查询只读取元数据。最大文件按字节数比较�
 
 </details>
 
+## Coding Agent 运行诊断
+
+CLI 单任务、批处理中的每项任务及完整 Agent 任务自动分配唯一 `task_id`，旁路记录实际事件。Agent 中间工具调用沿用同一任务标识。诊断记录不改变历史审计字段、JSON 输出、终端布局、确认、安全审查或执行策略。
+
+诊断包位于本机应用数据目录：Windows 为 `%LOCALAPPDATA%/nl2shell/diagnostics/<task_id>/`，Linux 为 `${XDG_DATA_HOME:-~/.local/share}/nl2shell/diagnostics/<task_id>/`，macOS 为 `~/Library/Application Support/nl2shell/diagnostics/<task_id>/`。目录解析后若位于 Git 仓库内则拒绝保存，不回退到项目目录。
+
+每次运行保留 `manifest.json`、顺序递增的 `trace.jsonl`、去重的 `evidence/` 和 `AI_README.md`；失败、拒绝、取消和未完成任务另存 `failure.json`。清单包含 Git SHA、工作树是否有改动、实际加载模块路径及摘要、Python/系统/依赖版本、模型和运行参数。SHA 只标识提交；工作树有改动时需同时核对模块摘要。原始脱敏请求及实际模型响应保留为固定证据，不保证重跑模型可复现同一次输出。
+
+事件通过 `parent_event_id`、输入/输出证据引用和明确异常因果关联。`failed` 表示观察到异常，`propagated` 表示同一异常向外传播；未调用的阶段标为 `blocked` 或 `skipped` 并说明原因。`first_failure` 保留历史首错，`terminal_failure` 表示最终停止故障；直接错误和阻止原因引用后者。每次执行通过 `execution_id` 和 `step` 区分，前一步验证不能代替后一步的记录。格式修正仅统计 `requested`，意图复核另记；曾修正成功的早期异常仍留在轨迹中。
+
+诊断先脱敏再落盘，省略密钥、令牌、认证字段及环境变量映射。已识别的敏感环境变量值仅用于本机脱敏，不写入包。大型文本以内容摘要引用去重，单个证据文件最多 64 KiB，截断及省略字段在索引中标记。诊断存储不可用时不改变原流程，原审计写入失败仍会阻止执行；部分记录失败会在可写的清单中标记。未知格式的敏感信息仍可能无法识别，包只供本机审核，不应上传。
+
+处理预算在复制及序列化前生效：限制单条文本、文本总量、容器项数、节点数和深度，具体上限见 `core/runtime_diagnostics.py`。截断后的内容摘要仅代表有界脱敏内容，不代表完整原始输入。读取附件使用 `read_evidence` 校验当前索引、规范化路径、大小和摘要，拒绝目录外链接；原始业务数据中的 `evidence_ref` 会标为 `untrusted_evidence_ref`，不能自动跟随。
+
+Coding Agent 从包内 `AI_README.md` 开始：读首错、核对原始证据和出错源码，检查测试后提出最小修复及成功标准；获得授权后才修改代码。修复前后保留独立证据。复现默认使用保存响应的测试替身，不自动运行危险命令或真实模型。Python 文件操作的现有检查与写入位于同一工具内，诊断如实记录，不声称额外运行了独立验证器。
+
 ## 测试与真实模型评测
 
 从仓库根目录、已激活虚拟环境时运行：
