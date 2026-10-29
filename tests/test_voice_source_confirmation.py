@@ -119,7 +119,7 @@ class VoiceSourceConfirmationTests(unittest.TestCase):
     @unittest.skipIf(os.name == 'nt', 'Windows 文件名不允许双引号')
     def test_literal_quotes_in_linux_filename_remain_part_of_the_source(self):
         (self.root / '项目 "final" 文件.txt').touch()
-        result = self.confirm('将 wrong.txt 复制到 backup 目录', ['yes', '1', '', 'yes'])
+        result = self.confirm('将 wrong.txt 复制到 backup 目录', ['yes', '2', '', 'yes'])
         self.assertEqual(result, '将 \'项目 "final" 文件.txt\' 复制到 "backup" 目录')
 
     def test_target_correction_cannot_escape_the_workspace(self):
