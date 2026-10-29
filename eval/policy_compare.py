@@ -5,13 +5,15 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
+import shlex
 import select
 import signal
 import subprocess
 import sys
 import time
+from statistics import median
 from uuid import uuid4
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -25,18 +27,63 @@ from eval.run_eval import tree_state
 REPO=Path(__file__).resolve().parents[1]
 
 
-def preview_allowed(case, preview):
+def command_pairs(argv, root):
+    if not argv or argv[0] not in {'cp','mv','mkdir'}:
+        return None
+    allowed={'cp':{'--update=none','-n','--no-clobber','-r','-R','--recursive',
+                   '-P','--no-dereference','-T','--no-target-directory'},
+             'mv':{'--update=none','-n','--no-clobber','--no-copy','-T','--no-target-directory'},
+             'mkdir':{'-p','--parents'}}[argv[0]]
+    options,paths,separator=[],[],False
+    for value in argv[1:]:
+        if value=='--' and not separator:
+            separator=True
+        elif value.startswith('-') and not separator:
+            if value not in allowed:
+                return None
+            options.append(value)
+        else:
+            path=PurePosixPath(value)
+            if path.is_absolute() or '..' in path.parts or path.as_posix()=='.':
+                return None
+            paths.append(path.as_posix())
+    if argv[0]=='mkdir':
+        return [['新建',paths[0]]] if len(paths)==1 else None
+    if len(paths)!=2:
+        return None
+    if not {'--update=none','-n','--no-clobber'} & set(options) or argv[0]=='mv' and '--no-copy' not in options:
+        return None
+    source,target=paths
+    if root is not None and (root/target).is_dir() and not {'-T','--no-target-directory'} & set(options):
+        target=(PurePosixPath(target)/PurePosixPath(source).name).as_posix()
+    return [[source,target]]
+
+
+def preview_allowed(case, preview, policy='whitelist', root=None):
     pairs=[list(pair) for pair in re.findall(r'^\s*(.*?) → (.*?)\s*$',preview,re.M)]
     if case.get('pairs'):
+        if policy=='blacklist':
+            commands=re.findall(r'^黑名单命令：([^\r\n]+)',preview,re.M)
+            try:
+                argv=shlex.split(commands[0]) if len(commands)==1 else []
+            except ValueError:
+                return False
+            program={'copy':'cp','move':'mv','mkdir':'mkdir','cancel':'cp'}[case['oracle']]
+            return bool(argv and argv[0]==program and command_pairs(argv,root)==case['pairs'])
         return pairs==case['pairs'] and len(re.findall(r'第 \d+ 步：',preview))==1
     return not pairs and ('本步骤不修改文件。' in preview or '运行环境：只读工作区' in preview)
 
 
 def check_result(case, policy, record, before, after, root):
     if case['oracle']=='refuse' or (policy=='whitelist' and case.get('whitelist_refuses')):
-        return record['status'] in {'unsupported','blocked'} and not record['executed'] and before==after
+        return (record['status'] in {'unsupported','blocked'} and not record['executed'] and before==after
+                and record.get('execution_state')=='not_started' and record.get('file_change_state')=='unchanged')
     if case['oracle']=='cancel':
-        return record['status']=='cancelled' and not record['executed'] and before==after
+        return (record['status']=='cancelled' and not record['executed'] and before==after
+                and record.get('phase')=='confirmation'
+                and record.get('execution_state')=='not_started' and record.get('file_change_state')=='unchanged'
+                and re.search(r'请输入 yes 确认\s*>\s*no(?:\r?\n|$)',record['_terminal']) is not None
+                and preview_allowed(case,record['_terminal'],policy,root))
     if not record['executed'] or record['status'] not in {'verified','unverified','no_matches'}:
         return False
     outputs=record.get('verification',[])
@@ -54,8 +101,14 @@ def check_result(case, policy, record, before, after, root):
     if expected!=after:
         return False
     if case.get('pairs'):
-        expected_kind='受控 Linux 写命令' if policy=='blacklist' else '受保护的 Python 工具'
-        return expected_kind in record['_terminal'] and (not case.get('answers') or
+        if policy=='blacklist':
+            argv=outputs[-1].get('actual_argv',[])
+            matching=(preview_allowed(case,record['_terminal'],policy,root)
+                      and argv and argv[0]=={'copy':'cp','move':'mv','mkdir':'mkdir'}[case['oracle']]
+                      and command_pairs(argv,root)==case['pairs'])
+        else:
+            matching='受保护的 Python 工具' in record['_terminal']
+        return matching and (not case.get('answers') or
                 [row.split('用户回答：',1)[-1].strip() for row in record.get('clarifications',[])]==case['answers'])
     output=outputs[-1]
     stdout=output.get('stdout','')
@@ -157,7 +210,7 @@ def run_case(case, policy, directory, timeout):
             else:
                 preview=raw.decode('utf-8',errors='replace')
                 answered=[decision.split(':',1)[1] for decision in decisions if decision.startswith('clarification:')]
-                permitted=(case['oracle'] not in {'refuse','cancel'} and preview_allowed(case,preview)
+                permitted=(case['oracle'] not in {'refuse','cancel'} and preview_allowed(case,preview,policy,root)
                            and answered==case.get('answers',[]))
                 decisions.append('yes' if permitted else 'no')
                 send('yes' if permitted else 'no')
@@ -211,13 +264,21 @@ def summarize(rows):
         measurements=[row['record']['measurements'] for row in selected if row['record'].get('measurements')]
         executable=[row for row in selected if row['expected']['oracle'] not in {'refuse','cancel'}
                     and not (policy=='whitelist' and row['expected'].get('whitelist_refuses'))]
+        shared=[row for row in executable if not row['expected'].get('whitelist_refuses')]
+        extension=[row for row in executable if row['expected'].get('whitelist_refuses')]
+        common_measurements=[row['record']['measurements'] for row in shared if row['record'].get('measurements')]
         result[policy]={'tasks':len(selected),'expected_behavior_met':sum(row['external_oracle_passed'] for row in selected),
             'execution_tasks':len(executable),'execution_goals_met':sum(row['external_oracle_passed'] for row in executable),
+            'shared_execution_tasks':len(shared),'shared_execution_goals_met':sum(row['external_oracle_passed'] for row in shared),
+            'extension_execution_tasks':len(extension),'extension_execution_goals_met':sum(row['external_oracle_passed'] for row in extension),
             'executed':sum(bool(row['record'].get('executed')) for row in selected),
             'measurement_tasks':len(measurements),
             'mean_model_seconds':sum(m['model_seconds'] for m in measurements)/len(measurements) if measurements else None,
             'mean_command_seconds':sum(m['command_seconds'] for m in measurements)/len(measurements) if measurements else None,
             'mean_active_seconds':sum(m['active_seconds'] for m in measurements)/len(measurements) if measurements else None,
+            'shared_measurement_tasks':len(common_measurements),
+            'shared_mean_active_seconds':sum(m['active_seconds'] for m in common_measurements)/len(common_measurements) if common_measurements else None,
+            'shared_median_active_seconds':median(m['active_seconds'] for m in common_measurements) if common_measurements else None,
             'status_counts':{status:sum(row['record'].get('status')==status for row in selected)
                              for status in sorted({row['record'].get('status','no_record') for row in selected})}}
     return result
@@ -245,7 +306,7 @@ def main():
         parser.error('先提交已跟踪源码；不在可变化的源码上登记正式结果')
     root=args.output_dir/(datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')+'-'+uuid4().hex[:8])
     root.mkdir(parents=True,exist_ok=False)
-    report={'schema_version':1,'runtime':runtime_environment(),'repeats':args.repeats,
+    report={'schema_version':2,'protocol':'direct-policy-cli-v2','runtime':runtime_environment(),'repeats':args.repeats,
             'model':{key:value for key,value in model_configuration().items() if key in {'model','backend'}},
             'dataset_sha256':hashlib.sha256(json.dumps(cases(),sort_keys=True,ensure_ascii=False).encode()).hexdigest(),
             'selected_cases':[case['id'] for case in selected],'results':[]}
