@@ -52,22 +52,28 @@ def confirm_transcript(text, prompt):
 
 
 def record_and_transcribe(prompt=input):
-    voice_model = os.environ.get("NL2SHELL_VOICE_MODEL", "qwen").strip().lower()
-    if voice_model not in {"qwen", "whisper"}:
-        raise VoiceInputError("语音模型只能选择 qwen 或 whisper。")
+    voice_model = os.environ.get("NL2SHELL_VOICE_MODEL", "sensevoice").strip().lower()
+    if voice_model not in {"sensevoice", "qwen", "whisper"}:
+        raise VoiceInputError("语音模型只能选择 sensevoice、qwen 或 whisper。")
     try:
         import numpy as np
         from opencc import OpenCC
         if voice_model == "whisper":
             from faster_whisper import WhisperModel
+        elif voice_model == "sensevoice":
+            import sherpa_onnx
     except ImportError as error:
         raise VoiceInputError("未安装语音依赖，请按 README 安装 voice 可选依赖。") from error
     if voice_model == "whisper":
         _prepare_cuda()
-    else:
+    elif voice_model == "qwen":
         qwen_python = Path.home() / ".local/share/nl2shell/qwen-asr/bin/python"
         if not qwen_python.is_file():
             raise VoiceInputError("未安装 Qwen3-ASR 独立环境，请按 README 安装。")
+    else:
+        model_dir = Path.home() / ".local/share/nl2shell/sensevoice"
+        if not all((model_dir / name).is_file() for name in ("model.int8.onnx", "tokens.txt")):
+            raise VoiceInputError("未安装 SenseVoiceSmall INT8 模型，请按 README 安装。")
 
     with tempfile.TemporaryDirectory(prefix="nl2shell-voice-") as directory:
         audio = Path(directory) / "input.wav"
@@ -122,12 +128,22 @@ def record_and_transcribe(prompt=input):
                 pcm = np.frombuffer(samples, dtype="<i2").astype(np.float32) / 32768.0
                 segments, _ = model.transcribe(pcm, language="zh", beam_size=1, vad_filter=True)
                 text = "".join(segment.text for segment in segments).strip()
-            else:
+            elif voice_model == "qwen":
                 print("正在识别语音（模型：Qwen3-ASR-0.6B，NVIDIA GPU）；首次使用可能需要下载模型。")
                 worker = Path(__file__).with_name("qwen_asr_worker.py")
                 result = subprocess.run([str(qwen_python), str(worker), str(audio)],
                                         stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True)
                 text = json.loads(result.stdout)["text"].strip()
+            else:
+                print("正在识别语音（模型：SenseVoiceSmall INT8，CPU）。")
+                model = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                    model=str(model_dir / "model.int8.onnx"), tokens=str(model_dir / "tokens.txt"),
+                    num_threads=4, language="zh", use_itn=True, provider="cpu")
+                stream = model.create_stream()
+                pcm = np.frombuffer(samples, dtype="<i2").astype(np.float32) / 32768.0
+                stream.accept_waveform(16000, pcm)
+                model.decode_stream(stream)
+                text = stream.result.text.strip()
             simplified = OpenCC("t2s").convert(text)
             if simplified != text:
                 print(f"识别原文：{text}")

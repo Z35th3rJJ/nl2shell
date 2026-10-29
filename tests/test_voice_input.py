@@ -153,6 +153,50 @@ class VoiceInputTests(unittest.TestCase):
         module.WhisperModel.assert_not_called()
 
     @unittest.skipIf(numpy is None, "需要语音可选依赖")
+    def test_sensevoice_transcribes_recording_on_cpu(self):
+        process = Mock(returncode=0)
+        process.poll.side_effect = [None, 0]
+        stream = Mock()
+        stream.result.text = '列出當前目錄 sample.txt'
+        recognizer = Mock()
+        recognizer.create_stream.return_value = stream
+        factory = Mock(return_value=recognizer)
+        module = SimpleNamespace(OfflineRecognizer=SimpleNamespace(from_sense_voice=factory))
+        def recorder(argv, **kwargs):
+            with wave.open(argv[-1], 'wb') as recording:
+                recording.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+                recording.writeframes(b'\x01\x00' * 800)
+            return process
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_dir = root / '.local/share/nl2shell/sensevoice'
+            model_dir.mkdir(parents=True)
+            (model_dir / 'model.int8.onnx').touch()
+            (model_dir / 'tokens.txt').touch()
+            with patch.dict(os.environ, {'NL2SHELL_VOICE_MODEL': 'sensevoice'}), \
+                 patch.dict(sys.modules, {'sherpa_onnx': module}), \
+                 patch('core.voice_input.Path.home', return_value=root), \
+                 patch('core.voice_input.subprocess.Popen', side_effect=recorder), patch('builtins.print'):
+                text = record_and_transcribe(lambda _: '')
+            self.assertEqual(text, '列出当前目录 sample.txt')
+            self.assertEqual(factory.call_args.kwargs['provider'], 'cpu')
+            self.assertEqual(factory.call_args.kwargs['language'], 'zh')
+            stream.accept_waveform.assert_called_once()
+            recognizer.decode_stream.assert_called_once_with(stream)
+
+    @unittest.skipIf(numpy is None, "需要语音可选依赖")
+    def test_sensevoice_missing_model_stops_before_recording(self):
+        module = SimpleNamespace(OfflineRecognizer=Mock())
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {'NL2SHELL_VOICE_MODEL': 'sensevoice'}), \
+             patch.dict(sys.modules, {'sherpa_onnx': module}), \
+             patch('core.voice_input.Path.home', return_value=Path(directory)), \
+             patch('core.voice_input.subprocess.Popen') as recorder:
+            with self.assertRaisesRegex(VoiceInputError, '未安装 SenseVoiceSmall'):
+                record_and_transcribe(lambda _: '')
+        recorder.assert_not_called()
+
+    @unittest.skipIf(numpy is None, "需要语音可选依赖")
     def test_qwen_worker_transcript_is_confirmable_and_simplified(self):
         process = Mock(returncode=0)
         process.poll.side_effect = [None, 0]

@@ -202,17 +202,26 @@ python cli.py --batch tasks.jsonl
 
 ### 语音输入（可选）
 
-Linux / WSL 需要可用的麦克风与 PulseAudio 的 `parec`（Ubuntu 软件包 `pulseaudio-utils`）；没有 `parec` 时使用 PipeWire 的 `pw-record`。在项目目录安装可选依赖：
+Linux / WSL 需要可用的麦克风与 PulseAudio 的 `parec`（Ubuntu 软件包 `pulseaudio-utils`）；没有 `parec` 时使用 PipeWire 的 `pw-record`。在项目目录安装可选依赖并下载模型（解压需要 `bzip2`）：
 
 ```bash
-.venv/bin/python -m pip install -e '.[voice,voice-gpu]'
-python3 -m venv "$HOME/.local/share/nl2shell/qwen-asr"
-"$HOME/.local/share/nl2shell/qwen-asr/bin/python" -m pip install 'torch==2.6.0' 'qwen-asr==0.0.6'
+.venv/bin/python -m pip install -e '.[voice]'
+mkdir -p "$HOME/.local/share/nl2shell/sensevoice"
+curl -fL -o /tmp/nl2shell-sensevoice.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
+tar -xjf /tmp/nl2shell-sensevoice.tar.bz2 -C "$HOME/.local/share/nl2shell/sensevoice" --strip-components=1
 ```
 
 启动助手后输入 `/voice`，说完后按回车结束录音；录音时也可输入 `/cancel` 取消。程序显示识别文字后，输入 `yes` 使用，输入完整文字可修改，输入 `/cancel` 取消。识别文字仍会经过原有计划、审查和执行确认；这个 `yes` 只确认文字，不授权文件操作。
 
-默认使用本地 Qwen3-ASR-0.6B，以 NVIDIA GPU 运行；需要可用的 CUDA 驱动和显存，首次使用需要下载模型。设置 `NL2SHELL_VOICE_MODEL=whisper` 可改用原有 faster-whisper `medium`。GPU 不可用时会提示，不会静默改用 CPU。识别结果默认转换为简体；发生转换时同时显示原文，文件名使用繁体时请在确认步骤输入原文。临时录音处理后删除。模型或麦克风不可用时可继续使用键盘。确认后的文字按所选模型后端处理，云端后端可能接收文字。
+默认使用本地 SenseVoiceSmall INT8，使用 CPU 识别。设置 `NL2SHELL_VOICE_MODEL=qwen` 或 `NL2SHELL_VOICE_MODEL=whisper` 可切换到原有 GPU 模型；这些模型需要各自的 GPU 依赖。识别结果默认转换为简体；发生转换时同时显示原文，文件名使用繁体时请在确认步骤输入原文。临时录音处理后删除。模型或麦克风不可用时可继续使用键盘。确认后的文字按所选模型后端处理，云端后端可能接收文字。
+
+原有 GPU 模型的安装方式：
+
+```bash
+.venv/bin/python -m pip install -e '.[voice-gpu]'
+python3 -m venv "$HOME/.local/share/nl2shell/qwen-asr"
+"$HOME/.local/share/nl2shell/qwen-asr/bin/python" -m pip install 'torch==2.6.0' 'qwen-asr==0.0.6'
+```
 
 <details>
 <summary>受限 ReAct Agent 与受控修复</summary>
