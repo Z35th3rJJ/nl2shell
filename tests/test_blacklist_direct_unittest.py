@@ -83,6 +83,7 @@ class DirectBlacklistTests(unittest.TestCase):
                     input_fn=lambda _: self.fail('不应要求确认错误命令'))
             self.assertEqual(status, 'blocked')
             self.assertIn('时间筛选条件', history.last_record['block_reason'])
+            self.assertIn('--policy whitelist', history.last_record['block_reason'])
             self.assertFalse(history.last_record['executed'])
             executor.execute_policy_command.assert_not_called()
 

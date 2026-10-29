@@ -400,7 +400,7 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
         request_text = '\n'.join([user_input, *(answer.split('用户回答：', 1)[-1] for answer in clarifications)])
         if (isinstance(candidate.get('argv'), list) and candidate['argv']
                 and candidate['argv'][0] in ('cp', 'mv') and _explicit_days(request_text)):
-            return finish('blocked', '黑名单单条复制或移动命令无法核实时间筛选条件，任务未执行')
+            return finish('blocked', '黑名单单条复制或移动命令无法核实时间筛选条件，任务未执行；可退出后使用 --policy whitelist 启动，再提交原请求')
         argv, writable = review_command(candidate['argv'], cwd)
         if argv != candidate['argv']:
             attempts[-1]['execution_context_binding'] = {'reason':'应用命令安全参数或绑定只读系统元数据',
