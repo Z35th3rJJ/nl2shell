@@ -2,6 +2,8 @@ import json
 import tempfile
 import unittest
 import sys
+import os
+import time
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -9,10 +11,132 @@ from cli import execute_request
 from core.engine import Engine
 from core.history import HistoryStore
 from core import command_policy
+from core.requirements import filtered_copy_request
 from core.execution import BashExecutor, ExecutionResult
 
 
 class DirectBlacklistTests(unittest.TestCase):
+    def test_filtered_copy_requires_confirmation_and_preserves_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'new.txt').write_text('new', encoding='utf8')
+            old = root / 'old.txt'
+            old.write_text('old', encoding='utf8')
+            os.utime(old, (time.time() - 10 * 86400,) * 2)
+            (root / 'other.log').write_text('log', encoding='utf8')
+            (root / 'nested').mkdir()
+            (root / 'nested' / 'inside.txt').write_text('nested', encoding='utf8')
+            engine = Engine(ssh_hosts=[])
+            engine.command_policy = 'blacklist'
+            executor = Mock()
+            def execute(argv, cwd, excluded, **kwargs):
+                if argv[0] == 'mkdir':
+                    (root / 'backup').mkdir()
+                else:
+                    (root / 'backup' / 'new.txt').write_text('new', encoding='utf8')
+                return ExecutionResult(0, '', '', 0.01, process_state='exited'), ['sandbox']
+            executor.execute_policy_command.side_effect = execute
+            def confirm(_):
+                self.assertFalse((root / 'backup').exists())
+                return 'yes'
+            request = '将当前目录这一层最近七天修改的 .txt 文件复制到 backup 目录'
+            with patch('core.command_policy.sandbox_argv', return_value=['sandbox']), \
+                 patch('core.command_policy.chat', side_effect=AssertionError('不需要模型猜测')):
+                status = execute_request(engine, executor, HistoryStore(root / 'history.jsonl'),
+                                         request, directory, 'confirm', input_fn=confirm)
+            self.assertEqual(status, 'unverified')
+            self.assertEqual((root / 'backup' / 'new.txt').read_text(encoding='utf8'), 'new')
+            self.assertFalse((root / 'backup' / 'old.txt').exists())
+            self.assertFalse((root / 'backup' / 'inside.txt').exists())
+            self.assertEqual(executor.execute_policy_command.call_count, 2)
+
+    def test_filtered_copy_existing_target_stops_without_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'new.txt').write_text('new', encoding='utf8')
+            (root / 'backup').mkdir()
+            (root / 'backup' / 'new.txt').write_text('original', encoding='utf8')
+            engine = Engine(ssh_hosts=[])
+            engine.command_policy = 'blacklist'
+            executor = Mock()
+            request = '将当前目录这一层最近七天修改的 .txt 文件复制到 backup 目录'
+            status = execute_request(engine, executor, HistoryStore(root / 'history.jsonl'),
+                                     request, directory, 'confirm', input_fn=lambda _: self.fail('不能覆盖'))
+            self.assertEqual(status, 'blocked')
+            self.assertEqual((root / 'backup' / 'new.txt').read_text(encoding='utf8'), 'original')
+            executor.execute_policy_command.assert_not_called()
+
+    def test_filtered_copy_cancellation_and_changed_file_stop(self):
+        for change in (False, True):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / 'new.txt'
+                source.write_text('new', encoding='utf8')
+                engine = Engine(ssh_hosts=[])
+                engine.command_policy = 'blacklist'
+                executor = Mock()
+                def confirm(_):
+                    if change:
+                        source.write_text('changed', encoding='utf8')
+                    return 'yes' if change else 'no'
+                request = '将当前目录这一层最近七天修改的 .txt 文件复制到 backup 目录'
+                with patch('core.command_policy.sandbox_argv', return_value=['sandbox']):
+                    status = execute_request(engine, executor, HistoryStore(root / 'history.jsonl'),
+                                             request, directory, 'confirm', input_fn=confirm)
+                self.assertEqual(status, 'blocked' if change else 'cancelled')
+                self.assertFalse((root / 'backup').exists())
+                executor.execute_policy_command.assert_not_called()
+
+    def test_filtered_copy_rejects_outside_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'new.txt').write_text('new', encoding='utf8')
+            engine = Engine(ssh_hosts=[])
+            engine.command_policy = 'blacklist'
+            executor = Mock()
+            request = '将当前目录这一层最近七天修改的 .txt 文件复制到 ../outside 目录'
+            status = execute_request(engine, executor, HistoryStore(root / 'history.jsonl'),
+                                     request, directory, 'confirm', input_fn=lambda _: self.fail('不能越界'))
+            self.assertEqual(status, 'blocked')
+            executor.execute_policy_command.assert_not_called()
+
+    def test_filtered_copy_rejects_new_target_before_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'new.txt').write_text('new', encoding='utf8')
+            (root / 'backup').mkdir()
+            engine = Engine(ssh_hosts=[])
+            engine.command_policy = 'blacklist'
+            executor = Mock()
+            def confirm(_):
+                (root / 'backup' / 'new.txt').write_text('original', encoding='utf8')
+                return 'yes'
+            request = '将当前目录这一层最近七天修改的 .txt 文件复制到 backup 目录'
+            with patch('core.command_policy.sandbox_argv', return_value=['sandbox']):
+                status = execute_request(engine, executor, HistoryStore(root / 'history.jsonl'),
+                                         request, directory, 'confirm', input_fn=confirm)
+            self.assertEqual(status, 'blocked')
+            self.assertEqual((root / 'backup' / 'new.txt').read_text(encoding='utf8'), 'original')
+            executor.execute_policy_command.assert_not_called()
+
+    def test_filtered_copy_parser_rejects_unhandled_conditions(self):
+        self.assertIsNotNone(filtered_copy_request('把当前目录当前层过去2周更新的 .log 文件复制到 backup 目录'))
+        self.assertIsNone(filtered_copy_request('将当前目录这一层最近七天修改的 .txt 文件复制到 backup 目录，只复制大于10字节的文件'))
+
+    def test_filtered_copy_does_not_silently_skip_protected_matches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.env.txt').write_text('sensitive', encoding='utf8')
+            engine = Engine(ssh_hosts=[])
+            engine.command_policy = 'blacklist'
+            executor = Mock()
+            history = HistoryStore(root / 'history.jsonl')
+            request = '将当前目录这一层最近七天修改的 .txt 文件复制到 backup 目录'
+            status = execute_request(engine, executor, history, request, directory, 'confirm',
+                                     input_fn=lambda _: self.fail('受保护文件不能复制'))
+            self.assertEqual(status, 'blocked')
+            self.assertIn('受保护文件', history.last_record['block_reason'])
+            executor.execute_policy_command.assert_not_called()
     def test_read_request_does_not_enter_plan_flow(self):
         with tempfile.TemporaryDirectory() as directory:
             engine = Engine(ssh_hosts=[])

@@ -36,6 +36,17 @@ CASES = (
 
 
 def safe_preview(case, text):
+    if case == 'filtered_copy':
+        commands = re.findall(r'^  (mkdir|cp) (.+)$', text, re.M)
+        try:
+            argv = [[program, *shlex.split(arguments)] for program, arguments in commands]
+        except ValueError:
+            return False
+        return argv == [
+            ['mkdir', '--parents', '--', 'recent-backup'],
+            ['cp', '--update=none', '--no-target-directory', '--', './existing.txt', './recent-backup/existing.txt'],
+            ['cp', '--update=none', '--no-target-directory', '--', './sample.txt', './recent-backup/sample.txt'],
+        ] and '当前层；*.txt；最近 7' in text
     match = re.search(r"黑名单命令：([^\r\n]+)", text)
     if not match:
         return False
@@ -88,6 +99,11 @@ def run_case(root, case, request):
     (workspace / "existing.txt").write_bytes(b"original\n")
     (workspace / "archive").mkdir()
     (workspace / "archive/old.txt").write_bytes(b"rename\n")
+    if case == "filtered_copy":
+        old = workspace / "old.txt"
+        old.write_bytes(b"old\n")
+        os.utime(old, (time.time() - 10 * 86400,) * 2)
+        (workspace / "archive/nested.txt").write_bytes(b"nested\n")
     outside = root / case / "outside"
     outside.mkdir()
     (outside / "outside.txt").write_bytes(b"outside\n")
@@ -178,6 +194,10 @@ def run_case(root, case, request):
         expected["archive/renamed.txt"] = expected.pop("archive/old.txt")
     elif case == "mkdir":
         expected["created"] = "directory"
+    elif case == "filtered_copy":
+        expected["recent-backup"] = "directory"
+        expected["recent-backup/sample.txt"] = before["sample.txt"]
+        expected["recent-backup/existing.txt"] = before["existing.txt"]
     elif case == "pwd":
         output_ok = "\n/workspace\n" in command_output
     elif case == "sha256":

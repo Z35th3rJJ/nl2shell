@@ -36,6 +36,22 @@ def explicit_days(text: str) -> set[float]:
     return days
 
 
+def filtered_copy_request(text):
+    # shortcut: 仅识别当前层、单一扩展名和明确时间；其他条件继续由原流程处理。
+    match = re.fullmatch(
+        r"\s*(?:将|把)\s*当前目录(?:这一层|当前层)\s*(?:最近|过去)\s*"
+        r"(?P<age>\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百]+)\s*(?P<unit>天|日|周|星期|小时)"
+        r"(?:内)?(?:修改|更新)(?:的)?\s*(?P<extension>\.[A-Za-z0-9][A-Za-z0-9_-]*)\s*"
+        r"(?:普通)?文件\s*(?:复制|拷贝)到\s*(?P<target>" + PATH_TOKEN + r")\s*(?:目录|文件夹)[。！!]?\s*", text)
+    if not match:
+        return None
+    days = explicit_days(match['age'] + match['unit'])
+    if len(days) != 1 or not 0 < next(iter(days)) <= 36500:
+        return None
+    return {'path': '.', 'recursive': False, 'pattern': '*' + match['extension'],
+            'modified_within_days': next(iter(days)), 'destination': path_value(match['target'])}
+
+
 def transfer_expression(user_input):
     # shortcut: 裸空格路径仅接受完整单源直接传输；连词、条件或额外动作必须继续澄清。
     spaced_path = r"[\w./\\()\[\]+@%-]+(?:[ \t]+[\w./\\()\[\]+@%-]+)*?"

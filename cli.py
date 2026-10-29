@@ -37,7 +37,7 @@ from core.bash_queries import uses_bash, prepare_queries, review_commands, query
 from core.error_analysis import assess_failure
 from core.execution_evidence import summarize_execution, execution_description, change_description
 from core.measurements import measure_task, snapshot
-from core.requirements import resolve_request
+from core.requirements import resolve_request, filtered_copy_request
 from core.voice_input import VoiceInputError, confirm_transcript, record_and_transcribe
 
 load_dotenv(ENV_PATH)
@@ -373,9 +373,103 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
             print('再见！')
             raise SystemExit(0)
         return answer
+    def filtered_copy(parameters):
+        nonlocal argv, phase, authorized
+        from core.bash_queries import _sensitive
+        from core.operations import find_files, _identity, file_digest
+        if remaining_time() <= 0:
+            return finish('blocked', '任务时限已用完，未执行')
+        root = Path(cwd).resolve(strict=True)
+        target = workspace_path(root, parameters['destination'])
+        if target == root or _sensitive(target, root):
+            return finish('blocked', '目标目录不能是工作目录或敏感路径')
+        if target.exists() and not target.is_dir():
+            return finish('blocked', '目标路径不是目录')
+        query = {key: value for key, value in parameters.items() if key != 'destination'}
+        excluded_paths = [Path(value).resolve(strict=False) for value in excluded] + [target]
+        def selection():
+            files = find_files(root, query, time.time(), excluded_paths,
+                               time.monotonic() + max(0.01, remaining_time()))
+            if any(_sensitive(path, root) for path in files):
+                raise ValueError('匹配结果包含受保护文件，任务未执行')
+            return files
+        sources = selection()
+        if not sources:
+            return finish('no_matches', '没有符合筛选条件的文件')
+        targets = [workspace_path(root, str(target / source.name)) for source in sources]
+        if any(path.exists() or path.is_symlink() for path in targets):
+            return finish('blocked', '目标文件已存在，未覆盖任何文件')
+        identities = [_identity(path, time.monotonic() + max(0.01, remaining_time())) for path in sources]
+        commands = []
+        if not target.exists():
+            commands.append(['mkdir', '--parents', '--', str(target.relative_to(root))])
+        commands.extend(['cp', '--update=none', '--no-target-directory', '--',
+                         './' + str(source.relative_to(root)), './' + str(destination.relative_to(root))]
+                        for source, destination in zip(sources, targets))
+        launchers = [sandbox_argv(review_command(command, cwd)[0], cwd, writable=True, excluded=excluded)
+                     for command in commands]
+        _section(1, '执行预览')
+        print('黑名单筛选复制：当前层；' + query['pattern'] + '；最近 ' +
+              str(query['modified_within_days']) + ' 天')
+        for command in commands:
+            print('  ' + shlex.join(command))
+        for source, destination in zip(sources, targets):
+            print('  ' + str(source.relative_to(root)) + ' → ' + str(destination.relative_to(root)))
+        if mode == PREVIEW:
+            return finish('preview')
+        if mode == BATCH or assume_yes:
+            return finish('cancelled', '黑名单写入必须人工确认')
+        phase = 'confirmation'
+        _section(2, '等待确认')
+        if ask('是否执行以上命令？请输入 yes 确认 > ').lower() != 'yes':
+            return finish('cancelled')
+        if remaining_time() <= 0:
+            return finish('blocked', '任务时限已用完，未执行')
+        if (selection() != sources or [_identity(path, time.monotonic() + max(0.01, remaining_time()))
+                                       for path in sources] != identities
+                or any(path.exists() or path.is_symlink() for path in targets)):
+            return finish('blocked', '文件清单或目标已变化，请重新提交任务')
+        if [sandbox_argv(review_command(command, cwd)[0], cwd, writable=True, excluded=excluded)
+                for command in commands] != launchers:
+            return finish('blocked', '沙箱范围已变化，请重新提交任务')
+        save_history(history, user_input=user_input, cwd=cwd, command='；'.join(map(shlex.join, commands)),
+                     risk=WARN, status='confirmed', executed=False, execution_state='not_started',
+                     file_change_state='unchanged', command_policy='blacklist', run_mode=mode,
+                     authorized=False, clarifications=clarifications)
+        authorized = True
+        phase = 'execution'
+        for index, command in enumerate(commands):
+            if remaining_time() <= 0:
+                return finish('execution_failed', '任务时限已用完，后续操作已停止，不自动重放')
+            argv = command
+            result, actual = executor.execute_policy_command(command, cwd, excluded,
+                                                             timeout_seconds=max(0.01, remaining_time()))
+            outcome = {'step': index + 1, 'operation': 'blacklist_query',
+                       'status': 'unverified' if result.exit_code == 0 and not result.timed_out else 'execution_failed',
+                       'executed': True, 'execution_state': result.process_state, 'file_change_state': 'unknown',
+                       'actual_argv': command, 'launcher_argv': actual, 'exit_code': result.exit_code,
+                       'stdout': result.stdout, 'stderr': result.stderr, 'timed_out': result.timed_out,
+                       'output_truncated': result.output_truncated, 'items': [],
+                       'detail': '命令已退出，文件状态待核对'}
+            outcomes.append(redact_value(outcome))
+            show_outcome(outcome)
+            if result.exit_code != 0 or result.timed_out or result.output_truncated:
+                return finish('execution_failed', '命令失败或超时，后续操作已停止，不自动重放')
+        if all(workspace_path(root, str(source)).is_file() and
+               workspace_path(root, str(destination)).is_file() and
+               file_digest(source, time.monotonic() + max(0.01, remaining_time())) ==
+               file_digest(destination, time.monotonic() + max(0.01, remaining_time()))
+               for source, destination in zip(sources, targets)):
+            return finish('unverified', '副本内容已核对；并发变化可能影响文件来源，请核对预览和结果')
+        return finish('execution_failed', '复制结果核对失败，请检查文件状态，不自动重放')
     try:
         if user_input == '/trash' or user_input.startswith('/restore '):
             return finish('unsupported', '黑名单直接命令模式暂不支持回收区内置命令')
+        filtered = filtered_copy_request(user_input)
+        if filtered is not None:
+            phase = 'policy_review'
+            writable = True
+            return filtered_copy(filtered)
         for _ in range(3):
             if remaining_time() <= 0:
                 return finish('blocked','任务时限已用完，未执行')
