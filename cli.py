@@ -329,7 +329,7 @@ def show_outcome(outcome):
 
 
 def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, input_fn,
-                              timeout_seconds=60, assume_yes=False, batch_id='', batch_index=None):
+                              timeout_seconds=60, assume_yes=False, batch_id='', batch_index=None, voice_input=None):
     from core.command_policy import generate_candidate, review_command, sandbox_argv
     started = time.monotonic()
     input_seconds = 0
@@ -346,6 +346,7 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
                 status=status, **evidence, command_policy='blacklist', run_mode=mode, phase=phase,
                 authorized=authorized, clarifications=clarifications, command_attempts=attempts,
                 verification=outcomes, block_reason=detail,
+                **({'voice_input': voice_input} if voice_input is not None else {}),
                 **({'batch_id':batch_id,'batch_index':batch_index} if batch_id else {}))
         except OSError as error:
             status, detail = 'audit_failed', '历史记录无法保存：' + str(error)
@@ -559,10 +560,11 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                     user_input: str, cwd: str, mode: str, input_fn=input,
                     timeout_seconds: float = 60, batch_id: str = "",
                     batch_index: int | None = None, assume_yes: bool = False,
-                    agent_context: dict | None = None, _policy_routed=False, _policy_answers=()) -> str:
+                    agent_context: dict | None = None, _policy_routed=False, _policy_answers=(), voice_input=None) -> str:
     if getattr(engine, 'command_policy', 'whitelist') == 'blacklist' and not _policy_routed:
         return execute_blacklist_request(engine, executor, history, user_input, cwd, mode, input_fn,
-            timeout_seconds=timeout_seconds, assume_yes=assume_yes, batch_id=batch_id, batch_index=batch_index)
+            timeout_seconds=timeout_seconds, assume_yes=assume_yes, batch_id=batch_id, batch_index=batch_index,
+            voice_input=voice_input)
     plan = TaskPlan(())
     clarifications = list(_policy_answers)
     intent_attempts = []
@@ -681,6 +683,7 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                          command_attempts=initial_command_attempts or (getattr(engine, "command_attempts", []) if command_generation_started and isinstance(getattr(engine, "command_attempts", None), list) else []),
                          candidates=candidates, intent_attempts=intent_attempts, plan_attempts=plan_attempts,
                          diagnoses=diagnoses, repairs=repairs, execution_repair_attempts=int(repair_used),
+                         **({'voice_input': voice_input} if voice_input is not None else {}),
                          **({"agent_step": True} if agent_context is not None else {}),
                          **({"batch_id": batch_id, "batch_index": batch_index} if batch_id else {}))
         except OSError as error:
@@ -1158,18 +1161,36 @@ def main(input_session=None, args=None) -> None:
             break
         if not user_input:
             continue
+        voice_input = None
         if user_input == "/voice":
             try:
+                voice_input = {'model': os.environ.get('NL2SHELL_VOICE_MODEL', 'sensevoice')}
                 transcript = record_and_transcribe(input_session.prompt)
-                user_input = confirm_transcript(transcript, input_session.prompt) if transcript is not None else None
+                audit_path = getattr(history, 'path', None)
+                excluded = [Path(audit_path).expanduser().resolve()] if isinstance(audit_path, (str, os.PathLike)) else []
+                if os.environ.get('NL2SHELL_LOG_JSON'):
+                    excluded.append(Path(os.environ['NL2SHELL_LOG_JSON']).expanduser().resolve())
+                user_input = confirm_transcript(transcript, input_session.prompt, cwd=cwd,
+                    excluded=excluded, evidence=voice_input) if transcript is not None else None
             except VoiceInputError as error:
                 print(f"语音输入不可用：{error}")
                 continue
             except (EOFError, KeyboardInterrupt):
                 print("\n语音输入已取消。")
                 continue
-            if user_input is None:
-                continue
+            if user_input in {None, '/exit', 'exit', 'quit', '退出'}:
+                if transcript is not None:
+                    try:
+                        save_history(history, user_input=transcript, cwd=cwd, command='', risk=SAFE,
+                            status='blocked' if voice_input.get('path_error') else 'cancelled',
+                            executed=False, execution_state='not_started',
+                            file_change_state='unchanged', phase='input', authorized=False, run_mode=mode,
+                            voice_input=voice_input,
+                            block_reason=voice_input.get('path_error') or '语音输入未确认，未进入任务规划')
+                    except OSError as error:
+                        print(f"语音取消记录保存失败：{error}")
+                if user_input is None:
+                    continue
         if user_input in {"/exit", "exit", "quit", "退出"}:
             print("再见！")
             break
@@ -1219,7 +1240,7 @@ def main(input_session=None, args=None) -> None:
                 print(f"切换失败：{error}")
             continue
         if user_input == "/trash" or user_input.startswith("/restore "):
-            execute_request(engine, executor, history, user_input, cwd, mode)
+            execute_request(engine, executor, history, user_input, cwd, mode, voice_input=voice_input)
             continue
         if user_input == "/ssh":
             print_ssh_profiles()
@@ -1231,7 +1252,7 @@ def main(input_session=None, args=None) -> None:
             else:
                 print("请输入 SSH 别名。")
             continue
-        execute_request(engine, executor, history, user_input, cwd, mode)
+        execute_request(engine, executor, history, user_input, cwd, mode, voice_input=voice_input)
 
 
 def entrypoint() -> None:
