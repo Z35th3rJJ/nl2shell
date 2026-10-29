@@ -611,6 +611,9 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                 plan_attempts.append({'source':'original_request','status':'ready','plan':plan_payload(query_contract)})
                 return query_contract
         try:
+            if (voice_input and voice_input.get('confirmed_text') == user_input
+                    and voice_input.get('confirmed_transfer') is not None):
+                options['confirmed_transfer'] = voice_input['confirmed_transfer']
             return engine.generate_task_plan(user_input, cwd, **options)
         finally:
             attempts = getattr(engine, "intent_attempts", None)

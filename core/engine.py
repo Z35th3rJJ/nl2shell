@@ -762,7 +762,8 @@ class Engine:
         return first, rest
 
     @observe("plan_generation", "model_error")
-    def generate_task_plan(self, user_input: str, cwd: str, clarifications: list[str] | None = None) -> TaskPlan:
+    def generate_task_plan(self, user_input: str, cwd: str, clarifications: list[str] | None = None,
+                           *, confirmed_transfer: dict | None = None) -> TaskPlan:
         """通常最多两次；字面搜索误拒绝纠正后可再纠正一次可核对的格式错误。"""
         self.plan_attempts = []
         self.intent_attempts = []
@@ -775,6 +776,33 @@ class Engine:
                 if destination not in UNSPECIFIED_DESTINATIONS | {"当前目录", "这里", "本目录", "此目录", "这个目录"}:
                     _checked_path(root, destination, "目标路径")
         answers = [answer.split("用户回答：", 1)[-1].strip() for answer in clarifications or []]
+        if confirmed_transfer is not None:
+            record = {"source": "confirmed_voice_paths", "validation_errors": []}
+            self.plan_attempts.append(record)
+            try:
+                if (clarifications or not isinstance(confirmed_transfer, dict)
+                        or set(confirmed_transfer) != {"operation", "parameters"}
+                        or confirmed_transfer.get("operation") not in {"copy_files", "move_files"}
+                        or not isinstance(confirmed_transfer.get("parameters"), dict)
+                        or set(confirmed_transfer["parameters"]) - {"sources", "destination", "destination_name"}
+                        or len(_copy_name_bindings(user_input, cwd=cwd)) != 1):
+                    raise PlanConditionError("已确认路径必须对应完整的单步骤复制或移动需求")
+                operation = confirmed_transfer["operation"]
+                plan = parse_operation_plan(json.dumps({"status": "ready", "steps": [{
+                    **confirmed_transfer, "explanation": "依据用户确认的源路径和目标路径生成"}]}))
+                plan = _normalize_paths(plan, cwd)
+                missing = _missing_conditions(plan, user_input, cwd, [])
+                errors = _task_plan_errors(plan, user_input, cwd, [operation])
+                if missing or errors:
+                    raise PlanConditionError(missing or "；".join(errors))
+            except ValueError as error:
+                record["validation_errors"].append(str(error))
+                raise
+            self.request_intent = {"status": "ready", "operations": [operation],
+                                   "named_sources": plan.steps[0].parameters["sources"],
+                                   "selection_required": False}
+            record["plan"] = plan_payload(plan)
+            return plan
         content_search = _UNSUPPORTED_CONTENT_SEARCH.fullmatch(user_input.strip())
         # 只拦截明确的内容搜索范围；命名文件或否定范围的表达仍交给原意图流程。
         if content_search and not re.search(r"名为|文件名|名称|不要|无需|不必|不含|不包括|不递归",

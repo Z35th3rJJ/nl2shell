@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -32,8 +33,8 @@ class VoiceSourceConfirmationTests(unittest.TestCase):
     def test_recorded_error_requires_selection_and_reconfirmation(self):
         evidence = {}
         text = '将simple点TXT复制到backup目录。'
-        result = self.confirm(text, ['yes', '1', 'backup', 'yes'], evidence=evidence)
-        self.assertEqual(result, '将"sample.txt"复制到"backup"。')
+        result = self.confirm(text, ['yes', '1', '1', 'yes'], evidence=evidence)
+        self.assertEqual(result, '将 "sample.txt" 复制到 "backup" 目录。')
         self.assertEqual(evidence['transcript'], text)
         self.assertEqual(evidence['confirmed_text'], result)
         self.assertEqual(evidence['source_corrections'][0]['selected_source'], 'sample.txt')
@@ -47,18 +48,61 @@ class VoiceSourceConfirmationTests(unittest.TestCase):
         self.assertIsNone(self.confirm('将wrong.txt复制到 backup 目录', ['yes', '']))
         self.assertEqual(len(self.prompts), 2)
 
+    def test_empty_target_choice_does_not_accept_the_recognized_directory_name(self):
+        evidence = {}
+        self.assertIsNone(self.confirm('将sple点TxT复制到backup目录。',
+                                      ['yes', '1', '', 'yes'], evidence=evidence))
+        self.assertNotIn('confirmed_text', evidence)
+        self.assertFalse((self.root / 'backup目录').exists())
+
+    def test_existing_source_still_requires_target_selection(self):
+        self.assertIsNone(self.confirm('将sample.txt复制到backup目录。', ['yes', '']))
+        self.assertFalse((self.root / 'backup目录').exists())
+
+    def test_both_directory_names_require_an_explicit_choice(self):
+        (self.root / 'backup目录').mkdir()
+        for choice, target in (('1', 'backup'), ('2', 'backup目录')):
+            with self.subTest(choice=choice):
+                evidence = {}
+                result = self.confirm('将sple点TxT复制到backup目录。',
+                                      ['yes', '1', choice, 'yes'], evidence=evidence)
+                self.assertEqual(result, '将 "sample.txt" 复制到 "' + target + '" 目录。')
+                self.assertEqual(evidence['target_confirmation']['path'], target)
+
+    def test_explicit_new_directory_and_full_target_keep_their_names(self):
+        for choice, target, expected in (
+                ('d', 'backup目录', '将 "sample.txt" 复制到 "backup目录" 目录。'),
+                ('f', 'backup/newname', '将 "sample.txt" 复制到 "backup" 目录 并命名为 "newname"。'),
+                ('f', 'copy.txt', '将 "sample.txt" 复制到 "." 目录 并命名为 "copy.txt"。')):
+            with self.subTest(target=target):
+                self.assertEqual(self.confirm('将 wrong.txt 复制到 backup 目录',
+                                             ['yes', '1', choice, target, 'yes']), expected)
+                self.assertFalse((self.root / target).exists())
+
+    def test_file_cannot_be_selected_as_a_target_directory(self):
+        evidence = {}
+        self.assertIsNone(self.confirm('将 sample.txt 复制到 backup 目录',
+                                      ['yes', 'd', 'sample.txt'], evidence=evidence))
+        self.assertEqual(evidence['path_error'], '目标目录路径实际是文件')
+
     def test_similar_names_keep_the_users_choice(self):
         (self.root / 'simple.txt').write_bytes(b'other file\n')
-        result = self.confirm('将sampel.txt移动到 backup 目录', ['yes', '2', '', 'yes'])
-        self.assertEqual(result, '将"simple.txt"移动到 "backup" 目录')
+        result = self.confirm('将sampel.txt移动到 backup 目录', ['yes', '2', '1', 'yes'])
+        self.assertEqual(result, '将 "simple.txt" 移动到 "backup" 目录。')
         self.assertTrue((self.root / 'sample.txt').is_file())
         self.assertTrue((self.root / 'simple.txt').is_file())
 
-    def test_existing_source_and_new_target_are_not_rewritten(self):
-        for text in ('将 sample.txt 复制到 backup/new.txt', '将 sample.txt 移动到 backup 目录'):
+    def test_existing_source_and_explicit_new_target_keep_their_meaning(self):
+        cases = (
+            ('将 sample.txt 复制到 backup/new.txt', ['yes', 'f', 'backup/new.txt', 'yes'],
+             '将 "sample.txt" 复制到 "backup" 目录 并命名为 "new.txt"。'),
+            ('将 sample.txt 移动到 backup 目录', ['yes', '1', 'yes'],
+             '将 "sample.txt" 移动到 "backup" 目录。'))
+        for text, answers, expected in cases:
             with self.subTest(text=text):
-                self.assertEqual(self.confirm(text, ['yes']), text)
-                self.assertEqual(len(self.prompts), 1)
+                self.assertEqual(self.confirm(text, answers), expected)
+                self.assertNotIn('未找到源对象', self.output.getvalue())
+
 
     def test_manual_source_preserves_spaces_quotes_and_target(self):
         folder = self.root / '子目录'
@@ -66,14 +110,14 @@ class VoiceSourceConfirmationTests(unittest.TestCase):
         name = "项目 'final' 文件.txt"
         (folder / name).write_bytes(b'content')
         result = self.confirm('将 wrong.txt 复制到 backup/new.txt',
-                              ['yes', '0', '子目录/' + name, '', 'yes'])
-        self.assertEqual(result, '将 "子目录/' + name + '" 复制到 "backup/new.txt"')
-        self.assertIn('backup/new.txt', result)
+                              ['yes', '0', '子目录/' + name, 'f', 'backup/new.txt', 'yes'])
+        self.assertEqual(result, '将 "子目录/' + name + '" 复制到 "backup" 目录 并命名为 "new.txt"。')
+        self.assertIn('并命名为 "new.txt"', result)
 
     def test_sensitive_and_audit_paths_are_not_offered(self):
         for name in ('.env', 'private.key', 'audit.jsonl'):
             (self.root / name).write_bytes(b'not a candidate')
-        result = self.confirm('将 wrong.txt 复制到 backup 目录', ['yes', '1', '', 'yes'],
+        result = self.confirm('将 wrong.txt 复制到 backup 目录', ['yes', '1', '1', 'yes'],
                               excluded=[self.root / 'audit.jsonl'])
         self.assertIn('sample.txt', result)
         for name in ('.env', 'private.key', 'audit.jsonl'):
@@ -91,20 +135,20 @@ class VoiceSourceConfirmationTests(unittest.TestCase):
             self.skipTest(str(error))
         self.assertIsNone(self.confirm('将 linked.txt 复制到 backup 目录', ['yes']))
         self.assertIn('符号链接', self.output.getvalue())
-        result = self.confirm('将 wrong.txt 复制到 backup 目录', ['yes', '1', '', 'yes'])
+        result = self.confirm('将 wrong.txt 复制到 backup 目录', ['yes', '1', '1', 'yes'])
         self.assertIn('sample.txt', result)
         self.assertNotIn('linked.txt', self.output.getvalue())
 
     def test_invalid_choice_and_cancellation_never_accept_a_correction(self):
         evidence = {}
         self.assertIsNone(self.confirm('将 wrong.txt 复制到 backup 目录',
-                                      ['yes', '99', '1', '', '/cancel'], evidence=evidence))
+                                      ['yes', '99', '1', '1', '/cancel'], evidence=evidence))
         self.assertNotIn('confirmed_text', evidence)
         self.assertIn('请选择', self.output.getvalue())
 
     def test_user_can_edit_the_whole_request_or_exit(self):
-        self.assertEqual(self.confirm('错误文字', ['将 sample.txt 复制到 backup 目录']),
-                         '将 sample.txt 复制到 backup 目录')
+        self.assertEqual(self.confirm('错误文字', ['将 sample.txt 复制到 backup 目录', '1', 'yes']),
+                         '将 "sample.txt" 复制到 "backup" 目录。')
         self.assertEqual(self.confirm('将 wrong.txt 复制到 backup 目录', ['yes', '/exit']), '/exit')
 
     def test_missing_workspace_and_large_directory_stop_without_guessing(self):
@@ -119,15 +163,63 @@ class VoiceSourceConfirmationTests(unittest.TestCase):
     @unittest.skipIf(os.name == 'nt', 'Windows 文件名不允许双引号')
     def test_literal_quotes_in_linux_filename_remain_part_of_the_source(self):
         (self.root / '项目 "final" 文件.txt').touch()
-        result = self.confirm('将 wrong.txt 复制到 backup 目录', ['yes', '2', '', 'yes'])
-        self.assertEqual(result, '将 \'项目 "final" 文件.txt\' 复制到 "backup" 目录')
+        result = self.confirm('将 wrong.txt 复制到 backup 目录', ['yes', '2', '1', 'yes'])
+        self.assertEqual(result, '将 \'项目 "final" 文件.txt\' 复制到 "backup" 目录。')
 
     def test_target_correction_cannot_escape_the_workspace(self):
         evidence = {}
         self.assertIsNone(self.confirm('将 wrong.txt 复制到 backup 目录',
-                                      ['yes', '1', '../outside'], evidence=evidence))
+                                      ['yes', '1', 'd', '../outside'], evidence=evidence))
         self.assertIn('工作目录之外', evidence['path_error'])
         self.assertNotIn('confirmed_text', evidence)
+
+    def test_confirmed_new_directory_is_used_without_model_reinterpretation(self):
+        from core.engine import Engine
+
+        evidence = {}
+        text = self.confirm('将sple点TxT复制到backup目录。',
+                            ['yes', '1', 'd', 'new目录', 'yes'], evidence=evidence)
+        engine = Engine()
+        with patch('core.engine.chat', side_effect=AssertionError('must not reinterpret confirmed paths')):
+            plan = engine.generate_task_plan(text, str(self.root),
+                                             confirmed_transfer=evidence['confirmed_transfer'])
+        self.assertEqual(plan.steps[0].parameters, {'sources': ['sample.txt'], 'destination': 'new目录'})
+        self.assertEqual(engine.plan_attempts[0]['source'], 'confirmed_voice_paths')
+
+    def test_confirmed_fields_still_require_parameter_path_and_request_checks(self):
+        from core.engine import Engine
+
+        text = '将 "sample.txt" 复制到 "backup" 目录。'
+        variants = (
+            {'operation': 'move_files', 'parameters': {'sources': ['sample.txt'], 'destination': 'backup'}},
+            {'operation': 'copy_files', 'parameters': {'sources': ['other.txt'], 'destination': 'backup'}},
+            {'operation': 'copy_files', 'parameters': {'sources': ['sample.txt'], 'destination': 'other'}},
+            {'operation': 'copy_files', 'parameters': {'sources': ['sample.txt'], 'destination': '../outside'}},
+            {'operation': 'copy_files', 'parameters': {'sources': ['sample.txt'], 'destination': 'backup', 'destination_name': '../bad'}},
+            {'operation': 'copy_files', 'parameters': {'sources': ['sample.txt'], 'destination': 'backup', 'preserve_structure': True}})
+        with patch('core.engine.chat', side_effect=AssertionError('validation must not call the model')):
+            for fields in variants:
+                with self.subTest(fields=fields), self.assertRaises(ValueError):
+                    Engine().generate_task_plan(text, str(self.root), confirmed_transfer=fields)
+
+    def test_manual_text_edit_discards_previous_transfer_fields(self):
+        evidence = {}
+        result = self.confirm('将 wrong.txt 复制到 backup 目录',
+                              ['yes', '1', '1', '列出当前目录的内容'], evidence=evidence)
+        self.assertEqual(result, '列出当前目录的内容')
+        self.assertNotIn('confirmed_transfer', evidence)
+        self.assertNotIn('target_confirmation', evidence)
+
+    def test_normal_text_planning_still_uses_the_model(self):
+        from core.engine import Engine
+
+        fields = {'operation': 'copy_files', 'parameters': {'sources': ['sample.txt'], 'destination': 'backup'}}
+        with patch('core.engine.analyze_request', return_value={'status': 'ready', 'operations': ['copy_files']}) as intent, \
+             patch('core.engine.chat', return_value=json.dumps({'status': 'ready', 'steps': [fields]})) as model:
+            plan = Engine().generate_task_plan('将 sample.txt 复制到 backup 目录', str(self.root))
+        intent.assert_called_once()
+        model.assert_called_once()
+        self.assertEqual(plan.steps[0].parameters, fields['parameters'])
 
     def test_cli_cancellation_and_path_rejection_do_not_reach_the_model(self):
         import cli
@@ -136,6 +228,8 @@ class VoiceSourceConfirmationTests(unittest.TestCase):
 
         for transcript, replies, status in (
                 ('将 wrong.txt 复制到 backup 目录', ['yes', '/cancel'], 'cancelled'),
+                ('将sple点TxT复制到backup目录。', ['yes', '1', ''], 'cancelled'),
+                ('将sample.txt复制到backup目录。', ['yes', ''], 'cancelled'),
                 ('将 ../outside.txt 复制到 backup 目录', ['yes'], 'blocked')):
             with self.subTest(status=status):
                 history = HistoryStore(self.root / 'audit.jsonl')
@@ -161,15 +255,13 @@ class VoiceSourceConfirmationTests(unittest.TestCase):
         import cli
         from core.history import HistoryStore
         from core.settings import AppSettings
-        from core.task_plan import TaskPlan, TaskStep
+        from core.engine import Engine
 
         history = HistoryStore(self.root / 'audit.jsonl')
-        engine = Mock(command_policy='whitelist', policy_attempts=[], intent_attempts=[],
-                      plan_attempts=[], command_attempts=[])
-        engine.generate_task_plan.return_value = TaskPlan((TaskStep(operation='copy_files',
-            parameters={'sources': ['sample.txt'], 'destination': 'backup'}),))
+        engine = Engine()
+        engine.command_policy = 'whitelist'
         session = Mock()
-        session.prompt.side_effect = ['/voice', 'yes', '1', 'backup', 'yes', '/exit']
+        session.prompt.side_effect = ['/voice', 'yes', '1', '1', 'yes', '/exit']
 
         def authorize(message):
             self.assertIn('yes', message)
@@ -184,6 +276,7 @@ class VoiceSourceConfirmationTests(unittest.TestCase):
              patch.object(cli, 'HistoryStore', return_value=history), patch.object(cli, 'print_diagnostics'), \
              patch.object(cli, 'recover_working_directory', return_value=(str(self.root), '')), \
              patch.object(cli, 'record_and_transcribe', return_value='将simple点TXT复制到backup目录。'), \
+             patch('core.engine.chat', side_effect=AssertionError('confirmed paths must not call the model')), \
              patch.object(cli, 'execute_request', side_effect=lambda *args, **kwargs:
                  run_request(*args, input_fn=confirmation, **kwargs)), redirect_stdout(io.StringIO()):
             cli.main(input_session=session)

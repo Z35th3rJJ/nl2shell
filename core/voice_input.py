@@ -41,103 +41,151 @@ def _prepare_cuda():
         raise VoiceInputError("GPU 运行库不可用，请按 README 安装语音 GPU 依赖。") from error
 
 
+def _path_candidates(root, parent, excluded, *, directories_only=False):
+    candidates = []
+    try:
+        parent = _path(root, str(parent), excluded)
+        for index, entry in enumerate(parent.iterdir()):
+            if index >= 200:
+                print("目录项目较多，请手动指定路径。")
+                return []
+            try:
+                path = _path(root, str(entry), excluded)
+            except (OSError, ValueError):
+                continue
+            if not directories_only or path.is_dir():
+                candidates.append(path)
+        if len(candidates) > 20:
+            print("可选对象较多，请手动指定路径。")
+            return []
+    except (OSError, ValueError):
+        print("无法列出该目录，请手动指定路径。")
+    return sorted(candidates, key=lambda path: (not path.is_file(), path.name))
+
+
+def _quoted_path(value):
+    for opening, closing in (("\"", "\""), ("'", "'"), ("“", "”"), ("‘", "’")):
+        if opening not in value and closing not in value:
+            return opening + value + closing
+    raise VoiceInputError("该路径无法用受支持的配对引号表示，请修改完整请求。")
+
+
 def _confirm_transfer_paths(text, cwd, prompt, excluded, evidence):
     # shortcut: 只处理共享解析器能完整识别的单源复制、移动；复杂请求保留整句修改入口。
     request = transfer_expression(text.rstrip("。！？"))
     if request is None:
         return text
-    source = path_value(request["source"])
-    requested = None
+    source, requested = path_value(request["source"]), None
+    method = None
     try:
         root = Path(cwd).resolve(strict=True)
         requested = workspace_path(root, source)
-        _path(root, str(requested), excluded)
-        return text
+        selected = _path(root, str(requested), excluded).relative_to(root).as_posix()
     except FileNotFoundError as error:
         if requested is None:
             evidence["path_error"] = str(error)
             print("工作目录已不可用，请取消后重新选择工作目录。")
             return None
+        print("未找到源对象：" + json.dumps(source, ensure_ascii=False))
+        candidates = _path_candidates(root, requested.parent, excluded)
+        print("以下为该目录中的现有对象，请自行核对：")
+        for index, path in enumerate(candidates, 1):
+            print(f"{index}. " + json.dumps(path.relative_to(root).as_posix(), ensure_ascii=False))
+        print("0. 手动输入源路径")
+        while True:
+            answer = prompt("请选择编号，或输入 /cancel 取消、/exit 退出 > ").strip()
+            if not answer or answer == "/cancel":
+                return None
+            if answer == "/exit":
+                return answer
+            if answer == "0":
+                value = prompt("输入工作目录内已有的源路径，或输入 /cancel 取消 > ").strip()
+                if not value or value == "/cancel":
+                    return None
+                if value == "/exit":
+                    return value
+                value, method = path_value(value), "manual"
+            elif answer in {str(index) for index in range(1, len(candidates) + 1)}:
+                value, method = str(candidates[int(answer) - 1]), "candidate"
+            else:
+                print("请选择有效编号，或输入 0 手动指定源路径。")
+                continue
+            try:
+                selected = _path(root, value, excluded).relative_to(root).as_posix()
+                break
+            except (OSError, ValueError) as error:
+                print(f"源路径无法通过检查：{error}")
     except (OSError, ValueError) as error:
         evidence["path_error"] = str(error)
         print(f"源路径无法通过检查：{error}；请修改请求或取消。")
         return None
 
-    print("未找到源对象：" + json.dumps(source, ensure_ascii=False))
-    candidates = []
-    try:
-        parent = _path(root, str(requested.parent), excluded)
-        for index, entry in enumerate(parent.iterdir()):
-            if index >= 200:
-                candidates = []
-                print("目录项目较多，请手动输入源路径。")
-                break
-            try:
-                candidates.append(_path(root, str(entry), excluded))
-            except (OSError, ValueError):
-                continue
-        if len(candidates) > 20:
-            candidates = []
-            print("可选对象较多，请手动输入源路径。")
-    except (OSError, ValueError):
-        print("无法列出该源目录，请手动输入源路径。")
-    candidates.sort(key=lambda path: (not path.is_file(), path.name))
-    print("以下为该目录中的现有对象，请自行核对：")
-    for index, path in enumerate(candidates, 1):
+    print("源对象：" + json.dumps(selected, ensure_ascii=False))
+    print("原转写中的目标文字（尚未确定路径）：" + json.dumps(path_value(request["target"]), ensure_ascii=False))
+    directories = _path_candidates(root, root, excluded, directories_only=True)
+    print("请选择目标，以下编号对应真实的已有目录：")
+    for index, path in enumerate(directories, 1):
         print(f"{index}. " + json.dumps(path.relative_to(root).as_posix(), ensure_ascii=False))
-    print("0. 手动输入源路径")
+    print("d. 指定其他目标目录（可以新建）")
+    print("f. 指定完整目标路径（包含新名称）")
     while True:
-        answer = prompt("请选择编号，或输入 /cancel 取消、/exit 退出 > ").strip()
+        answer = prompt("请选择目标编号、d 或 f；回车或 /cancel 取消，/exit 退出 > ").strip()
         if not answer or answer == "/cancel":
+            print("未选择目标，语音任务已取消，未进入计划生成。")
             return None
         if answer == "/exit":
             return answer
-        if answer == "0":
-            value = prompt("输入工作目录内已有的源路径，或输入 /cancel 取消 > ").strip()
-            if not value or value == "/cancel":
+        if answer in {"d", "f"}:
+            kind = "directory" if answer == "d" else "path"
+            target = prompt("输入目标目录路径 > " if kind == "directory" else "输入包含新名称的完整目标路径 > ").strip()
+            if not target or target == "/cancel":
                 return None
-            if value == "/exit":
-                return value
-            value, method = path_value(value), "manual"
-        elif answer in {str(index) for index in range(1, len(candidates) + 1)}:
-            value, method = str(candidates[int(answer) - 1]), "candidate"
+            if target == "/exit":
+                return target
+            target = path_value(target)
+        elif answer in {str(index) for index in range(1, len(directories) + 1)}:
+            kind, target = "directory", directories[int(answer) - 1].relative_to(root).as_posix()
         else:
-            print("请选择有效编号，或输入 0 手动指定源路径。")
+            print("请选择有效目标编号、d 或 f；不会沿用原转写作为默认路径。")
             continue
         try:
-            selected = _path(root, value, excluded).relative_to(root).as_posix()
-        except (OSError, ValueError) as error:
-            print(f"源路径无法通过检查：{error}")
-            continue
-        target = path_value(request["target"])
-        print("目标位置（按原转写解析）：" + json.dumps(target, ensure_ascii=False))
-        answer = prompt("输入目标路径修改，直接回车保留，或输入 /cancel 取消、/exit 退出 > ").strip()
-        if answer == "/cancel":
-            return None
-        if answer == "/exit":
-            return answer
-        target = path_value(answer) if answer else target
-        try:
-            workspace_path(root, target)
+            target_path = workspace_path(root, target)
+            try:
+                _path(root, str(target_path), excluded)
+                exists = True
+            except FileNotFoundError:
+                exists = False
+            if kind == "directory" and exists and not target_path.is_dir():
+                raise ValueError("目标目录路径实际是文件")
+            if kind == "path" and target_path == root:
+                raise ValueError("完整目标路径不能是工作目录本身")
         except (OSError, ValueError) as error:
             evidence["path_error"] = str(error)
             print(f"目标路径无法通过检查：{error}")
             return None
-        corrected = text
-        for field, value in (("target", target), ("source", selected)):
-            quotes = next(((a, b) for a, b in (("\"", "\""), ("'", "'"), ("“", "”"), ("‘", "’"))
-                           if a not in value and b not in value), None)
-            if quotes is None:
-                print("该路径无法用受支持的配对引号表示，请取消后修改完整请求。")
-                return None
-            start, end = request.span(field)
-            corrected = corrected[:start] + quotes[0] + value + quotes[1] + corrected[end:]
+        break
+    destination = (target_path if kind == "directory" else target_path.parent).relative_to(root).as_posix()
+    if kind == "directory":
+        print(("将使用已有目标目录：" if exists else "将新建目标目录：") + destination)
+    else:
+        print("完整目标路径：" + target_path.relative_to(root).as_posix())
+    corrected = "将 " + _quoted_path(selected) + " " + request["verb"] + "到 " + _quoted_path(destination) + " 目录"
+    if kind == "path":
+        corrected += " 并命名为 " + _quoted_path(target_path.name)
+    if method is not None:
         evidence.setdefault("source_corrections", []).append({
             "original_source": source, "selected_source": selected, "method": method})
-        if target != path_value(request["target"]):
-            evidence.setdefault("target_corrections", []).append({
-                "original_target": path_value(request["target"]), "confirmed_target": target})
-        return corrected
+    evidence["target_confirmation"] = {"kind": kind, "path": target, "existed": exists}
+    parameters = {"sources": [selected], "destination": destination}
+    if kind == "path":
+        parameters["destination_name"] = target_path.name
+    evidence["confirmed_transfer"] = {
+        "operation": "copy_files" if request["verb"] == "复制" else "move_files",
+        "parameters": parameters}
+    if target != path_value(request["target"]):
+        evidence.setdefault("target_corrections", []).append({
+            "original_target": path_value(request["target"]), "confirmed_target": target})
+    return corrected + "。"
 
 
 def confirm_transcript(text, prompt, *, cwd=None, excluded=(), evidence=None):
@@ -148,16 +196,24 @@ def confirm_transcript(text, prompt, *, cwd=None, excluded=(), evidence=None):
         print("没有识别到语音，请重新录制或输入文字。")
         return None
     print(f"识别结果：{text}")
+    paths_confirmed = False
     while True:
         answer = prompt("输入 yes 使用以上文字，输入完整文字修改，或输入 /cancel 取消 > ").strip()
         if not answer or answer == "/cancel":
             return None
+        if answer.lower() == "yes" and paths_confirmed:
+            evidence["confirmed_text"] = text
+            return text
+        if answer.lower() != "yes":
+            evidence.pop("target_confirmation", None)
+            evidence.pop("confirmed_transfer", None)
         confirmed = text if answer.lower() == "yes" else answer
         resolved = _confirm_transfer_paths(confirmed, cwd, prompt, excluded, evidence) if cwd is not None else confirmed
         if resolved is None:
             return None
         if resolved != confirmed and resolved != "/exit":
             text = resolved
+            paths_confirmed = True
             print("修订后的请求：" + text)
             continue
         evidence["confirmed_text"] = resolved
