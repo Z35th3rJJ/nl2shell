@@ -27,6 +27,14 @@ class PolicyComparisonTests(unittest.TestCase):
                         '第 1 步：复制文件\n chapter.txt → saved/chapter.txt\n第 2 步：创建文件\n'):
             self.assertFalse(preview_allowed(case,preview))
 
+    def test_readonly_workspace_mapping_is_not_a_file_operation(self):
+        case=next(case for case in cases() if case['id']=='P01')
+        preview=('黑名单命令：ls\n运行环境：只读工作区、无网络、无提权的 Linux 沙箱。\n'
+                 '工作目录映射：沙箱 /workspace → /tmp/test/workspace\n')
+        self.assertTrue(preview_allowed(case,preview,'blacklist'))
+        self.assertFalse(preview_allowed(case,preview+' source.txt → copy.txt\n','blacklist'))
+        self.assertFalse(preview_allowed(case,preview.replace('只读工作区','可写工作区'),'blacklist'))
+
     def test_direct_blacklist_preview_checks_command_operands(self):
         case=next(case for case in cases() if case['id']=='P07')
         with tempfile.TemporaryDirectory() as directory:

@@ -60,7 +60,8 @@ def command_pairs(argv, root):
 
 
 def preview_allowed(case, preview, policy='whitelist', root=None):
-    pairs=[list(pair) for pair in re.findall(r'^\s*(.*?) → (.*?)\s*$',preview,re.M)]
+    operation_lines='\n'.join(line for line in preview.splitlines() if not line.startswith('工作目录映射：'))
+    pairs=[list(pair) for pair in re.findall(r'^\s*(.*?) → (.*?)\s*$',operation_lines,re.M)]
     if case.get('pairs'):
         if policy=='blacklist':
             commands=re.findall(r'^黑名单命令：([^\r\n]+)',preview,re.M)
