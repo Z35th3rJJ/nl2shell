@@ -786,6 +786,8 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
             options['allow_auto_rename'] = not forbids_automatic_rename(user_input, clarifications)
         if prepared is not None:
             options["now"] = prepared["now"]
+            if not bash_query:
+                options['previous'] = prepared
         value = (prepare_queries if bash_query else prepare_plan)(plan, cwd, **options)
         if bash_query and getattr(engine,'command_policy','whitelist') == 'blacklist':
             from core.command_policy import sandbox_argv
@@ -795,15 +797,6 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                     action['candidate_source'] = 'request_rules'
         if not bash_query and getattr(engine, 'command_policy', 'whitelist') == 'blacklist':
             from core.command_policy import prepare_native
-            if prepared is not None:
-                previous = {(action['step'],item['source']):item for action in prepared['actions']
-                            if action['operation']=='trash' for item in action['items']}
-                for action in value['actions']:
-                    if action['operation']=='trash':
-                        for item in action['items']:
-                            old = previous.get((action['step'],item['source']))
-                            if old and not workspace_path(Path(cwd),old['destination'],internal=True).parent.exists():
-                                item.update(trash_id=old['trash_id'],destination=old['destination'])
             prepare_native(value)
         if bash_query and candidates is not None:
             review_commands(value, candidates)

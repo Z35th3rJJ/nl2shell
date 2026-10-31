@@ -162,11 +162,12 @@ def test_source_changed_is_blocked_before_copy(tmp_path):
     assert not (tmp_path / "backup").exists()
 
 
-def test_trash_random_ids_do_not_trigger_false_reconfirmation(tmp_path):
+def test_trash_reuses_ids_without_false_reconfirmation(tmp_path):
     (tmp_path / "a").write_bytes(b"data")
     plan = TaskPlan((step("trash", sources=["a"]),))
     before = prepare_plan(plan, str(tmp_path))
-    after = prepare_plan(plan, str(tmp_path), now=before["now"])
+    after = prepare_plan(plan, str(tmp_path), now=before["now"], previous=before)
+    assert before["actions"][0]["items"][0]["trash_id"] == after["actions"][0]["items"][0]["trash_id"]
     assert not preparation_changed(before, after)
 
 

@@ -151,7 +151,8 @@ def trash_entries(root: Path) -> list[dict]:
 
 
 @observe("preparation", "safety_rejected")
-def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excluded_paths=(), allow_auto_rename=True) -> dict:
+def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excluded_paths=(),
+                 allow_auto_rename=True, previous=None) -> dict:
     """只读预览：冻结文件清单和实际目标名称。"""
     root = Path(cwd).expanduser().resolve(strict=True)
     if not root.is_dir():
@@ -161,6 +162,11 @@ def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excl
     now = time.time() if now is None else now
     deadline = time.monotonic() + timeout_seconds
     reserved, selections, actions = set(), {}, []
+    if previous is not None and previous['cwd'] != str(root):
+        raise ValueError('不能复用其他工作目录的回收预览')
+    trash_ids = {(action['step'], item['source']): item['trash_id']
+                 for action in (previous['actions'] if previous is not None else [])
+                 if action['operation'] == 'trash' for item in action['items']}
     excluded = [Path(path).resolve(strict=False) for path in excluded_paths]
     for step in plan.steps:
         if step.operation == "copy_files" and "source_step" in step.parameters:
@@ -239,9 +245,15 @@ def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excl
             identity = _identity(source, deadline)
             item = {"source": str(source.relative_to(root)), "identity": identity}
             if operation == "trash":
-                identifier = uuid4().hex
+                key = (index, item['source'])
+                identifier = trash_ids[key] if key in trash_ids else uuid4().hex
+                if not re.fullmatch(r'[0-9a-f]{32}', identifier):
+                    raise ValueError('回收预览编号无效')
                 item["trash_id"] = identifier
                 destination = workspace_path(root, f"{TRASH}/{identifier}/data", internal=True)
+                if destination.parent.exists() or destination in reserved:
+                    raise FileExistsError('回收预览目标已被占用，任务未执行；请核对后重新提交')
+                reserved.add(destination)
             elif operation == "organize_files":
                 group = source.suffix.lower().lstrip(".") or "no_extension"
                 if not re.fullmatch(r"[a-z0-9_-]+", group):
@@ -275,18 +287,7 @@ def preview_details(prepared: dict) -> list[dict]:
 
 
 def preparation_changed(old: dict, new: dict) -> bool:
-    # 回收编号是随机的，授权比较只看路径、文件事实和其他参数。
-    def comparable(prepared):
-        actions = []
-        for action in prepared["actions"]:
-            action = dict(action, items=[dict(item) for item in action["items"]])
-            if action["operation"] == "trash":
-                for item in action["items"]:
-                    item.pop("trash_id", None)
-                    item.pop("destination", None)
-            actions.append(action)
-        return actions
-    return comparable(old) != comparable(new)
+    return old['actions'] != new['actions']
 
 
 def _copy_file(source: Path, destination: Path, deadline):
