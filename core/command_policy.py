@@ -76,8 +76,10 @@ def review_query(argv, cwd):
     return argv
 
 
-def review_command(argv, cwd):
+def review_command(argv, cwd, *, transfer=None):
     if not isinstance(argv, list) or not argv or argv[0] not in {'cp', 'mv', 'mkdir'}:
+        if transfer is not None:
+            raise ValueError('候选命令未保留用户指定的复制或移动操作，任务未执行')
         return review_query(argv, cwd), False
     if (len(argv) > 128 or any(not isinstance(v, str) or not v or any(c in v for c in '\0\n\r') for v in argv)
             or sum(len(v) for v in argv) > 16384):
@@ -107,6 +109,18 @@ def review_command(argv, cwd):
         if target == root or _sensitive(target, root):
             raise ValueError('不允许操作工作目录本身或敏感路径')
         resolved.append(target)
+    if transfer is not None:
+        program_expected = 'cp' if transfer['verb'] == '复制' else 'mv'
+        source = workspace_path(root, transfer['source'])
+        destination = workspace_path(root, transfer['target'])
+        directory = bool(transfer['directory']) or destination.is_dir()
+        if directory and not destination.is_dir():
+            raise ValueError('目标目录不存在或不是目录；黑名单单条命令不能同时创建目录并传输文件，请先创建目标目录')
+        expected_target = destination / source.name if directory else destination
+        actual_target = (resolved[-1] / resolved[0].name
+                         if resolved[-1].is_dir() and '--no-target-directory' not in options else resolved[-1])
+        if program != program_expected or len(resolved) != 2 or resolved[0] != source or actual_target != expected_target:
+            raise ValueError('候选命令未保留用户明确指定的操作、源路径或目标路径，任务未执行')
     if program in {'cp', 'mv'}:
         if any(source == resolved[-1] or source in resolved[-1].parents for source in resolved[:-1]):
             raise ValueError('目标不能是源路径或位于源目录内')
@@ -120,6 +134,7 @@ def review_command(argv, cwd):
 def generate_candidate(user_input, cwd, clarifications, backend=None):
     system = '''你是实验黑名单模式的 Linux 助手。只输出 JSON，不输出 Markdown。
 普通文件操作由程序检查并经用户确认，可以生成 Linux 命令。示例：创建目录返回 {"status":"ready","argv":["mkdir","created"],"explanation":"创建目录"}；移动文件到目录返回 {"status":"ready","argv":["mv","sample.txt","archive"],"explanation":"移动文件"}；将 archive/old.txt 重命名为 new.txt 返回 {"status":"ready","argv":["mv","archive/old.txt","archive/new.txt"],"explanation":"原目录重命名"}。字面文本搜索使用 grep -F。
+复制或移动缺少明确目标时必须询问，不能自行选择 archive、backup 等目录。用户回答的目标是必要条件，必须与原始请求一起保留；用户已明确操作时，不要再询问复制还是移动。
 明确只读查询输出 {"status":"ready","argv":["date","-u","+%Y"],"explanation":"说明"}。
 查询当前工作目录时直接使用 pwd -P，不要询问用户具体问题。
 可以使用系统工具，不限于白名单已有的操作；仅单条参数数组，不支持管道、Shell、脚本或网络。

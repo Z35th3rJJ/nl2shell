@@ -37,7 +37,7 @@ from core.bash_queries import uses_bash, prepare_queries, review_commands, query
 from core.error_analysis import assess_failure
 from core.execution_evidence import summarize_execution, execution_description, change_description
 from core.measurements import measure_task, snapshot
-from core.requirements import resolve_request, filtered_copy_request
+from core.requirements import resolve_request, filtered_copy_request, transfer_expression, path_value, UNSPECIFIED_DESTINATIONS
 from core.voice_input import VoiceInputError, confirm_transcript, record_and_transcribe
 
 load_dotenv(ENV_PATH)
@@ -471,6 +471,25 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
             phase = 'policy_review'
             writable = True
             return filtered_copy(filtered)
+        # shortcut: 仅绑定共享解析器能完整识别的单源复制/移动；不推测复杂请求。
+        expression = transfer_expression(user_input.strip().rstrip('。！!'))
+        transfer = dict(expression.groupdict()) if expression is not None else None
+        if transfer is not None:
+            transfer['source'] = path_value(transfer['source'])
+            transfer['target'] = path_value(transfer['target'])
+            if expression['target'][0] not in {'"', "'", '“', '‘'} and transfer['target'] in UNSPECIFIED_DESTINATIONS:
+                question = ('复制' if transfer['verb'] == '复制' else '移动') + '到哪个目录？请输入目标目录路径。'
+                if mode in {BATCH, PREVIEW}:
+                    return finish('needs_clarification', question)
+                print(question)
+                answer = ask('你的回答> ')
+                if not answer or answer == '/cancel':
+                    return finish('cancelled')
+                clarifications.append('问题：'+question+'；用户回答：'+answer)
+                target = transfer_expression('将 '+expression['source']+' '+transfer['verb']+'到 '+answer)
+                if target is None or path_value(target['target']) in UNSPECIFIED_DESTINATIONS:
+                    return finish('needs_clarification', '未取得明确的目标目录路径，任务未执行')
+                transfer['target'], transfer['directory'] = path_value(target['target']), True
         for _ in range(3):
             if remaining_time() <= 0:
                 return finish('blocked','任务时限已用完，未执行')
@@ -496,7 +515,7 @@ def execute_blacklist_request(engine, executor, history, user_input, cwd, mode, 
         if (isinstance(candidate.get('argv'), list) and candidate['argv']
                 and candidate['argv'][0] in ('cp', 'mv') and _explicit_days(request_text)):
             return finish('blocked', '黑名单单条复制或移动命令无法核实时间筛选条件，任务未执行；可退出后使用 --policy whitelist 启动，再提交原请求')
-        argv, writable = review_command(candidate['argv'], cwd)
+        argv, writable = review_command(candidate['argv'], cwd, transfer=transfer)
         if argv != candidate['argv']:
             attempts[-1]['execution_context_binding'] = {'reason':'应用命令安全参数或绑定只读系统元数据',
                 'model_argv':candidate['argv'], 'reviewed_argv':argv}

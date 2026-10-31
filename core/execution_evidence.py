@@ -12,7 +12,11 @@ def summarize_execution(outcomes, repairs=()):
     unknown = any(row.get("execution_state", "started" if row.get("executed") else "unknown") == "unknown"
                   for row in attempts)
     state = "unknown" if unknown else "not_started" if not executed else (
-        "completed" if outcomes and all(row.get("status") in {"verified", "no_matches"} for row in outcomes) else "stopped")
+        "completed" if outcomes and all(
+            not row.get("timed_out") and (
+                row.get("executed") is True and row.get("execution_state") in {"completed", "exited"}
+                or "execution_state" not in row and row.get("status") in {"verified", "no_matches"})
+            for row in outcomes) else "stopped")
     changes = []
     for row in attempts:
         change = row.get("file_change_state")
@@ -30,6 +34,8 @@ def execution_description(evidence):
         return "未执行（未进入执行阶段）"
     if state == "unknown":
         return "已执行部分操作；其余执行状态不确定" if evidence.get("executed") else "无法确定是否已执行"
+    if state == "completed":
+        return "已执行（执行过程已结束，任务结果见验证状态）"
     if evidence.get("executed"):
         return "已执行，请核对各步结果"
     return "未确认执行（旧记录缺少启动证据）"
