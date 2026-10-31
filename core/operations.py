@@ -83,12 +83,14 @@ def _identity(path: Path, deadline=None) -> dict:
             "content": snapshot(path, deadline)}
 
 
-def unique_target(path: Path, reserved: set[Path]) -> Path:
+def unique_target(path: Path, reserved: set[Path], *, allow_rename=True) -> Path:
     suffix = "".join(path.suffixes) if not path.is_dir() else ""
     stem = path.name[:-len(suffix)] if suffix else path.name
     number = 0
     candidate = path
     while candidate.exists() or candidate.is_symlink() or candidate in reserved:
+        if not allow_rename:
+            raise FileExistsError(f"目标已存在或被本计划占用：{path}；用户要求不自动改名，任务未执行")
         number += 1
         candidate = path.with_name(f"{stem}_{number}{suffix}")
     reserved.add(candidate)
@@ -149,7 +151,7 @@ def trash_entries(root: Path) -> list[dict]:
 
 
 @observe("preparation", "safety_rejected")
-def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excluded_paths=()) -> dict:
+def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excluded_paths=(), allow_auto_rename=True) -> dict:
     """只读预览：冻结文件清单和实际目标名称。"""
     root = Path(cwd).expanduser().resolve(strict=True)
     if not root.is_dir():
@@ -200,7 +202,7 @@ def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excl
             destination = workspace_path(root, p["path"])
             if destination == root:
                 raise ValueError("不能替换工作目录本身")
-            destination = unique_target(destination, reserved)
+            destination = unique_target(destination, reserved, allow_rename=allow_auto_rename)
             action["items"] = [{"destination": str(destination.relative_to(root))}]
             actions.append(action)
             continue
@@ -214,7 +216,7 @@ def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excl
             if entry is None:
                 raise ValueError("未找到可恢复的文件")
             source = workspace_path(root, f"{TRASH}/{identifier}/data", internal=True)
-            destination = unique_target(workspace_path(root, entry["original"]), reserved)
+            destination = unique_target(workspace_path(root, entry["original"]), reserved, allow_rename=allow_auto_rename)
             action["items"] = [{"source": str(source.relative_to(root)),
                                 "destination": str(destination.relative_to(root)),
                                 "identity": _identity(source, deadline), "trash_id": identifier}]
@@ -247,16 +249,16 @@ def prepare_plan(plan: TaskPlan, cwd: str, *, now=None, timeout_seconds=60, excl
                 if source.parent.name == group:
                     continue
                 destination = source.parent / group / source.name
-                destination = unique_target(workspace_path(root, str(destination)), reserved)
+                destination = unique_target(workspace_path(root, str(destination)), reserved, allow_rename=allow_auto_rename)
             elif operation == "rename":
-                destination = unique_target(workspace_path(root, p["destination"]), reserved)
+                destination = unique_target(workspace_path(root, p["destination"]), reserved, allow_rename=allow_auto_rename)
             else:
                 directory = workspace_path(root, p["destination"])
                 if directory.exists() and not directory.is_dir():
                     raise ValueError("复制或移动的 destination 必须是目录")
                 relative = (Path(p["destination_name"]) if "destination_name" in p else
                             source.relative_to(base) if p.get("preserve_structure") else Path(source.name))
-                destination = unique_target(workspace_path(root, str(directory / relative)), reserved)
+                destination = unique_target(workspace_path(root, str(directory / relative)), reserved, allow_rename=allow_auto_rename)
             if source == destination or source in destination.parents:
                 raise ValueError("目标不能位于源目录内部")
             item["destination"] = str(destination.relative_to(root))

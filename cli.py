@@ -37,7 +37,7 @@ from core.bash_queries import uses_bash, prepare_queries, review_commands, query
 from core.error_analysis import assess_failure
 from core.execution_evidence import summarize_execution, execution_description, change_description
 from core.measurements import measure_task, snapshot
-from core.requirements import resolve_request, filtered_copy_request, transfer_expression, path_value, UNSPECIFIED_DESTINATIONS
+from core.requirements import resolve_request, filtered_copy_request, transfer_expression, path_value, UNSPECIFIED_DESTINATIONS, forbids_automatic_rename
 from core.voice_input import VoiceInputError, confirm_transcript, record_and_transcribe
 
 load_dotenv(ENV_PATH)
@@ -782,6 +782,8 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
         return finish("blocked", "首版请把命令查询和文件写入分开提交；未执行任何步骤")
     def prepare():
         options = {"timeout_seconds": remaining_time(), "excluded_paths": excluded}
+        if not bash_query:
+            options['allow_auto_rename'] = not forbids_automatic_rename(user_input, clarifications)
         if prepared is not None:
             options["now"] = prepared["now"]
         value = (prepare_queries if bash_query else prepare_plan)(plan, cwd, **options)

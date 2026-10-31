@@ -16,6 +16,13 @@ def path_value(token):
     return token[1:-1] if (token[0], token[-1]) in {('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’")} else token
 
 
+def forbids_automatic_rename(user_input, clarifications=()):
+    texts = [user_input, *(answer.split('用户回答：', 1)[-1] for answer in clarifications)]
+    # 引号内的路径不是操作条件；模型提出的问题也不是用户授权。
+    text = re.sub(r'''"[^"\r\n]*"|'[^'\r\n]*'|“[^”\r\n]*”|‘[^’\r\n]*’''', '', '\n'.join(texts))
+    return re.search(r'(?:不要|不得|禁止|不允许|不许)\s*(?:自动)?\s*(?:改名|重命名)', text) is not None
+
+
 def explicit_days(text: str) -> set[float]:
     days = set()
     digits = {char: number for number, char in enumerate("零一二三四五六七八九")}
