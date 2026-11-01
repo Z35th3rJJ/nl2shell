@@ -581,9 +581,11 @@ def execute_request(engine: Engine, executor: BashExecutor, history: HistoryStor
                     batch_index: int | None = None, assume_yes: bool = False,
                     agent_context: dict | None = None, _policy_routed=False, _policy_answers=(), voice_input=None) -> str:
     if getattr(engine, 'command_policy', 'whitelist') == 'blacklist' and not _policy_routed:
-        return execute_blacklist_request(engine, executor, history, user_input, cwd, mode, input_fn,
-            timeout_seconds=timeout_seconds, assume_yes=assume_yes, batch_id=batch_id, batch_index=batch_index,
-            voice_input=voice_input)
+        local_query = resolve_request(user_input)
+        if local_query is None or not uses_bash(local_query):
+            return execute_blacklist_request(engine, executor, history, user_input, cwd, mode, input_fn,
+                timeout_seconds=timeout_seconds, assume_yes=assume_yes, batch_id=batch_id, batch_index=batch_index,
+                voice_input=voice_input)
     plan = TaskPlan(())
     clarifications = list(_policy_answers)
     intent_attempts = []

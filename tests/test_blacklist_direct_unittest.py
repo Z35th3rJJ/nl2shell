@@ -149,6 +149,21 @@ class DirectBlacklistTests(unittest.TestCase):
                                          '列出当前目录的内容', directory, 'confirm', input_fn=lambda _: 'no')
             self.assertEqual(status, 'cancelled')
 
+    def test_named_directory_creation_stays_in_direct_command_flow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = Engine(ssh_hosts=[])
+            engine.command_policy = 'blacklist'
+            raw = json.dumps({'status': 'ready', 'argv': ['mkdir', 'created'], 'explanation': '创建目录'})
+            with patch('core.command_policy.chat', return_value=raw) as model, \
+                 patch('core.command_policy.sandbox_argv', return_value=['sandbox']), \
+                 patch.object(engine, 'generate_task_plan', side_effect=AssertionError('写入不应进入计划流程')):
+                status = execute_request(engine, Mock(), HistoryStore(Path(directory) / 'history.jsonl'),
+                                         '在当前目录创建一个名为created的目录。', directory,
+                                         'confirm', input_fn=lambda _: 'no')
+            self.assertEqual(status, 'cancelled')
+            model.assert_called_once()
+            self.assertFalse((Path(directory) / 'created').exists())
+
     def test_write_commands_are_direct_and_non_overwriting(self):
         with tempfile.TemporaryDirectory() as directory:
             argv, writable = command_policy.review_command(['cp', 'source.txt', 'backup.txt'], directory)
