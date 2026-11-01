@@ -162,11 +162,27 @@ def _file_query(user_input, clarifications):
 
 
 
+def _create_directory_request(user_input, clarifications):
+    # shortcut: 仅解析当前目录内明确命名的单目录创建；其他条件及回答继续走原流程。
+    if clarifications:
+        return None
+    request = re.fullmatch(
+        r"在当前目录(?:中)?[ \t]*(?:创建|新建)(?:一个)?名为[ \t]*"
+        r"(?P<path>" + PATH_TOKEN + r")[ \t]*的(?:目录|文件夹)[。]?", user_input.strip())
+    if request is None:
+        return None
+    return parse_operation_plan(json.dumps({"status": "ready", "steps": [{
+        "operation": "create_directory", "parameters": {"path": path_value(request["path"])}}]}))
+
+
 def resolve_request(user_input, clarifications=()):
     """完整匹配才返回独立需求；存在未解释的条件或回答时交回模型流程。"""
     directory = _directory_request(user_input, clarifications)
     if directory is not None:
         return directory
+    creation = _create_directory_request(user_input, clarifications)
+    if creation is not None:
+        return creation
     file_query = _file_query(user_input, clarifications)
     if file_query is not None:
         return file_query
